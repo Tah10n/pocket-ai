@@ -85,7 +85,7 @@ export function estimateAuxiliaryCheckBytes(model: ModelMetadata, role: Auxiliar
   return Math.ceil(model.size * 2 + 256 * 1024 * 1024);
 }
 
-async function validateAuxiliaryFile(model: ModelMetadata): Promise<string> {
+export async function validateAuxiliaryFile(model: ModelMetadata): Promise<string> {
   const modelsDir = getModelsDir();
   const uri = modelsDir && model.localPath ? safeJoinModelPath(modelsDir, model.localPath) : null;
   if (!uri || ![LifecycleStatus.DOWNLOADED, LifecycleStatus.ACTIVE].includes(model.lifecycleStatus)) {
@@ -106,6 +106,17 @@ async function validateAuxiliaryFile(model: ModelMetadata): Promise<string> {
     if (error instanceof AuxiliaryModelError) throw error;
     throw new AuxiliaryModelError('integrity_failed');
   }
+}
+
+// The pinned serial native embedding implementation captures its first dimension
+// in a function-static variable. A process restart is required to change it safely.
+let nativePooledEmbeddingDimension: number | undefined;
+export function claimNativePooledEmbeddingDimension(dimensions: number): void {
+  if (!Number.isSafeInteger(dimensions) || dimensions < 1 || dimensions > 4096
+    || (nativePooledEmbeddingDimension !== undefined && nativePooledEmbeddingDimension !== dimensions)) {
+    throw new AuxiliaryModelError('native_failed');
+  }
+  nativePooledEmbeddingDimension = dimensions;
 }
 
 function selectionSnapshot(): string {
@@ -174,6 +185,7 @@ export async function checkAuxiliaryModel(
       },
     }, async (context) => {
       if (options.verifyEmbedding && role === 'embedding') {
+        claimNativePooledEmbeddingDimension(context.model.nEmbd);
         const { embedding } = await context.embedding('Resource compatibility check.');
         if (!embedding.length || embedding.some((value) => !Number.isFinite(value))
           || (context.model.nEmbd > 0 && embedding.length !== context.model.nEmbd)) {

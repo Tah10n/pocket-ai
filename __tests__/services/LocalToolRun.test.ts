@@ -42,6 +42,8 @@ beforeEach(() => {
   jest.clearAllMocks(); mockListeners.clear(); controller = new AbortController(); finish = jest.fn(); progress = []; current = jest.fn(); publish = jest.fn();
   jest.mocked(llmEngineService.beginLocalToolRun).mockReturnValue({ token: Symbol('owner'), signal: controller.signal, finish,
     assertCanPublish: () => undefined,
+    assertSelectionCurrent: () => { if (controller.signal.aborted) throw new Error('cancelled'); },
+    assertRestorationSelectionCurrent: () => undefined,
     assertCurrent: () => { if (controller.signal.aborted) throw new Error('cancelled'); } });
   jest.mocked(llmEngineService.countPromptTokens).mockResolvedValue(100);
   jest.mocked(llmEngineService.getContextSize).mockReturnValue(8192);
@@ -60,7 +62,37 @@ test('real boundary sequence passes assistant call and exact result to next comp
     { role: 'tool', tool_call_id: 'call', content: '{"ok":true,"result":{"value":42}}' },
   ]);
   expect(next.runOwner).toBeDefined();
+  expect(executor.mock.calls[0][1].runOwner).toBe(next.runOwner);
+  expect(executor.mock.calls[0][1].assertSelectionCurrent).toEqual(expect.any(Function));
   expect(progress.at(-1)?.status).toBe('completed'); expect(finish).toHaveBeenCalledTimes(1);
+});
+
+test('internal B/C suspension retains the lease across store updates and restores full checks before native continuation', async () => {
+  const pendingSearch = deferred<string>();
+  let suspended = false;
+  const selection = jest.fn();
+  const lease = jest.mocked(llmEngineService.beginLocalToolRun).mock.results;
+  current.mockImplementation(() => { if (suspended) throw new Error('A suspended'); });
+  executor.mockImplementationOnce(async (_call, execution) => {
+    suspended = true;
+    execution.assertSelectionCurrent!();
+    mockListeners.forEach(listener => listener());
+    expect(execution.signal.aborted).toBe(false);
+    await pendingSearch.promise;
+    suspended = false;
+    return '{"ok":true,"result":{"matches":[]}}';
+  });
+  completion.mockResolvedValueOnce(proposal()).mockResolvedValueOnce(answer());
+  const pending = run({ assertSelectionCurrent: selection });
+  for (let index = 0; index < 10 && !suspended; index++) await Promise.resolve();
+  expect(suspended).toBe(true);
+  expect(finish).not.toHaveBeenCalled();
+  expect(completion).toHaveBeenCalledTimes(1);
+  pendingSearch.resolve('done');
+  await expect(pending).resolves.toMatchObject({ content: '42' });
+  expect(selection).toHaveBeenCalled();
+  expect(finish).toHaveBeenCalledTimes(1);
+  expect(lease[0].value.token).toBe(executor.mock.calls[0][1].runOwner);
 });
 
 test('proposals are never executed before native settlement and no raw streaming callback is exposed', async () => {
@@ -68,6 +100,33 @@ test('proposals are never executed before native settlement and no raw streaming
   const pending = run(); await Promise.resolve(); await Promise.resolve();
   expect(executor).not.toHaveBeenCalled(); expect(completion.mock.calls[0][0].onToken).toBeUndefined();
   native.resolve(proposal()); await pending; expect(executor).toHaveBeenCalledTimes(1);
+});
+
+test('retains the tool lease through Stop drain and forwards stable restoration ownership separately from action checks', async () => {
+  const nativeDrain = deferred<void>();
+  let selected = true;
+  const stable = jest.fn(() => { if (!selected) throw new Error('selection changed'); });
+  executor.mockImplementationOnce(async (_call, context) => {
+    await nativeDrain.promise;
+    context.assertRestorationSelectionCurrent?.();
+    expect(() => context.assertSelectionCurrent?.()).toThrow();
+    return '{"ok":false,"error":{"category":"cancelled"}}';
+  });
+  completion.mockResolvedValueOnce(proposal());
+  const transaction = run({ assertRestorationSelectionCurrent: stable });
+  const rejected = expect(transaction).rejects.toMatchObject({ reason: 'cancelled' });
+  for (let attempt = 0; attempt < 100 && !executor.mock.calls.length; attempt++) await Promise.resolve();
+  expect(executor).toHaveBeenCalledTimes(1);
+  controller.abort();
+  expect(finish).not.toHaveBeenCalled();
+  const execution = executor.mock.calls[0][1];
+  execution.assertRestorationSelectionCurrent?.();
+  selected = false;
+  expect(() => execution.assertRestorationSelectionCurrent?.()).toThrow('selection changed');
+  selected = true;
+  nativeDrain.resolve(); await rejected;
+  expect(finish).toHaveBeenCalledTimes(1);
+  expect(completion).toHaveBeenCalledTimes(1);
 });
 
 test.each(['interrupted', 'truncated', 'context_full', 'stopped_limit'] as const)('rejects %s proposals without execution', async flag => {

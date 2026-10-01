@@ -1,5 +1,7 @@
 import type { ChatAttachment } from '../types/attachments';
 import { AppError, getPrivacySafeErrorLogDetails, toAppError } from './AppError';
+import { documentIndexStore } from './DocumentIndexStore';
+import { clearDocumentRetrievalStatus } from './DocumentRetrievalStatus';
 import type {
   ChatDocumentSessionContextSource,
   ChatDocumentTextProcessorResult,
@@ -186,7 +188,7 @@ class DocumentSessionContextCache {
   }
 
   /** Free enough globally bounded slots before native preparation starts. */
-  public async reserveForIncomingDocuments(count: number): Promise<void> {
+  public async reserveForIncomingDocuments(count: number, protectedDocuments?: { threadId: string; attachmentIds: ReadonlySet<string> }): Promise<void> {
     const normalizedCount = Math.min(
       DOCUMENT_SESSION_CONTEXT_MAX_ENTRIES,
       Number.isSafeInteger(count) && count > 0 ? count : 0,
@@ -197,7 +199,7 @@ class DocumentSessionContextCache {
       this.retryPendingReleasesInBackground();
     }
     while (this.getRetainedResourceCount() + normalizedCount > DOCUMENT_SESSION_CONTEXT_MAX_ENTRIES) {
-      const oldest = this.removeLeastRecentlyUsedEntry();
+      const oldest = this.removeLeastRecentlyUsedEntry(protectedDocuments);
       if (!oldest) {
         break;
       }
@@ -291,6 +293,8 @@ class DocumentSessionContextCache {
       Array.from(threadIds, (threadId) => threadId.trim()).filter(Boolean),
     );
     normalizedThreadIds.forEach((threadId) => this.invalidateThread(threadId));
+    normalizedThreadIds.forEach((threadId) => documentIndexStore.retain(threadId, new Set()));
+    normalizedThreadIds.forEach((threadId) => clearDocumentRetrievalStatus(threadId));
     const removed = [...this.entries.values()].filter((entry) => (
       normalizedThreadIds.has(entry.threadId)
     ));
@@ -308,6 +312,7 @@ class DocumentSessionContextCache {
       return;
     }
     this.invalidateThread(normalizedThreadId);
+    documentIndexStore.retain(normalizedThreadId, attachmentIds);
     const removed = [...this.entries.values()].filter((entry) => (
       entry.threadId === normalizedThreadId && !attachmentIds.has(entry.attachment.id)
     ));
@@ -495,9 +500,10 @@ class DocumentSessionContextCache {
     }
   }
 
-  private removeLeastRecentlyUsedEntry(): CachedDocumentContext | undefined {
+  private removeLeastRecentlyUsedEntry(protectedDocuments?: { threadId: string; attachmentIds: ReadonlySet<string> }): CachedDocumentContext | undefined {
     let oldest: CachedDocumentContext | undefined;
     this.entries.forEach((entry) => {
+      if (protectedDocuments?.threadId === entry.threadId && protectedDocuments.attachmentIds.has(entry.attachment.id)) return;
       if (
         !oldest
         || entry.lastAccessSequence < oldest.lastAccessSequence

@@ -6,6 +6,7 @@ import { createStorage } from '../../src/services/storage';
 import DeviceInfo from 'react-native-device-info';
 import { initLlama, releaseAllLlama } from 'llama.rn';
 import { updateSettings } from '../../src/services/SettingsStore';
+import { EngineStatus } from '../../src/types/models';
 
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
     registry: {
@@ -203,6 +204,66 @@ describe('LLMEngineService Stability', () => {
         expect(releaseAllLlama).not.toHaveBeenCalled();
         (llmEngineService as any).activeCompletionPromise = null;
         await llmEngineService.unload();
+    });
+
+    it('restores through the actual internal load path without deadlock inside a genuine local-tool lease', async () => {
+        await llmEngineService.load(mockModel.id);
+        const previous = llmEngineService.getEffectiveLoadParameters();
+        const identity = llmEngineService.getPromptContextIdentity();
+        const lease = llmEngineService.beginLocalToolRun(mockModel.id);
+        (updateSettings as jest.Mock).mockClear();
+        (initLlama as jest.Mock).mockClear().mockImplementation(async options => ({
+            ...createMockContext(options), release: jest.fn().mockResolvedValue(undefined),
+        }));
+        try {
+            const result = await llmEngineService.runWithAuxiliarySequence({ runOwner: lease.token, isCurrent: () => true }, async sequence => {
+                await sequence.withContext(auxiliaryRequest(), async () => 1);
+                return sequence.withContext({ ...auxiliaryRequest(), modelId: 'repo/reranker',
+                    initParams: { ...auxiliaryRequest().initParams, pooling_type: 'rank' } }, async () => 2);
+            });
+            expect(result).toBe(2);
+            expect(initLlama).toHaveBeenCalledTimes(3);
+            expect(llmEngineService.getEffectiveLoadParameters()).toEqual(previous);
+            expect(llmEngineService.getPromptContextIdentity()).not.toBe(identity);
+            expect(updateSettings).not.toHaveBeenCalled();
+            lease.assertCurrent();
+            await expect(llmEngineService.countPromptTokens({ messages: [], runOwner: lease.token })).resolves.toBe(0);
+            await expect(llmEngineService.chatCompletion({ messages: [], runOwner: lease.token })).resolves.toEqual({ text: '' });
+        } finally { lease.finish(); await llmEngineService.unload(); }
+    });
+
+    it('safely restores the actual loaded A profile after a cancelled tool-owned native callback drains', async () => {
+        await llmEngineService.load(mockModel.id);
+        const previous = llmEngineService.getEffectiveLoadParameters();
+        const lease = llmEngineService.beginLocalToolRun(mockModel.id);
+        const abort = new AbortController();
+        let resolveDrain!: () => void;
+        const drain = new Promise<void>(resolve => { resolveDrain = resolve; });
+        let started = false;
+        const receipt = jest.fn();
+        (initLlama as jest.Mock).mockClear().mockImplementation(async options => ({
+            ...createMockContext(options), release: jest.fn().mockResolvedValue(undefined),
+        }));
+        try {
+            const transaction = llmEngineService.runWithAuxiliarySequence({ runOwner: lease.token, signal: abort.signal,
+                isCurrent: () => !abort.signal.aborted, isSelectionCurrent: () => true, onRestored: receipt },
+            sequence => sequence.withContext({ ...auxiliaryRequest(), signal: abort.signal }, async () => {
+                started = true; await drain; return 1;
+            }));
+            const rejected = expect(transaction).rejects.toMatchObject({ code: 'engine_busy' });
+            for (let attempt = 0; attempt < 200 && !started; attempt++) await Promise.resolve();
+            expect(started).toBe(true);
+            abort.abort(); await llmEngineService.stopCompletion();
+            expect(initLlama).toHaveBeenCalledTimes(1);
+            resolveDrain(); await rejected;
+            expect(initLlama).toHaveBeenCalledTimes(2);
+            expect(llmEngineService.getEffectiveLoadParameters()).toEqual(previous);
+            expect(llmEngineService.getState()).toMatchObject({ status: EngineStatus.READY, activeModelId: mockModel.id });
+            expect(receipt).not.toHaveBeenCalled();
+            expect(() => lease.assertCurrent()).toThrow();
+            lease.finish();
+            await expect(llmEngineService.chatCompletion({ messages: [] })).resolves.toEqual({ text: '' });
+        } finally { resolveDrain(); lease.finish(); await llmEngineService.unload(); }
     });
 
     it('reserves the shared lifecycle during pending init and releases late cancelled B before another init', async () => {

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 const { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, sanitizeLocalToolsEvidence, waitForLocalToolsEvidence,
   sanitizeLocalToolsRecoveryEvidence, waitForLocalToolsRecoveryEvidence } = require("./lib/local-tools-evidence");
+const { sanitizeDocumentRetrievalEvidence, waitForDocumentRetrievalEvidence } = require("./lib/document-retrieval-evidence");
+const { sanitizeDocumentIndexPublicationEvidence, waitForDocumentIndexPublicationEvidence } = require("./lib/document-index-publication-evidence");
 
 const fs = require("fs");
 const path = require("path");
@@ -110,6 +112,8 @@ const SCENARIO_PACK_SCENARIOS = {
   "branch-regeneration": BRANCH_REGENERATION_SCENARIOS,
   documents: DOCUMENT_SCENARIOS,
   inference: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools"],
+  retrieval: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval"],
+  "retrieval-publication": ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-index-publication"],
   "document-benchmark": DOCUMENT_BENCHMARK_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
@@ -3235,6 +3239,94 @@ function buildScenarios() {
       },
     },
     {
+      id: "runtime-document-retrieval",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: "Measure the fixed RU/EN retrieval corpus, native LoRA/tool handoff, Stop, cold index reuse and deletion after the Stage 1–4 baseline.",
+      run: async (ctx) => {
+        const adbPath = resolveAdbPath();
+        const evidencePath = path.join(artifactsRoot, "document-retrieval-evidence.json");
+        const coldPath = path.join(artifactsRoot, "document-retrieval-cold-evidence.json");
+        const deletedPath = path.join(artifactsRoot, "document-retrieval-deleted-evidence.json");
+        fs.rmSync(evidencePath, { force: true }); fs.rmSync(coldPath, { force: true }); fs.rmSync(deletedPath, { force: true });
+        try {
+          await goToHome(ctx);
+          await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+          const action = await waitForResourceId(adbPath, ctx.serial, "chat-qa-run-document-retrieval", { timeoutMs: 180000, visibleOnly: true });
+          if (!action.bounds) throw new Error("Document retrieval QA action is not tappable.");
+          tapBounds(adbPath, ctx.serial, action.bounds);
+          const readEvidence = (outputPath) => () => {
+            const node = findResourceIdInSnapshot(createUiSnapshot(adbPath, ctx.serial), "chat-qa-document-retrieval-evidence");
+            if (!node) return null;
+            let observed; try { observed = JSON.parse(node.contentDesc || node.text); } catch { return null; }
+            const safe = sanitizeDocumentRetrievalEvidence(observed);
+            fs.writeFileSync(outputPath, `${JSON.stringify(safe, null, 2)}\n`);
+            return safe;
+          };
+          const details = await waitForDocumentRetrievalEvidence(readEvidence(evidencePath), { readyForColdReopen: true });
+          ctx.captureScreenshot("document-retrieval-warm.png");
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx);
+          await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+          const coldAction = await waitForResourceId(adbPath, ctx.serial, "chat-qa-check-document-retrieval-cold", { timeoutMs: 180000, visibleOnly: true });
+          if (!coldAction.bounds) throw new Error("Cold document retrieval action is not tappable.");
+          tapBounds(adbPath, ctx.serial, coldAction.bounds);
+          const cold = await waitForDocumentRetrievalEvidence(readEvidence(coldPath), { readyForDeletedReopen: true, timeoutMs: 1200000 });
+          if (JSON.stringify(cold.cases) !== JSON.stringify(details.cases)) throw new Error("Cold reopen changed the recorded frozen-corpus rankings.");
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx);
+          await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+          const deletedAction = await waitForResourceId(adbPath, ctx.serial, "chat-qa-check-document-retrieval-cold", { timeoutMs: 180000, visibleOnly: true });
+          if (!deletedAction.bounds) throw new Error("Deleted document retrieval action is not tappable.");
+          tapBounds(adbPath, ctx.serial, deletedAction.bounds);
+          const deleted = await waitForDocumentRetrievalEvidence(readEvidence(deletedPath), { timeoutMs: 1200000 });
+          if (JSON.stringify(deleted.cases) !== JSON.stringify(details.cases)) throw new Error("Deletion reopen changed the recorded frozen-corpus rankings.");
+          return { details: { ...deleted, coldReopen: true, deletionColdReopen: true } };
+        } catch (error) {
+          forceStopScenarioApp(adbPath, ctx.serial);
+          throw error;
+        }
+      },
+    },
+    {
+      id: "runtime-document-index-publication",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: "Send a fifth Hybrid document through the actual hook at global cache quota, then verify Stop and cold history/index retention.",
+      run: async (ctx) => {
+        const adbPath = resolveAdbPath();
+        const evidencePath = path.join(artifactsRoot, "document-index-publication-evidence.json");
+        const coldPath = path.join(artifactsRoot, "document-index-publication-cold-evidence.json");
+        fs.rmSync(evidencePath, { force: true }); fs.rmSync(coldPath, { force: true });
+        const readEvidence = outputPath => () => {
+          const node = findResourceIdInSnapshot(createUiSnapshot(adbPath, ctx.serial), "chat-qa-document-index-publication-evidence");
+          if (!node) return null;
+          let observed; try { observed = JSON.parse(node.contentDesc || node.text); } catch { return null; }
+          const safe = sanitizeDocumentIndexPublicationEvidence(observed);
+          fs.writeFileSync(outputPath, `${JSON.stringify(safe, null, 2)}\n`); return safe;
+        };
+        try {
+          await goToHome(ctx);
+          await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+          const action = await waitForResourceId(adbPath, ctx.serial, "chat-qa-run-document-index-publication", { timeoutMs: 180000, visibleOnly: true });
+          if (!action.bounds) throw new Error("Document index publication action is not tappable.");
+          tapBounds(adbPath, ctx.serial, action.bounds);
+          const details = await waitForDocumentIndexPublicationEvidence(readEvidence(evidencePath), { readyForColdReopen: true });
+          ctx.captureScreenshot("document-index-publication-warm.png");
+          forceStopScenarioApp(adbPath, ctx.serial); await relaunchScenarioApp(ctx);
+          await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+          const coldAction = await waitForResourceId(adbPath, ctx.serial, "chat-qa-check-document-index-publication-cold", { timeoutMs: 180000, visibleOnly: true });
+          if (!coldAction.bounds) throw new Error("Cold publication action is not tappable.");
+          tapBounds(adbPath, ctx.serial, coldAction.bounds);
+          const cold = await waitForDocumentIndexPublicationEvidence(readEvidence(coldPath));
+          ctx.captureScreenshot("document-index-publication-cold.png");
+          return { details: { ...cold, warmStepCount: details.steps.length, processPhases: 2, coldReopens: 1 } };
+        } catch (error) { forceStopScenarioApp(adbPath, ctx.serial); throw error; }
+      },
+    },
+    {
       id: "native-glass-theme-matrix",
       tier: "critical",
       requiresCurrentHeadProvenance: true,
@@ -5620,7 +5712,7 @@ async function waitForInferenceSmokeEvidence(readEvidence, options = {}) {
 function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenance, env = process.env) {
   if (options.apkVariant) {
     env.ANDROID_SMOKE_APK_VARIANT = options.apkVariant;
-  } else if (["documents", "native", "inference"].includes(options.pack) && !env.ANDROID_SMOKE_APK_VARIANT) {
+  } else if (["documents", "native", "inference", "retrieval"].includes(options.pack) && !env.ANDROID_SMOKE_APK_VARIANT) {
     // Current-head packs are self-contained and always exercise
     // the embedded release bundle plus the universal native-library contract.
     env.ANDROID_SMOKE_APK_VARIANT = "release";
@@ -5635,7 +5727,7 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
       );
     }
     env.EXPO_PUBLIC_ANDROID_QA = "1";
-    if (["documents", "inference"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools"].includes(options.scenario)) {
+    if (["documents", "inference", "retrieval", "retrieval-publication"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval", "runtime-document-index-publication"].includes(options.scenario)) {
       env.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS = "1";
     }
     env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
@@ -6923,6 +7015,8 @@ function selectScenarios(scenarios, options) {
       "runtime-model-resources",
       "runtime-stage3",
       "runtime-local-tools",
+      "runtime-document-retrieval",
+      "runtime-document-index-publication",
       "native-glass-theme-matrix",
       "foreground-service-notification-states",
     ]);

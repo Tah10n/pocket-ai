@@ -4,6 +4,7 @@ import RNFS from 'react-native-fs';
 
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../types/models';
 import { fileUriToNativePath, safeJoinModelPath } from '../utils/safeFilePath';
+import { getCompanionBindingIdentity, getManagedCompanionArtifacts } from '../utils/modelArtifacts';
 import { getModelsDir, setupFileSystem } from './FileSystemSetup';
 import { registry } from './LocalStorageRegistry';
 import { updateSettings } from './SettingsStore';
@@ -111,7 +112,21 @@ export async function provisionAndroidQaDocumentModel(): Promise<boolean> {
     await FileSystem.moveAsync({ from: partialUri, to: modelUri });
   }
 
-  registry.updateModel(createVerifiedModel(sizeBytes, Date.now()));
+  const verifiedModel = createVerifiedModel(sizeBytes, Date.now());
+  const existing = registry.getModel(verifiedModel.id);
+  const bindingIdentity = getCompanionBindingIdentity(verifiedModel);
+  // Cold QA restarts reverify the base without discarding its installed companions.
+  // Fresh base metadata stays authoritative; only exact base ownership survives.
+  if (existing
+    && getCompanionBindingIdentity(existing) === bindingIdentity
+    && existing.localPath === verifiedModel.localPath
+    && existing.downloadIntegrity?.kind === 'sha256'
+    && existing.downloadIntegrity.sha256 === verifiedModel.downloadIntegrity?.sha256
+    && existing.downloadIntegrity.sizeBytes === sizeBytes) {
+    verifiedModel.artifacts = getManagedCompanionArtifacts(existing)
+      .filter(artifact => artifact.boundToModelIdentity === bindingIdentity);
+  }
+  registry.updateModel(verifiedModel);
   updateSettings({ activeModelId: ANDROID_QA_DOCUMENT_MODEL_ID });
   return true;
 }

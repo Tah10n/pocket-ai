@@ -11,6 +11,7 @@ import { sanitizeAdvancedGenerationParameters, type AdvancedGenerationParameters
 import type { StructuredOutputValidation } from '../utils/structuredOutput';
 import { sanitizeLoraProfileAdapters, type LoraProfileAdapter } from '../utils/advancedLoadProfile';
 import type { ModelLoadParameters } from '../services/SettingsStore';
+import { sanitizeDocumentRetrievalSettings, type DocumentRetrievalSettings } from './documentRetrieval';
 
 export type ChatMessageRole = 'system' | 'user' | 'assistant';
 export type ChatMessageState = 'complete' | 'streaming' | 'stopped' | 'error';
@@ -78,6 +79,7 @@ export interface ChatThread {
   paramsSnapshot: GenerationParamsSnapshot;
   loraSnapshot?: LoraProfileAdapter[];
   toolSettings?: LocalToolSettings;
+  documentRetrieval?: DocumentRetrievalSettings;
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;
@@ -380,6 +382,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
     activeModelId,
     loraSnapshot: sanitizeLoraProfileAdapters(thread.loraSnapshot),
     ...(thread.toolSettings ? { toolSettings: sanitizeLocalToolSettings(thread.toolSettings) } : {}),
+    ...(thread.documentRetrieval ? { documentRetrieval: sanitizeDocumentRetrievalSettings(thread.documentRetrieval) } : {}),
     presetSnapshot: thread.presetSnapshot ?? {
       ...DEFAULT_PRESET_SNAPSHOT,
       id: thread.presetId ?? null,

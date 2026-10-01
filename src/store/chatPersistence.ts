@@ -23,6 +23,7 @@ import {
   normalizePersistedChatAttachment,
   MAX_CHAT_ATTACHMENTS_BY_KIND,
   toLegacyChatImageAttachment,
+  toGenericChatAttachmentFromLegacyImageAttachment,
 } from '../utils/chatAttachments';
 import type { AppStorageFacade } from './storage';
 import { ADVANCED_GENERATION_KEYS, sanitizeAdvancedGenerationParameters } from '../utils/generationControls';
@@ -633,6 +634,14 @@ function sanitizePersistedChatAttachmentValue(
     return genericAttachment.source === 'derived_processor'
       ? genericAttachment
       : toLegacyChatImageAttachment(genericAttachment) ?? genericAttachment;
+  }
+
+  // Document images materialized by the chat hook still use the legacy image shape.
+  // Normalize their linkage before the existing message-owner reconciliation.
+  if (value && typeof value === 'object' && !Array.isArray(value)
+    && !('kind' in value) && (value as Partial<ChatImageAttachment>).source === 'derived_processor') {
+    const derived = toGenericChatAttachmentFromLegacyImageAttachment(value as ChatImageAttachment);
+    return derived ? normalizePersistedChatAttachment(derived, { threadId, messageId }) : null;
   }
 
   return sanitizePersistedChatImageAttachment(value, threadId, messageId);

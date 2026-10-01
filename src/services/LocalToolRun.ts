@@ -39,12 +39,16 @@ let processLocalToolRunStarts = 0;
 export const getLocalToolRunStartCount = () => processLocalToolRunStarts;
 
 /** One bounded extension of the existing engine, with no alternative native context. */
-export async function runLocalToolCompletion({ options, threadId, runId, settings, assertCurrent, assertCanPublish, onProgress, onNativeStep, onNativeStage }: {
+export async function runLocalToolCompletion({ options, threadId, runId, settings, assertCurrent, assertSelectionCurrent, assertRestorationSelectionCurrent, assertCanPublish, onProgress, onNativeStep, onNativeStage }: {
   options: LlmChatCompletionOptions;
   threadId: string;
   runId: string;
   settings: LocalToolSettings;
   assertCurrent: () => void;
+  /** The same generation/chat/permissions, independent of the suspended native context. */
+  assertSelectionCurrent?: () => void;
+  /** Stable chat/permission ownership for restoring A after Stop, never action admission. */
+  assertRestorationSelectionCurrent?: () => void;
   /** Identity/permissions ownership check that deliberately excludes user Stop. */
   assertCanPublish?: () => void;
   onProgress: (run: LocalToolRun) => void;
@@ -77,11 +81,16 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
   const messages: LlmChatMessage[] = [...options.messages];
   const snapshot = () => onProgress({ ...run, settings: { ...captured, allowedTools: [...captured.allowedTools] },
     rounds: run.rounds.map(round => ({ ...round, calls: round.calls.map(call => ({ ...call })) })) });
-  const check = () => {
+  const checkSelection = () => {
     if (timedOut || Date.now() - startedAt >= LOCAL_TOOL_LIMITS.runMilliseconds) throw new LocalToolRunError('timeout');
     if (controller.signal.aborted) throw new LocalToolRunError('cancelled');
-    lease.assertCurrent();
-    assertCurrent();
+    lease.assertSelectionCurrent();
+    (assertSelectionCurrent ?? assertCurrent)();
+  };
+  const check = () => { checkSelection(); lease.assertCurrent(); assertCurrent(); };
+  const checkRestorationSelection = () => {
+    lease.assertRestorationSelectionCurrent();
+    (assertRestorationSelectionCurrent ?? assertSelectionCurrent ?? assertCurrent)();
   };
   const checkPublication = () => {
     lease.assertCanPublish();
@@ -104,7 +113,9 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
   };
   const timer = setTimeout(stopForTimeout, LOCAL_TOOL_LIMITS.runMilliseconds);
   const unsubscribe = useChatStore.subscribe(() => {
-    try { check(); } catch {
+    // B/C can temporarily suspend A. Keep checking the same chat, permissions,
+    // cancellation and lease; native dispatch still uses the full epoch check.
+    try { checkSelection(); } catch {
       controller.abort();
       void llmEngineService.interruptActiveCompletion().catch(() => undefined);
     }
@@ -248,7 +259,9 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
           // Await the actual operation even on timeout. Cancellation cannot free
           // ownership while an AnyDoc read/release is still in flight.
           output = await executeLocalTool(call, { runId, threadId, settings: captured,
-            signal: controller.signal, assertCurrent: check });
+            signal: controller.signal, runOwner: lease.token,
+            assertCurrent: check, assertSelectionCurrent: checkSelection,
+            assertRestorationSelectionCurrent: checkRestorationSelection });
         } finally { clearTimeout(toolTimer); }
         if (toolTimedOut) throw new LocalToolRunError('timeout');
         check();

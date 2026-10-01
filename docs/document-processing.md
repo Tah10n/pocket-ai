@@ -1,11 +1,56 @@
 # Local Document Processing
 
-Last updated: 2026-08-10
+Last updated: 2026-10-01
 
 Pocket AI processes supported document attachments entirely on the device. Structured
 documents are copied into app-owned storage, parsed by the local `PocketAnyDoc` Expo
 module, and reduced to question-relevant chunks before inference. Document bytes,
 extracted text, and embedded images are not uploaded to a parsing service.
+
+## Document search modes and preparation
+
+Open **Document search → Search options** in the current chat. **Keywords** preserves the existing Unicode lexical and overview selection. **Hybrid** combines that ranking with local embeddings. **Local reranking** optionally applies a separate local cross-encoder to either mode. Select auxiliary embedding/reranker models in Models; they do not replace the chat model. New and legacy chats use Keywords with reranking off until explicitly changed.
+
+The panel lists up to four ready document attachments committed to the current chat. Each shows **Not prepared**, **Needs preparation again**, **Preparing**, **Cancelling**, **Ready for hybrid search**, **Preparation failed** or **Preparation cancelled**. Choose **Prepare** after selecting Hybrid and a compatible embedding profile. Progress counts structural chunks; readiness appears only after all vectors and the private manifest commit. Cancel prevents subsequent work and shows Cancelling while waiting for actual native/source settlement before freeing ownership. Opening the panel and restoring history do not automatically prepare documents. Explicit expansion may read native AnyDoc version metadata through `getVersion`; it does not parse documents or load an auxiliary model. Unknown or changed extractor metadata cannot establish a compatible ready index. Ordinary document requests can prepare missing compatible indexes under their document-preparation owner. Tools use prepared indexes and never hide cold indexing inside their short action deadline.
+
+The last search displays its actual mode, any fallback reason and whether an index could not be saved. An unsaved-cache notice is separate from the actual search mode: completed Hybrid retrieval remains Hybrid, including any completed local reranking. This status is process-local and is not reconstructed as a historical result after restart. A selected Hybrid mode does not itself prove that embeddings ran. A compatible ready manifest proves preparation identity, not ranking quality.
+
+## Shared bounded retrieval
+
+`DocumentRetrievalService` serves new attachment turns, follow-ups, editing/regeneration and local document-search tools. Hybrid preparation enumerates the full retained structural source in bounded pages, independently of the initial lexical shortlist. Keywords with optional reranking uses the existing bounded lexical candidates. Native AnyDoc keeps opaque handles; direct-text sources retain bounded structural chunks. No unbounded conversion is copied across the bridge.
+
+Embedding inputs include the selected model's exact document/query prefixes before token counting. The admitted E5 artifact uses mean pooling, L2 normalization and 384 dimensions. Its complete input cap is 511 tokens, including automatic specials. Long prose is split at tokenizer-checked Unicode/prose boundaries while retaining the original structural ID and real source range. Atomic code, table, list and sheet chunks that exceed the character or model-token limit fail safely. Vectors must have the expected dimension, finite float32 values and a valid L2 norm.
+
+Cosine selection keeps the strongest subchunk for each original structural chunk. Reciprocal rank fusion combines lexical and semantic positions, rather than adding incompatible scores. The optional BGE cross-encoder reranks a maximum of eight candidates, preserving each native original index. Its exact pair template is detokenized and retokenized natively before the call; the pinned bridge's extra BOS/EOS boundaries are included. Invalid indexes/scores and the native failure sentinel reject the ranking. The existing fair document allocation, real locators, untrusted-source boundaries, derived asset ownership and exact chat-token budget still apply to selected chunks. Missing page/slide/sheet locators are omitted.
+
+## Private index identity and limits
+
+Indexes are bounded derived private data in encrypted storage. They contain vectors, bounded embedding subchunks covering the complete structural source, and existing structural metadata; they are separate from persisted chat messages and process-local parser handles. Their compatibility fingerprint includes original document SHA-256, extraction processor/version/canonical format and native parser commit, source byte/chunk counts, chunking/preprocessing version, exact embedding SHA-256/revision/bytes, tokenizer and special-token policy, query/document prefixes, pooling, normalization, dimensions, vector format and runtime/source-patch identity.
+
+| Derived retrieval resource | Maximum |
+| --- | ---: |
+| Documents in one retrieval; globally committed index manifests | 4 |
+| Structural chunks / embedding subchunks per document | 2,048 / 2,048 |
+| One structural chunk / one embedding subchunk | 64,000 / 4,000 UTF-16 units |
+| Serialized shard data per index / aggregate publication peak | 8 MiB / 32 MiB |
+| Storage shard | 8 rows / 512 KiB |
+| Fused candidates / cross-encoder candidates | 16 / 8 |
+
+These ceilings are combined: a document may reach the byte limit before its row limit. The four-manifest limit is global across chats. The aggregate serialized-shard limit includes the old readable generation during replacement; encrypted-storage and manifest overhead are additional. Actual tokenizer/model limits and available memory can lower admission further. Memory fit reserves the selected model, work buffers, retained source/index buffers and restoration headroom; unknown fit is rejected. Only exact verified source profiles are admitted. See [model sources and limits](validation/llama-rn-stage5/model-sources.md).
+
+Small shards yield between writes/reads. A final manifest makes a complete generation readable; cancelled or failed publication leaves no ready partial index. Reconciliation removes unpublished generations after restart. Once chat history has hydrated successfully, startup also removes ready indexes without a committed ready document owner, recovering deletion or attachment-drop crash windows. This check reads scope/manifest metadata without parsing files or starting inference. If chat ownership has not hydrated, startup does not infer that all owners disappeared. Draft attachment indexes publish only after real message ownership commits. On a compatible restart, currently owned attachment bytes are revalidated and vectors are reused without recomputing document embeddings. Source/extractor/model/prefix/runtime changes require preparation again. Opaque handles are never restored from disk.
+
+When a draft index is published after its attachment has committed, a cache quota rejection or an ordinary encrypted-cache write failure can leave that index unsaved. If document ownership and source identity are still valid and any suspended chat model has been safely restored, the current response continues with the already-selected Hybrid context. It does not repeat embeddings or reranking solely because saving the index failed. Successfully published sibling indexes remain available; failed publication creates no ready partial index and does not undo the committed attachment or its bounded chat context. Later preparation can retry the unsaved index.
+
+## Retrieval privacy, lifecycle and fallback
+
+The original app-owned file remains governed by chat attachment ownership. Committed document removal, branch pruning, thread deletion and history clearing remove corresponding derived indexes; private-storage blocking invalidates active publication and drains temporary resources. A successful confirmed private-data reset removes encrypted derived data. Empty stopped/error branch replacement preserves the previous owners until an actual terminal commit. Parser sources and derived assets follow their existing explicit release/retry lifecycle.
+
+With a loaded idle chat model A, one serial engine owner releases A, runs B for Hybrid and optionally C for reranking, then verifies and restores A's actual effective load profile, ordered LoRA bindings/scales and companion identity. Preparation can also run without a loaded A. Keywords with reranking uses C without an embedding model or index, restoring A when it was suspended. Empty/overview search queries preserve the existing overview selection without B or C. Stop blocks later phases and waits for the actual callback, including tokenization, source enumeration and the complete in-flight rerank batch; rc.3 has no operation-wide embedding/rerank cancellation API. After confirmed drain, Stop can restore an unchanged A selection without continuing the cancelled request. Changed chat/model/document/private-storage ownership discards late work. Uncertain native resources remain quarantined until actual drain or process restart.
+
+Missing/unverified models, missing/stale indexes, retrieval input and resource limits and invalid vector/ranking results can use Keywords only when ownership is still valid and native work either did not start or has confirmed safe drain and a verified restoration receipt. Exact-A restoration is required when a loaded A was suspended. The actual lexical mode and reason are visible. Cancellation, ownership loss, unknown drain and failed restoration cannot silently fall back or continue a response. A restoration error requires recovery before another request.
+
+A quota or ordinary cache-write failure after successful Hybrid selection is handled as the unsaved-cache outcome described above. Stop, changed ownership or source bytes, changed chat/model/permission selection, private-storage blocking/reset, uncertain drain and failed restoration still prevent stale answer continuation. Private-storage unavailability is not an ordinary cache-write failure.
 
 ## Supported formats
 
@@ -52,14 +97,14 @@ The conversion flow is:
    to four handles / 16 MiB and never silently invalidates a returned lease; new
    preparation fails closed until capacity is released. Only metadata, an outline,
    asset descriptors, and selected chunks cross the native bridge.
-5. Native Unicode lexical ranking selects whole structural chunks for a topical
-   question. An overview request uses the outline plus deterministic beginning, middle,
-   and end coverage.
+5. Keywords uses Unicode lexical ranking for topical questions. Hybrid and optional
+   reranking use the shared retrieval pipeline above. Overview requests retain the
+   outline plus deterministic beginning, middle and end coverage.
 6. `DocumentContextService` distributes a fair budget across all successful documents,
    adds source boundaries and an untrusted-data instruction, and uses the active model's
    exact tokenizer to remove whole chunks until the prompt fits.
-7. After a successful attachment turn, the complete parsed source remains available only
-   through a process-local session cache. A follow-up question runs a new relevance
+7. After a successful attachment turn, the parsed-source session remains process-local.
+   Separately prepared encrypted embedding indexes follow the identity and limits above. A follow-up question runs a new relevance
    selection against that source without reopening or reparsing the attachment. Native
    formats retain the opaque handle; direct-text formats retain their bounded structural
    chunks in JavaScript memory. The cache is global-LRU bounded to four documents;
@@ -203,8 +248,10 @@ but not full paths, source text, prompts, or image bytes.
 The original app-owned attachment remains governed by the existing chat attachment
 lifecycle. Session caches, native handles, and derived asset files are temporary. Startup
 reconciliation removes unreferenced generated files. After an app restart or LRU eviction,
-ordinary follow-ups use the bounded encrypted context from the original attachment turn;
-editing/regenerating that attachment turn can safely reparse the original app-owned file.
+Keywords follow-ups retain the bounded encrypted context fallback from the original
+attachment turn. Hybrid can reopen currently owned files and reuse compatible prepared
+vectors without recomputing document embeddings. Editing/regenerating the attachment
+turn can safely reparse the original app-owned file.
 
 ## Known limitations
 
@@ -214,8 +261,23 @@ editing/regenerating that attachment turn can safely reparse the original app-ow
 - Embedded media other than validated raster images remains represented by a placeholder.
 - Context selection can be incomplete when a document is larger than the active model's
   available prompt budget; the message metadata and prompt both mark this condition.
-- Session retrieval lasts only for the current app process and may end earlier after memory
-  pressure or LRU eviction. It does not create a durable full-document index.
+- Parsed-source session handles remain process-local and can end on eviction or memory
+  pressure. Prepared encrypted embedding indexes survive restart only while source,
+  extractor, model and runtime identities remain compatible. Readiness does not guarantee
+  recall or answer correctness.
+- The admitted artifacts and native corpus cover English/Russian. Other models, languages,
+  formats and backends require their own evidence. The pinned BGE native pair layout
+  differs from its upstream Hugging Face layout; measured results determine its effect.
+
+## Retrieval verification
+
+The [Stage 5 Android CPU protocol](llama-rn-013-stage5-acceptance.md) passed the fixed
+English/Russian corpus, actual LoRA and Hybrid-only tool continuation, preparation/search
+Stop, cold reuse and persistent deletion on the recorded source/APK. Tool+C within the
+ten-second tool budget remains unverified. Separate ordinary EN/RU control captures and
+measured touch bounds record explicit capture and answer-quality limits. Earlier parser and all-format checks retain their own scope.
+
+The later [index-publication correction](llama-rn-013-stage5-index-publication-fix.md) has separate source/APK evidence for four global indexes plus a fifth accepted Hybrid document turn, explicit unsaved-cache status, Stop and cold retention.
 
 ## Updating anydoc
 

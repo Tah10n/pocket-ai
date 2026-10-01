@@ -13,10 +13,12 @@ This folder contains the public maintainer-facing documentation for Pocket AI.
 - [`local-tools.md`](./local-tools.md): per-chat local functions, permissions, bounded execution, history, output formats and current verification limits
 - [`model-parameters.md`](./model-parameters.md): how generation/load parameters are stored, snapshotted, and mapped to runtime engine settings
 - [`llama-rn-capabilities.md`](./llama-rn-capabilities.md): pinned runtime API inventory, application integration boundaries, compatibility exceptions, and staged verification criteria
+- [`llama-rn-013-stage5-acceptance.md`](./llama-rn-013-stage5-acceptance.md): exact-source Android CPU corpus, hybrid/rerank, LoRA/tool, Stop and cold reuse/deletion proof; ordinary UI verification is recorded separately
+- [`llama-rn-013-stage5-index-publication-fix.md`](./llama-rn-013-stage5-index-publication-fix.md): explicit unsaved-index outcomes after accepted document turns, real four-index quota regression, fresh CPU APK and cold-retention evidence
 - [`llama-rn-013-stage4-acceptance.md`](./llama-rn-013-stage4-acceptance.md): Android CPU local-tool execution, document search, structured final output, Stop and cold-reopen evidence
 - [`llama-rn-013-stage3-acceptance.md`](./llama-rn-013-stage3-acceptance.md): Android CPU structured-output and LoRA evidence, reproducible identities, earlier failures, and untested boundaries
 - [`multimodal-attachments.md`](./multimodal-attachments.md): runtime media payload contracts, local attachment lifecycle boundaries, and privacy constraints
-- [`document-processing.md`](./document-processing.md): offline document formats, native parser boundary, session-only retrieval, resource limits, and update procedure
+- [`document-processing.md`](./document-processing.md): offline document formats, native parser boundary, Keywords/Hybrid search, optional local reranking, encrypted derived indexes, session-only parser handles, resource limits, and update procedure
 - [`document-qa-benchmarks.md`](./document-qa-benchmarks.md): all-format synthetic Android scenarios, session-reuse proof, sentinel-only evidence, and reproducible host/device benchmark reports
 - [`runtime-performance.md`](./runtime-performance.md): bounded chat, document-session ownership, model-load, catalog, storage-scan, telemetry, and regression contracts
 - [`runtime-hardening-device-validation.md`](./runtime-hardening-device-validation.md): physical-device model/backend matrix, fail-closed prompt state-cache checks, future A/B protocol, and honest evidence template

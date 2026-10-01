@@ -1,3 +1,6 @@
+import type { ChatThread } from '../../src/types/chat';
+import { documentIndexStore } from '../../src/services/DocumentIndexStore';
+
 jest.mock('i18next', () => {
   const mockI18nInstance = {
     language: 'en',
@@ -37,7 +40,10 @@ jest.mock('../../src/services/storage', () => ({
   initializePrivateStorageEncryption: jest.fn(),
 }));
 
+jest.mock('../../src/services/DocumentIndexStore', () => ({ documentIndexStore: { reconcile: jest.fn() } }));
+
 jest.mock('expo-file-system/legacy', () => ({
+  documentDirectory: 'file:///documents/',
   getInfoAsync: jest.fn().mockResolvedValue({ exists: true }),
 }));
 
@@ -115,13 +121,16 @@ jest.mock('../../src/services/DocumentSessionContextCache', () => ({
 
 const mockMergeImportedThreads = jest.fn();
 const mockPruneExpiredThreads = jest.fn();
+let mockHydratedThreads: Record<string, ChatThread> = {};
 
 jest.mock('../../src/store/chatStore', () => ({
   useChatStore: {
     persist: {
       rehydrate: jest.fn().mockResolvedValue(undefined),
+      hasHydrated: jest.fn().mockReturnValue(true),
     },
     getState: () => ({
+      threads: mockHydratedThreads,
       mergeImportedThreads: mockMergeImportedThreads,
       pruneExpiredThreads: mockPruneExpiredThreads,
     }),
@@ -174,6 +183,7 @@ function buildPrivateStorageHealth(
 describe('AppBootstrap', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockHydratedThreads = {};
     mockHydrateModelCatalogCache.mockReset();
     mockHydrateModelCatalogCache.mockImplementation(() => undefined);
     const readyStorageHealth = buildPrivateStorageHealth();
@@ -185,6 +195,7 @@ describe('AppBootstrap', () => {
       updatedAt: 1_700_000_000_000,
     });
     (useChatStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
+    (useChatStore.persist.hasHydrated as jest.Mock).mockReturnValue(true);
     (useDownloadStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
     (useModelsStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
     mockMergeImportedThreads.mockReset();
@@ -898,6 +909,43 @@ describe('AppBootstrap', () => {
       'expired-thread-1',
       'expired-thread-2',
     ]);
+  });
+
+  it('reconciles ready indexes against only committed owned document scopes after hydration and retention', async () => {
+    (getSettings as jest.Mock).mockReturnValue({ language: 'en', activePresetId: null, activeModelId: null,
+      temperature: 0.7, topP: 0.9, maxTokens: 2048, theme: 'system', chatRetentionDays: 90 });
+    const ready = { id: 'kept-document', kind: 'document', state: 'ready', threadId: 'kept-chat', messageId: 'message',
+      pathCategory: 'chat_attachment', localUri: 'file:///documents/chat-attachments/kept.txt' };
+    mockHydratedThreads = {
+      'kept-chat': { id: 'kept-chat', messages: [{ id: 'message', attachments: [ready,
+        { ...ready, id: 'foreign', threadId: 'another-chat' },
+        { ...ready, id: 'wrong-message', messageId: 'another-message' },
+        { ...ready, id: 'pending', state: 'error' },
+        { ...ready, id: 'invalid-uri', localUri: 'file:///foreign/document.txt' },
+      ] }] } as unknown as ChatThread,
+      'expired-chat': { id: 'expired-chat', messages: [] } as unknown as ChatThread,
+    };
+    mockPruneExpiredThreads.mockImplementation(() => {
+      delete mockHydratedThreads['expired-chat'];
+      return { count: 1, threadIds: ['expired-chat'] };
+    });
+    await expect(bootstrapAppBackground()).resolves.toEqual({ outcome: 'success' });
+    expect(documentIndexStore.reconcile).toHaveBeenCalledWith(new Map([['kept-chat', new Set(['kept-document'])]]));
+    expect(mockPruneExpiredThreads.mock.invocationCallOrder[0]).toBeLessThan(
+      jest.mocked(documentIndexStore.reconcile).mock.invocationCallOrder[0],
+    );
+  });
+
+  it('preserves ready indexes when soft chat hydration failure leaves durable ownership unknown', async () => {
+    (getSettings as jest.Mock).mockReturnValue({ language: 'en', activePresetId: null, activeModelId: null,
+      temperature: 0.7, topP: 0.9, maxTokens: 2048, theme: 'system', chatRetentionDays: null });
+    (useChatStore.persist.rehydrate as jest.Mock).mockRejectedValueOnce(new Error('chat hydration failed'));
+    (useChatStore.persist.hasHydrated as jest.Mock).mockReturnValue(false);
+    await expect(bootstrapApp()).resolves.toBeUndefined();
+    // The empty runtime map after failure does not establish that durable owners
+    // were deleted. Only unfinished/corrupt records may be reconciled in this case.
+    expect(mockHydratedThreads).toEqual({});
+    expect(documentIndexStore.reconcile).toHaveBeenCalledWith(undefined);
   });
 
   it('runs critical bootstrap before background bootstrap', async () => {

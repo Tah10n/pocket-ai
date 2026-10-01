@@ -1,0 +1,168 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "stage5-fixed-retrieval-ru-en-v1",
+  "metadataVerifiedOn": "2026-09-30",
+  "labelsFixedBeforeNativeResults": true,
+  "runtimeVersion": "0.13.0-rc.3",
+  "runtimeSourceCommit": "6cf681be300bc115e6580dd120e7e7606906dacd",
+  "nativeAcceptance": {
+    "status": "not_run",
+    "reason": "This file fixes model identities and relevance labels before native execution. Native evidence and measured rankings are recorded separately."
+  },
+  "models": [
+    {
+      "role": "embedding",
+      "repository": "TwinSunsLLC/multilingual-e5-small-gguf",
+      "revision": "b6cac9615d4ecce28d7f22539b7322d695fc2886",
+      "filename": "multilingual-e5-small-q8_0.gguf",
+      "sizeBytes": 132439008,
+      "sha256": "e011debc1208e31bf7b6aebee2d9fc8bd2ca11694a77ed66ac9d0c9d0a877c93",
+      "downloadUrl": "https://huggingface.co/TwinSunsLLC/multilingual-e5-small-gguf/resolve/b6cac9615d4ecce28d7f22539b7322d695fc2886/multilingual-e5-small-q8_0.gguf?download=true",
+      "license": "MIT",
+      "declaredBaseModel": "intfloat/multilingual-e5-small",
+      "upstreamRevision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+      "testedLanguageScope": ["en", "ru"],
+      "profile": {
+        "dimensions": 384,
+        "pooling": "mean",
+        "embd_normalize": 2,
+        "contextTokens": 512,
+        "modelContextTokens": 511,
+        "maxInputTokensIncludingSpecials": 511,
+        "queryPrefix": "query: ",
+        "documentPrefix": "passage: ",
+        "ggufTokenizer": "t5",
+        "automaticSpecialTokens": 2
+      },
+      "ggufMetadata": {
+        "architecture": "bert",
+        "embeddingLength": 384,
+        "blockCount": 12,
+        "contextLength": 511,
+        "poolingType": 1,
+        "bosId": 0,
+        "eosId": 2,
+        "separatorId": 2,
+        "addBos": true,
+        "addEos": true,
+        "addSeparator": true,
+        "metadataAndTensorDescriptorsBytesRead": 6832458,
+        "tensorWeightsRead": false
+      }
+    },
+    {
+      "role": "reranker",
+      "repository": "gpustack/bge-reranker-v2-m3-GGUF",
+      "revision": "3093af03b1a635e67b084b1d8c03c5f5e020fd05",
+      "filename": "bge-reranker-v2-m3-Q4_K_M.gguf",
+      "sizeBytes": 438376864,
+      "sha256": "e186a244ed455b4ab66ec64339ce7427a6ae13f5c0b5e544de96e50f0f8b3673",
+      "downloadUrl": "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/3093af03b1a635e67b084b1d8c03c5f5e020fd05/bge-reranker-v2-m3-Q4_K_M.gguf?download=true",
+      "license": "Apache-2.0",
+      "declaredBaseModel": "BAAI/bge-reranker-v2-m3",
+      "upstreamRevision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+      "testedLanguageScope": ["en", "ru"],
+      "profile": {
+        "pooling": "rank",
+        "embedding": true,
+        "scoreMode": "raw_native_rank",
+        "rerankParams": {},
+        "contextTokens": 512,
+        "maxInputTokensIncludingSpecials": 511,
+        "queryPrefix": "",
+        "documentPrefix": "",
+        "ggufTokenizer": "t5",
+        "actualNativeTokenTemplate": "BOS + query + EOS + document + EOS; loadPrompt adds another BOS and EOS",
+        "specialTokenOverhead": 5
+      },
+      "ggufMetadata": {
+        "architecture": "bert",
+        "hiddenEmbeddingLength": 1024,
+        "blockCount": 24,
+        "contextLength": 8192,
+        "bosId": 0,
+        "eosId": 2,
+        "separatorId": 2,
+        "addBos": true,
+        "addEos": true,
+        "addSeparatorFieldPresent": false,
+        "nativeAddSeparatorDefault": false,
+        "classifierTensors": [
+          { "name": "cls.weight", "dimensions": [1024, 1024] },
+          { "name": "cls.bias", "dimensions": [1024] },
+          { "name": "cls.output.weight", "dimensions": [1024] },
+          { "name": "cls.output.bias", "dimensions": [1] }
+        ],
+        "metadataAndTensorDescriptorsBytesRead": 6842951,
+        "tensorWeightsRead": false
+      }
+    }
+  ],
+  "corpus": {
+    "format": "Each document is a direct-text fixture. Paragraph IDs identify real paragraph boundaries; extractors supply their own structural IDs and locators.",
+    "documents": [
+      {
+        "id": "cedar-workshop",
+        "filename": "cedar-workshop.txt",
+        "language": "en",
+        "paragraphs": [
+          { "id": "cedar-signup", "text": "Cedar workshop registrations close Wednesday at 18:00. Walk-in access is unavailable." },
+          { "id": "cedar-access", "text": "The woodworking studio provides adjustable stools and seated workstations for participants with limited mobility." },
+          { "id": "cedar-equipment", "text": "Safety glasses are supplied at the entrance. Participants bring their own aprons." }
+        ]
+      },
+      {
+        "id": "lab-guide",
+        "filename": "lab-guide.txt",
+        "language": "en",
+        "paragraphs": [
+          { "id": "lab-204", "text": "LAB-204 is the air sensor calibration task. Calibration must be repeated after replacing the filter." },
+          { "id": "lab-240", "text": "LAB-240 is the lighting inspection task. Inspect the desk lamps after moving furniture." },
+          { "id": "lab-near-miss", "text": "Library membership registrations close Wednesday at noon. The reading room has ordinary chairs, but it does not host woodworking classes." }
+        ]
+      },
+      {
+        "id": "railway-rules",
+        "filename": "railway-rules.txt",
+        "language": "ru",
+        "paragraphs": [
+          { "id": "rail-refund", "text": "Билет на вечерний поезд можно вернуть до полудня дня отправления. Позднее возврат не принимается." },
+          { "id": "rail-access", "text": "На станции пассажиры с ограниченной подвижностью могут заказать сопровождение до вагона. Заявку принимают за сутки до отправления." },
+          { "id": "rail-near-miss", "text": "Столовая вокзала начинает продавать обеды в полдень. Заказы на ужин принимаются до вечера; правила возврата железнодорожных билетов здесь не устанавливаются." }
+        ]
+      },
+      {
+        "id": "equipment-rules",
+        "filename": "equipment-rules.txt",
+        "language": "ru",
+        "paragraphs": [
+          { "id": "equipment-317", "text": "МОД-317 — процедура проверки датчика воды. После замены батареи выполняют повторное измерение." },
+          { "id": "equipment-371", "text": "МОД-371 — процедура проверки датчика движения. После установки кронштейна проверяют угол обзора." },
+          { "id": "equipment-sharing", "text": "Инструменты из общего шкафа выдаются сотрудникам по записи. Перед завершением смены оборудование возвращают ответственному хранителю." }
+        ]
+      }
+    ],
+    "queries": [
+      { "id": "en-paraphrase-signup", "language": "en", "kind": "paraphrase", "query": "How late can I sign up for the woodworking class?", "relevantParagraphIds": ["cedar-signup"] },
+      { "id": "en-paraphrase-access", "language": "en", "kind": "paraphrase", "query": "Can someone who cannot stand for long take part in the practical class?", "relevantParagraphIds": ["cedar-access"] },
+      { "id": "en-exact-code", "language": "en", "kind": "exact_identifier", "query": "When should LAB-204 be repeated?", "relevantParagraphIds": ["lab-204"] },
+      { "id": "en-near-code", "language": "en", "kind": "exact_identifier_near_miss", "query": "What does LAB-240 inspect?", "relevantParagraphIds": ["lab-240"] },
+      { "id": "en-equipment", "language": "en", "kind": "paraphrase", "query": "Which protective item must a participant supply personally?", "relevantParagraphIds": ["cedar-equipment"] },
+      { "id": "ru-paraphrase-refund", "language": "ru", "kind": "paraphrase", "query": "В какой срок пассажир вправе отказаться от вечерней железнодорожной поездки?", "relevantParagraphIds": ["rail-refund"] },
+      { "id": "ru-paraphrase-access", "language": "ru", "kind": "paraphrase", "query": "Как заранее получить помощь, если трудно самостоятельно добраться до своего места в поезде?", "relevantParagraphIds": ["rail-access"] },
+      { "id": "ru-exact-code", "language": "ru", "kind": "exact_identifier", "query": "Что выполняют по процедуре МОД-317?", "relevantParagraphIds": ["equipment-317"] },
+      { "id": "ru-near-code", "language": "ru", "kind": "exact_identifier_near_miss", "query": "Что проверяют по процедуре МОД-371?", "relevantParagraphIds": ["equipment-371"] },
+      { "id": "ru-sharing", "language": "ru", "kind": "paraphrase", "query": "Кому следует сдать взятое рабочее оснащение после окончания дежурства?", "relevantParagraphIds": ["equipment-sharing"] },
+      { "id": "en-multidocument-access", "language": "en", "kind": "multidocument_cross_language", "query": "Which arrangements assist people who have difficulty moving around?", "relevantParagraphIds": ["cedar-access", "rail-access"] },
+      { "id": "ru-multidocument-sensors", "language": "ru", "kind": "multidocument_cross_language", "query": "Какие процедуры требуют новой проверки после замены детали измерительного прибора?", "relevantParagraphIds": ["lab-204", "equipment-317"] }
+    ],
+    "evaluation": {
+      "modes": ["lexical", "hybrid", "hybrid_rerank"],
+      "metrics": ["relevant_paragraph_rank", "recall_at_3"],
+      "countRelevanceBy": "original document ID and structural paragraph ID, deduplicating embedding subchunks",
+      "record": ["selected_document_id", "original_chunk_id", "embedding_subchunk_id", "locator", "rank", "actual_mode", "fallback_reason"],
+      "measuredResults": null,
+      "policy": "Run every fixed query for every available mode. Record failures and unavailable modes; do not select queries after viewing rankings. Chat answer correctness is separate from retrieval evidence."
+    }
+  }
+}

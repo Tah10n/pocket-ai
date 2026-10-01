@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "identity": "identity.json",
+  "publicationStatus": "passed",
+  "baselineStatuses": [
+    {
+      "id": "runtime-inference-lifecycle",
+      "status": "passed"
+    },
+    {
+      "id": "runtime-model-resources",
+      "status": "passed"
+    },
+    {
+      "id": "runtime-stage3",
+      "status": "passed"
+    },
+    {
+      "id": "runtime-local-tools",
+      "status": "passed"
+    }
+  ],
+  "allBaselinesPassed": true
+}

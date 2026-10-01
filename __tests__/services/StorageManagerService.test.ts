@@ -19,6 +19,10 @@ jest.mock('../../src/store/storage', () => ({
   },
 }));
 
+jest.mock('../../src/services/DocumentIndexStore', () => ({
+  documentIndexStore: { clear: jest.fn() },
+}));
+
 jest.mock('../../src/services/FileSystemSetup', () => ({
   getAppCacheRootDir: () => 'test-cache/',
   getCacheDir: () => 'test-cache/',
@@ -97,6 +101,7 @@ import { offloadModel } from '../../src/services/StorageManagerService';
 import { resetAppSettings } from '../../src/services/StorageManagerService';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { stopAllGenerationWork } from '../../src/services/ChatGenerationService';
+import { documentIndexStore } from '../../src/services/DocumentIndexStore';
 import { notificationService } from '../../src/services/NotificationService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { modelCatalogService } from '../../src/services/ModelCatalogService';
@@ -230,6 +235,10 @@ describe('StorageManagerService', () => {
     expect(stopAllGenerationWork).toHaveBeenCalledTimes(1);
     expect(mockClearAllThreads).toHaveBeenCalledTimes(1);
     expect(clearLegacyChatHistory).toHaveBeenCalledTimes(1);
+    expect(documentIndexStore.clear).toHaveBeenCalledTimes(1);
+    expect(mockClearAllThreads.mock.invocationCallOrder[0]).toBeLessThan(
+      jest.mocked(documentIndexStore.clear).mock.invocationCallOrder[0],
+    );
     expect(notificationService.dismissInferenceNotificationForThread).toHaveBeenCalledTimes(2);
     expect(notificationService.dismissInferenceNotificationForThread).toHaveBeenCalledWith('first');
     expect(notificationService.dismissInferenceNotificationForThread).toHaveBeenCalledWith('second');
@@ -260,6 +269,7 @@ describe('StorageManagerService', () => {
 
     expect(mockClearAllThreads).toHaveBeenCalledTimes(2);
     expect(clearLegacyChatHistory).not.toHaveBeenCalled();
+    expect(documentIndexStore.clear).not.toHaveBeenCalled();
     expect(mockThreads).toHaveProperty('first');
     expect(performanceMonitor.snapshot().events).toEqual(expect.arrayContaining([
       expect.objectContaining({

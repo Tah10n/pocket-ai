@@ -4209,6 +4209,18 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
+  it('keeps retrieval explicit, isolated and after the unchanged Stage 1–4 native baseline', () => {
+    const baseline = ['runtime-inference-lifecycle', 'runtime-model-resources', 'runtime-stage3', 'runtime-local-tools'];
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'inference'])).map(item => item.id)).toEqual(baseline);
+    const selected = selectScenarios(scenarios, parseCliOptions(['--pack', 'retrieval']));
+    expect(selected.map(item => item.id)).toEqual([...baseline, 'runtime-document-retrieval']);
+    expect(selected.every(item => item.requiresCurrentHeadProvenance && item.requiresIsolatedQaInstall)).toBe(true);
+    expect(() => validateScenarioExecutionOptions(selected, { isolatedQaInstall: false })).toThrow(ScenarioPreconditionFailureError);
+    const env = {};
+    expect(configureScenarioBuildEnvironment({ pack: 'retrieval' }, true, env)).toEqual({ androidQaEvidence: true, apkVariant: 'release' });
+    expect(env).toMatchObject({ ANDROID_SMOKE_APK_VARIANT: 'release', EXPO_PUBLIC_ANDROID_QA: '1', EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1' });
+  });
+
   it('requires state-mutating native scenarios to use the isolated QA package', () => {
     const nativeScenarios = selectScenarios(scenarios, parseCliOptions(['--pack', 'native']));
 
@@ -4569,6 +4581,13 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
+  it('runs publication recovery after native baselines without repeating the ranking matrix', () => {
+    const selected = selectScenarios(scenarios, parseCliOptions(['--pack', 'retrieval-publication']));
+    expect(selected.map(scenario => scenario.id)).toEqual(['runtime-inference-lifecycle', 'runtime-model-resources',
+      'runtime-stage3', 'runtime-local-tools', 'runtime-document-index-publication']);
+    expect(selected.every(scenario => scenario.requiresCurrentHeadProvenance && scenario.requiresIsolatedQaInstall)).toBe(true);
+  });
+
   it('keeps direct scenario selection working for optional checks', () => {
     expect(selectScenarios(scenarios, parseCliOptions(['--scenario', 'memory-fit-download-warning'])).map((scenario) => scenario.id)).toEqual([
       'memory-fit-download-warning',
@@ -4627,6 +4646,8 @@ describe('android-scenarios pack selection', () => {
         'runtime-model-resources',
         'runtime-stage3',
         'runtime-local-tools',
+        'runtime-document-retrieval',
+        'runtime-document-index-publication',
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));

@@ -5,6 +5,8 @@ import { notificationService } from './NotificationService';
 import { performanceMonitor } from './PerformanceMonitor';
 import { clearLegacyChatHistory } from './SettingsStore';
 import { documentSessionContextCache } from './DocumentSessionContextCache';
+import { documentIndexStore } from './DocumentIndexStore';
+import { clearDocumentRetrievalStatus } from './DocumentRetrievalStatus';
 
 function getChatHistoryPostcondition() {
   const state = useChatStore.getState();
@@ -60,6 +62,8 @@ export async function clearChatHistory(): Promise<number> {
     }
 
     await documentSessionContextCache.clearAll();
+    documentIndexStore.clear();
+    clearDocumentRetrievalStatus();
     const removedLegacyEntries = clearLegacyChatHistory();
     removedThreadIds.forEach((threadId) => {
       void notificationService.dismissInferenceNotificationForThread(threadId);

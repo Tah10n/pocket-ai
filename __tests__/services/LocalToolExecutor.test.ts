@@ -65,6 +65,54 @@ describe('LocalToolExecutor', () => {
     expect(JSON.parse(response)).toMatchObject({ ok: false, error: { category: 'not_allowed' } });
     expect(response).not.toContain('private excerpt');
   });
+  it('forwards only the genuine owner and checks selection during B/C then full ownership after restore', async () => {
+    let suspended = false;
+    const owner = Symbol('genuine-owner');
+    const fullCheck = jest.fn(() => { if (suspended) throw new Error('A suspended'); });
+    const selectionCheck = jest.fn();
+    mockSearch.mockImplementation(async (_query, _ids, searchContext) => {
+      expect(searchContext.runOwner).toBe(owner);
+      suspended = true;
+      searchContext.assertCurrent();
+      searchContext.assertSelectionCurrent();
+      expect(fullCheck).toHaveBeenCalledTimes(1);
+      suspended = false;
+      return { untrusted: true, matches: [] };
+    });
+    const response = await executeLocalTool(call('search_attached_documents', '{"query":"paraphrase"}'),
+      { ...context(), runOwner: owner, assertCurrent: fullCheck, assertSelectionCurrent: selectionCheck });
+    expect(JSON.parse(response)).toHaveProperty('ok', true);
+    expect(fullCheck).toHaveBeenCalledTimes(2);
+    expect(selectionCheck).toHaveBeenCalledTimes(2);
+  });
+  it('rechecks live tool permission while A is suspended', async () => {
+    const owned = call('search_attached_documents', '{"query":"word"}');
+    mockSearch.mockImplementation(async (_query, _ids, searchContext) => {
+      mockState.threads.thread.toolSettings = { ...settings, enabled: false };
+      searchContext.assertSelectionCurrent();
+      return { matches: ['private excerpt'] };
+    });
+    const response = await executeLocalTool(owned, { ...context(), assertSelectionCurrent: () => undefined });
+    expect(JSON.parse(response)).toMatchObject({ ok: false, error: { category: 'not_allowed' } });
+    expect(response).not.toContain('private excerpt');
+  });
+  it('allows stable restoration ownership after Stop while still refusing the cancelled tool result', async () => {
+    const abort = new AbortController();
+    const stable = jest.fn();
+    mockSearch.mockImplementation(async (_query, _ids, searchContext) => {
+      abort.abort();
+      searchContext.assertRestorationSelectionCurrent();
+      expect(() => searchContext.assertSelectionCurrent()).toThrow();
+      mockState.threads.thread.toolSettings = { ...settings, enabled: false };
+      expect(() => searchContext.assertRestorationSelectionCurrent()).toThrow();
+      return { matches: ['not published after Stop'] };
+    });
+    const response = await executeLocalTool(call('search_attached_documents', '{"query":"word"}'),
+      { ...context(), signal: abort.signal, assertRestorationSelectionCurrent: stable });
+    expect(stable).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(response)).toMatchObject({ ok: false, error: { category: 'cancelled' } });
+    expect(response).not.toContain('not published');
+  });
   it('requires a running matching proposal in the active chat and run', async () => {
     const args = call('calculate', '{"expression":"2"}');
     mockState.activeThreadId = 'other';

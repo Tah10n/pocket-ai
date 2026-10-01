@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-01T02:48:25.645Z",
+  "sourceCommit": "bff98b9c8e239b87167359c0359670ce0fb288e1",
+  "appTreeSha": "1816478ae629aa07c2d8cd27645b7a5097b9e1fc",
+  "runtimeVersion": "0.13.0-rc.3",
+  "runtimeSourceCommit": "6cf681be300bc115e6580dd120e7e7606906dacd",
+  "backend": "cpu",
+  "nativeAcceptance": "passed",
+  "packageName": "com.github.tah10n.pocketai.qa",
+  "variant": "release",
+  "abi": "x86_64",
+  "versionCode": "22",
+  "versionName": "1.6.3",
+  "packagedAbis": [
+    "x86_64"
+  ],
+  "apkBytes": 82255506,
+  "apkSha256": "22e491805c5520ab61b3a2ff078d4c7d969295aab175106df4da122d16e97ece",
+  "installedApkSha256": "22e491805c5520ab61b3a2ff078d4c7d969295aab175106df4da122d16e97ece",
+  "provenanceDigest": "9df1a118aca28afb003e9f53530a33817b7be18c492ef8e49931879b210c7490",
+  "guardedSourcePatchSha256": "5093423b44e29c70a6757c61a59bfa986af7f7909b8e63c9333359bda1253cf4",
+  "embeddedRetrievalFixtureSha256": "b71691fda62cfbcb3e7114eaaa95654c52bbba46595b05e65fa570a524429eb7",
+  "models": [
+    {
+      "role": "embedding",
+      "repository": "TwinSunsLLC/multilingual-e5-small-gguf",
+      "revision": "b6cac9615d4ecce28d7f22539b7322d695fc2886",
+      "filename": "multilingual-e5-small-q8_0.gguf",
+      "sizeBytes": 132439008,
+      "sha256": "e011debc1208e31bf7b6aebee2d9fc8bd2ca11694a77ed66ac9d0c9d0a877c93",
+      "license": "MIT"
+    },
+    {
+      "role": "reranker",
+      "repository": "gpustack/bge-reranker-v2-m3-GGUF",
+      "revision": "3093af03b1a635e67b084b1d8c03c5f5e020fd05",
+      "filename": "bge-reranker-v2-m3-Q4_K_M.gguf",
+      "sizeBytes": 438376864,
+      "sha256": "e186a244ed455b4ab66ec64339ce7427a6ae13f5c0b5e544de96e50f0f8b3673",
+      "license": "Apache-2.0"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "runtime-inference-lifecycle",
+      "status": "passed",
+      "durationMs": 28175
+    },
+    {
+      "id": "runtime-model-resources",
+      "status": "passed",
+      "durationMs": 68090
+    },
+    {
+      "id": "runtime-stage3",
+      "status": "passed",
+      "durationMs": 77235
+    },
+    {
+      "id": "runtime-local-tools",
+      "status": "passed",
+      "durationMs": 193065
+    },
+    {
+      "id": "runtime-document-retrieval",
+      "status": "passed",
+      "durationMs": 345847
+    }
+  ],
+  "stage5ProcessPhases": 3,
+  "stage5ColdReopens": 2,
+  "stage5StepCount": 14,
+  "notRun": [
+    "ios",
+    "physical_gpu_npu",
+    "other_models_languages",
+    "native_parser_format_retrieval_matrix"
+  ],
+  "inputArtifactHashes": [
+    {
+      "name": "latest-report.json",
+      "sha256": "7af4802b23a687345e5e28af12296800a372809097d693ace87c46ac6301ff68"
+    },
+    {
+      "name": "build-provenance-latest.json",
+      "sha256": "7c9f9f5ffff379d38042a47598061d07a56ee65acb8aa8c690ea1960a2a3a376"
+    },
+    {
+      "name": "inference-lifecycle-evidence.json",
+      "sha256": "021c0df1c52f92cfe27dc2144a4d3c853a25f85f3687f55faf7912a222da6c88"
+    },
+    {
+      "name": "model-resources-evidence.json",
+      "sha256": "7204fdeb1446cf97acc7cc7916597bef83724995f5dd68d8dd2bed2e645332cf"
+    },
+    {
+      "name": "stage3-evidence.json",
+      "sha256": "dee4caa8ab98058e89095a7f471b8ea0e0037645ce11761c22b6924dca3472fc"
+    },
+    {
+      "name": "local-tools-evidence.json",
+      "sha256": "65766e5ef4c85ee74fb487ecd2d5cbc6c81427b71f1a715980094f7d2ecb0d2d"
+    },
+    {
+      "name": "local-tools-cold-reopen.json",
+      "sha256": "6fe374aa02fb3d90e607b7ed4bce788965a91b97043a967fd2c02118ec320a57"
+    },
+    {
+      "name": "local-tools-recovery-evidence.json",
+      "sha256": "992dd22b1356373454fbb894d261aa4eef6e87669eca35bd75976d1c4ebb733f"
+    },
+    {
+      "name": "document-retrieval-evidence.json",
+      "sha256": "0ba0f1ab2d52396b7f6b5701ad1898ecd28cebaf61f1d8b8f7293792cd211c05"
+    },
+    {
+      "name": "document-retrieval-cold-evidence.json",
+      "sha256": "454ddcb18243fba847ab999ca5cf16c56957bb611a71060c8b2d7d92d00742e7"
+    },
+    {
+      "name": "document-retrieval-deleted-evidence.json",
+      "sha256": "e37f327c07fddfd7479a481a26059bc5727b20372dbadc28db7e06a11dd44f4a"
+    }
+  ]
+}

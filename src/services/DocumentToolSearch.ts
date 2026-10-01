@@ -1,16 +1,17 @@
-import * as FileSystem from 'expo-file-system/legacy';
 import { useChatStore } from '../store/chatStore';
-import type { ChatAttachment } from '../types/attachments';
-import { normalizeChatAttachmentLocalUri } from '../utils/chatImageAttachments';
-import { chatAttachmentProcessorRegistry, type ChatDocumentSessionContextSource } from './ChatAttachmentProcessorRegistry';
-import { documentSessionContextCache } from './DocumentSessionContextCache';
+import { loadOwnedRetrievalDocuments } from './DocumentRetrievalDocuments';
+import { retrieveDocumentCandidates } from './DocumentRetrievalService';
+import { getOwnedRetrievalDocuments, retrievalDocumentOwnershipIdentity } from './DocumentRetrievalOwnership';
 import { LOCAL_TOOL_LIMITS, utf8Bytes } from './LocalToolLimits';
+import { DocumentRetrievalError, sanitizeDocumentRetrievalSettings, type DocumentRetrievalIssue } from '../types/documentRetrieval';
 
-type DocumentAttachment = Extract<ChatAttachment, { kind: 'document' }>;
 export interface DocumentToolSearchContext {
   threadId: string;
   signal: AbortSignal;
   assertCurrent: () => void;
+  runOwner?: symbol;
+  assertSelectionCurrent?: () => void;
+  assertRestorationSelectionCurrent?: () => void;
 }
 
 export class DocumentToolSearchError extends Error {
@@ -20,100 +21,79 @@ export class DocumentToolSearchError extends Error {
   }
 }
 
-function documents(threadId: string): DocumentAttachment[] {
-  const thread = useChatStore.getState().getThread(threadId);
-  return thread?.messages.flatMap(message => (message.attachments ?? []).filter(
-    (attachment): attachment is DocumentAttachment => 'kind' in attachment && attachment.kind === 'document'
-      && attachment.threadId === threadId && attachment.messageId === message.id
-      && attachment.state === 'ready' && attachment.pathCategory === 'chat_attachment'
-      && normalizeChatAttachmentLocalUri(attachment.localUri) !== null,
-  )) ?? [];
-}
-
-function identity(document: DocumentAttachment): string {
-  return JSON.stringify([document.id, document.localUri, document.messageId, document.document.contentSha256,
-    document.document.contentHash, document.sizeBytes, document.createdAt]);
-}
-
 export async function searchAttachedDocuments(
   query: string, documentIds: readonly string[] | undefined, context: DocumentToolSearchContext,
-): Promise<{ untrusted: true; matches: object[]; truncated: boolean }> {
-  const initial = documents(context.threadId);
-  const requested = documentIds ? new Set(documentIds) : undefined;
-  if (requested && [...requested].some(id => !initial.some(document => document.id === id))) {
-    throw new DocumentToolSearchError('document_unavailable');
-  }
-  const available = initial.filter(document => !requested || requested.has(document.id));
-  const selected = available.slice(0, LOCAL_TOOL_LIMITS.documentCount);
+): Promise<{ untrusted: true; matches: object[]; truncated: boolean; retrievalMode?: string; fallbackReason?: DocumentRetrievalIssue }> {
+  const initial = getOwnedRetrievalDocuments(context.threadId);
+  const selected = initial.filter(document => !documentIds || documentIds.includes(document.id)).slice(0, LOCAL_TOOL_LIMITS.documentCount);
   const controller = new AbortController();
   const abort = () => controller.abort();
   context.signal.addEventListener('abort', abort);
   const assertCurrent = () => {
-    context.assertCurrent();
+    (context.assertSelectionCurrent ?? context.assertCurrent)();
     if (context.signal.aborted || controller.signal.aborted) throw new DocumentToolSearchError('cancelled');
-    const live = documents(context.threadId);
-    if (selected.some(document => !live.some(item => identity(item) === identity(document)))) {
+    const live = getOwnedRetrievalDocuments(context.threadId);
+    if (selected.some(document => !live.some(item => retrievalDocumentOwnershipIdentity(item) === retrievalDocumentOwnershipIdentity(document)))) {
       throw new DocumentToolSearchError('document_unavailable');
     }
   };
-  const unsubscribe = useChatStore.subscribe(() => {
-    try { assertCurrent(); } catch { controller.abort(); }
-  });
-  const queryTerms = new Set(query.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
-  const matches: object[] = [];
-  let truncated = available.length > selected.length;
+  const unsubscribe = useChatStore.subscribe(() => { try { assertCurrent(); } catch { controller.abort(); } });
+  const assertRestorationSelectionCurrent = () => {
+    (context.assertRestorationSelectionCurrent ?? context.assertSelectionCurrent ?? context.assertCurrent)();
+    const live = getOwnedRetrievalDocuments(context.threadId);
+    if (selected.some(document => !live.some(item => retrievalDocumentOwnershipIdentity(item) === retrievalDocumentOwnershipIdentity(document)))) {
+      throw new DocumentToolSearchError('document_unavailable');
+    }
+  };
+  let loaded: Awaited<ReturnType<typeof loadOwnedRetrievalDocuments>> | undefined;
   try {
     assertCurrent();
-    for (const attachment of selected) {
-      assertCurrent();
-      const info = await FileSystem.getInfoAsync(attachment.localUri);
-      assertCurrent();
-      if (!info.exists || info.isDirectory || info.size > LOCAL_TOOL_LIMITS.documentFileBytes) {
-        throw new DocumentToolSearchError('document_unavailable');
+    const settings = sanitizeDocumentRetrievalSettings(useChatStore.getState().getThread(context.threadId)?.documentRetrieval);
+    loaded = await loadOwnedRetrievalDocuments(context.threadId, documentIds, {
+      query, maxChars: LOCAL_TOOL_LIMITS.documentExcerptCharacters * LOCAL_TOOL_LIMITS.documentChunks,
+      maxChunks: LOCAL_TOOL_LIMITS.documentChunks, maxFileBytes: LOCAL_TOOL_LIMITS.documentFileBytes,
+      signal: controller.signal, assertCurrent,
+    });
+    const retrieval = await retrieveDocumentCandidates(query, loaded.entries, settings, {
+      threadId: context.threadId, signal: controller.signal, assertCurrent, assertSelectionCurrent: assertRestorationSelectionCurrent,
+      runOwner: context.runOwner, prepareMissing: false,
+    });
+    assertCurrent();
+    const queryTerms = new Set(query.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+    const matches: object[] = [];
+    let truncated = loaded.truncated;
+    const metadata = settings.mode === 'hybrid' || settings.rerank
+      ? { retrievalMode: retrieval.actualMode, ...(retrieval.fallbackReason ? { fallbackReason: retrieval.fallbackReason } : {}) } : {};
+    for (const candidate of retrieval.candidates) {
+      const chunk = candidate.chunk;
+      if (retrieval.actualMode === 'lexical') {
+        const terms = chunk.text.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+        if (!terms.some(term => queryTerms.has(term))) continue;
       }
-      const options = { query, maxChars: LOCAL_TOOL_LIMITS.documentExcerptCharacters * LOCAL_TOOL_LIMITS.documentChunks,
-        maxChunks: LOCAL_TOOL_LIMITS.documentChunks, signal: controller.signal };
-      const cached = await documentSessionContextCache.selectThreadDocuments(context.threadId, options, new Set([attachment.id]));
-      assertCurrent();
-      let source: ChatDocumentSessionContextSource | undefined;
-      try {
-        const hit = cached.find(item => identity(item.attachment) === identity(attachment));
-        const result = hit?.result ?? await chatAttachmentProcessorRegistry.processDocumentTextAttachment(attachment, {
-          ...options, maxFileBytes: LOCAL_TOOL_LIMITS.documentFileBytes, retainSessionContextSource: true,
-          onSessionContextSourceCreated: created => { source = created; },
-        });
-        source ??= hit ? undefined : result.sessionContextSource;
-        assertCurrent();
-        if (result.attachmentId !== attachment.id
-          || (attachment.document.contentSha256 && result.contentSha256 !== attachment.document.contentSha256)
-          || (attachment.document.contentHash && result.contentHash !== attachment.document.contentHash)) {
-          throw new DocumentToolSearchError('document_unavailable');
-        }
-        for (const chunk of result.chunks) {
-          const terms = chunk.text.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-          if (!terms.some(term => queryTerms.has(term))) continue;
-          if (matches.length >= LOCAL_TOOL_LIMITS.documentChunks) { truncated = true; break; }
-          const text = Array.from(chunk.text).slice(0, LOCAL_TOOL_LIMITS.documentExcerptCharacters).join('');
-          const match = { documentId: attachment.id, chunkIndex: chunk.index, text,
-            ...(chunk.pageNumber === undefined ? {} : { pageNumber: chunk.pageNumber }),
-            ...(chunk.slideNumber === undefined ? {} : { slideNumber: chunk.slideNumber }),
-            ...(chunk.sheetName === undefined ? {} : { sheetName: chunk.sheetName }),
-            ...(chunk.sourceStart === undefined ? {} : { sourceStart: chunk.sourceStart }),
-            ...(chunk.sourceEnd === undefined ? {} : { sourceEnd: chunk.sourceEnd }),
-          };
-          if (utf8Bytes(JSON.stringify({ untrusted: true, matches: [...matches, match], truncated: true }))
-            > LOCAL_TOOL_LIMITS.resultBytes - 64) { truncated = true; break; }
-          matches.push(match);
-          truncated ||= text.length < chunk.text.length || result.truncated;
-        }
-      } finally {
-        if (source) await documentSessionContextCache.releaseResources([{ resource: source }]);
+      if (matches.length >= LOCAL_TOOL_LIMITS.documentChunks) { truncated = true; break; }
+      const text = Array.from(chunk.text).slice(0, LOCAL_TOOL_LIMITS.documentExcerptCharacters).join('');
+      const match = { documentId: candidate.attachmentId, chunkIndex: chunk.index, text,
+        ...(chunk.pageNumber === undefined ? {} : { pageNumber: chunk.pageNumber }),
+        ...(chunk.slideNumber === undefined ? {} : { slideNumber: chunk.slideNumber }),
+        ...(chunk.sheetName === undefined ? {} : { sheetName: chunk.sheetName }),
+        ...(chunk.sourceStart === undefined ? {} : { sourceStart: chunk.sourceStart }),
+        ...(chunk.sourceEnd === undefined ? {} : { sourceEnd: chunk.sourceEnd }),
+      };
+      if (utf8Bytes(JSON.stringify({ untrusted: true, matches: [...matches, match], truncated: true, ...metadata })) > LOCAL_TOOL_LIMITS.resultBytes - 64) {
+        truncated = true; break;
       }
+      matches.push(match);
+      truncated ||= text.length < chunk.text.length || Boolean(loaded.entries.find(entry => entry.attachment.id === candidate.attachmentId)?.result.truncated);
     }
     assertCurrent();
-    return { untrusted: true, matches, truncated };
+    return { untrusted: true, matches, truncated, ...metadata };
+  } catch (error) {
+    if (error instanceof DocumentRetrievalError && error.code === 'ownership_changed') throw new DocumentToolSearchError('document_unavailable');
+    if (controller.signal.aborted || (error instanceof DocumentRetrievalError && error.code === 'cancelled')) throw new DocumentToolSearchError('cancelled');
+    throw error;
   } finally {
     unsubscribe();
     context.signal.removeEventListener('abort', abort);
+    await loaded?.release();
   }
 }

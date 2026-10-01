@@ -1,0 +1,675 @@
+{
+  "schemaVersion": 1,
+  "publicSource": "7a2c57f7f1fc13603f34323aad0d726e06a8790e",
+  "appTree": "55235cdcbf36d8afb03d843fcc69904502876c1f",
+  "runtimeVersion": "0.13.0-rc.3",
+  "backend": "cpu",
+  "apkSha256": "d83db8e165e0468ee9688251c66a238e10f0dad4abf65174751da578cf533f12",
+  "installedApkSha256": "d83db8e165e0468ee9688251c66a238e10f0dad4abf65174751da578cf533f12",
+  "apkBytes": 82299438,
+  "provenanceDigest": "8a2736f97e6b4b76b73a5504b49a320c9b07cc9685510ff4e30162e14220056f",
+  "attempts": [
+    {
+      "id": "fresh_build_launch",
+      "status": "failed",
+      "build": "passed",
+      "install": "passed",
+      "failure": "launcher_status_not_confirmed",
+      "scenarios": "not_run",
+      "crashCauseConfirmed": false
+    },
+    {
+      "id": "same_apk_native_retry",
+      "status": "failed",
+      "scenarios": [
+        {
+          "id": "runtime-inference-lifecycle",
+          "status": "passed",
+          "durationMs": 42150
+        },
+        {
+          "id": "runtime-model-resources",
+          "status": "passed",
+          "durationMs": 114872
+        },
+        {
+          "id": "runtime-stage3",
+          "status": "passed",
+          "durationMs": 104982
+        },
+        {
+          "id": "runtime-local-tools",
+          "status": "passed",
+          "durationMs": 622768
+        },
+        {
+          "id": "runtime-document-index-publication",
+          "status": "failed",
+          "durationMs": 304712
+        }
+      ],
+      "failurePhase": "four_indexes",
+      "failureCode": "assertion",
+      "requiresForceStop": true,
+      "failedAssertionIdentified": false,
+      "notRun": [
+        "fifth_new_chat",
+        "fifth_existing_chat",
+        "stop",
+        "after_stop",
+        "cold_retention",
+        "next_query",
+        "cleanup"
+      ]
+    },
+    {
+      "id": "corrected_source_build_without_explicit_abi",
+      "publicSource": "720637ea10a942b770b049336b026c14f56a535d",
+      "status": "cancelled",
+      "reason": "explicit_x86_64_parameter_omitted",
+      "scenarios": "not_run",
+      "ownedProcessesRemainingAfterCleanup": 0
+    },
+    {
+      "id": "corrected_source_fresh_cpu_launch",
+      "publicSource": "720637ea10a942b770b049336b026c14f56a535d",
+      "apkSha256": "2a198bbca863a670602fe6a6383b4410e5434d0345881fa3ab97a2e562721277",
+      "installedApkSha256": "2a198bbca863a670602fe6a6383b4410e5434d0345881fa3ab97a2e562721277",
+      "provenanceDigest": "8d8c155a3d5e2bc55105533b4ce45f290964db6ba968057bed6ae995e3bd1ca7",
+      "status": "failed",
+      "build": "passed",
+      "install": "passed",
+      "failure": "launcher_status_not_confirmed",
+      "scenarios": "not_run",
+      "manualColdReopen": "passed",
+      "manualColdReopenMs": 931,
+      "appCrashConfirmed": false,
+      "ownedProcessesRemainingAfterCleanup": 0
+    },
+    {
+      "id": "corrected_cpu_full_pack_memory_admission",
+      "publicSource": "720637ea10a942b770b049336b026c14f56a535d",
+      "apkSha256": "2a198bbca863a670602fe6a6383b4410e5434d0345881fa3ab97a2e562721277",
+      "status": "failed",
+      "scenarios": [
+        {
+          "id": "runtime-inference-lifecycle",
+          "status": "passed",
+          "durationMs": 30833
+        },
+        {
+          "id": "runtime-model-resources",
+          "status": "passed",
+          "durationMs": 73393
+        },
+        {
+          "id": "runtime-stage3",
+          "status": "passed",
+          "durationMs": 79667
+        },
+        {
+          "id": "runtime-local-tools",
+          "status": "passed",
+          "durationMs": 314499
+        },
+        {
+          "id": "runtime-document-index-publication",
+          "status": "failed",
+          "durationMs": 147436
+        }
+      ],
+      "failurePhase": "four_indexes",
+      "failureCode": "operation_failed",
+      "seedIndex": 1,
+      "seedOperation": "seed_prepare",
+      "operationErrorCode": "model_unavailable",
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 1,
+      "requiresForceStop": true,
+      "postFailureGuestFreeKiB": 410176,
+      "embeddingRequiredBytes": 608810944,
+      "rerankerRequiredBytes": 1262629696,
+      "actualAdmissionBudgetRecorded": false,
+      "notRun": [
+        "fifth_new_chat",
+        "fifth_existing_chat",
+        "stop",
+        "after_stop",
+        "cold_retention",
+        "next_query",
+        "cleanup"
+      ],
+      "ownedProcessesRemainingAfterCleanup": 0
+    },
+    {
+      "id": "corrected_cpu_cold_retry_quota_assertion",
+      "publicSource": "720637ea10a942b770b049336b026c14f56a535d",
+      "apkSha256": "2a198bbca863a670602fe6a6383b4410e5434d0345881fa3ab97a2e562721277",
+      "status": "failed",
+      "durationMs": 43006,
+      "failurePhase": "fifth_new_chat",
+      "failureCode": "assertion",
+      "requiresForceStop": false,
+      "failedAssertionIdentified": false,
+      "fourIndexes": "passed",
+      "documentEmbeddings": 4,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 4,
+      "nativeSettled": 4,
+      "restored": 4,
+      "globalReadyIndexes": 4,
+      "oldIndexesRetained": true,
+      "guestColdReboot": true,
+      "notRun": [
+        "fifth_existing_chat",
+        "stop",
+        "after_stop",
+        "cold_retention",
+        "next_query",
+        "cleanup"
+      ],
+      "ownedProcessesRemainingAfterCleanup": 0
+    },
+    {
+      "id": "diagnostic_cpu_factual_answer",
+      "publicSource": "337ab5510d1fbf2abc503504a8416626ea86f035",
+      "apkSha256": "19e24dba5efb7f8956bdc99ec1b074cc91e677766f52bf05573f2efade9d0f45",
+      "installedApkSha256": "19e24dba5efb7f8956bdc99ec1b074cc91e677766f52bf05573f2efade9d0f45",
+      "apkBytes": 82302774,
+      "provenanceDigest": "3bcf5b5b2271a2112d70001a3548adcab3bfd86ca87a8884d36235d59871a83f",
+      "build": "passed",
+      "install": "passed",
+      "launch": "passed",
+      "status": "failed",
+      "failurePhase": "fifth_new_chat",
+      "failureCode": "assertion",
+      "failedAssertion": "answer_match",
+      "turnProgress": {
+        "turn": "fifth_new_chat",
+        "operation": "answer_match",
+        "documentEmbeddings": 1,
+        "queryEmbeddings": 1,
+        "rerankCalls": 1,
+        "nativeStarted": 3,
+        "nativeSettled": 3,
+        "restored": 1,
+        "callbackCount": 1,
+        "userCount": 1,
+        "assistantCount": 1,
+        "outputCharacters": 87,
+        "tokensPredicted": 47,
+        "tokensEvaluated": 179,
+        "attachmentCount": 1,
+        "loraApplied": true,
+        "completionDrained": true,
+        "answerMatched": false,
+        "threadPresent": true,
+        "assistantTerminal": true,
+        "assistantError": false,
+        "actualMode": "hybrid+rerank",
+        "cacheFailure": "quota_exceeded"
+      },
+      "steps": [
+        {
+          "id": "four_indexes",
+          "status": "passed",
+          "documentEmbeddings": 4,
+          "queryEmbeddings": 0,
+          "rerankCalls": 0,
+          "nativeStarted": 4,
+          "nativeSettled": 4,
+          "restored": 4,
+          "indexCount": 4,
+          "oldIndexesRetained": true
+        },
+        {
+          "id": "fifth_new_chat",
+          "status": "failed"
+        },
+        {
+          "id": "fifth_existing_chat",
+          "status": "not_run"
+        },
+        {
+          "id": "stop",
+          "status": "not_run"
+        },
+        {
+          "id": "after_stop",
+          "status": "not_run"
+        },
+        {
+          "id": "cold_retention",
+          "status": "not_run"
+        },
+        {
+          "id": "next_query",
+          "status": "not_run"
+        },
+        {
+          "id": "cleanup",
+          "status": "not_run"
+        }
+      ],
+      "ownedProcessesRemainingAfterCleanup": 0
+    },
+    {
+      "id": "diagnostic_cpu_baselines_cold_assertion",
+      "publicSource": "337ab5510d1fbf2abc503504a8416626ea86f035",
+      "apkSha256": "19e24dba5efb7f8956bdc99ec1b074cc91e677766f52bf05573f2efade9d0f45",
+      "status": "failed",
+      "scenarios": [
+        {
+          "id": "runtime-inference-lifecycle",
+          "status": "passed",
+          "durationMs": 42441
+        },
+        {
+          "id": "runtime-model-resources",
+          "status": "passed",
+          "durationMs": 92209
+        },
+        {
+          "id": "runtime-stage3",
+          "status": "passed",
+          "durationMs": 113336
+        },
+        {
+          "id": "runtime-local-tools",
+          "status": "failed",
+          "durationMs": 218110
+        }
+      ],
+      "failedCheck": "tool_cold_history_or_reexecution",
+      "documentToolContinuation": "passed",
+      "stopAndNextQuery": "passed",
+      "recoveryAfterColdAssertion": "not_run",
+      "staleEarlierRecoveryExcluded": true,
+      "ownedProcessesRemainingAfterCleanup": 0
+    },
+    {
+      "id": "copy_cpu_publication_cleanup_drain",
+      "publicSource": "f5f698b089815849573f16af01c8aaa1b58ccfb3",
+      "apkSha256": "448abc8010dd1540795ad7dd56f2331a947ab3a97340270dc4b89d1608bd641a",
+      "installedApkSha256": "448abc8010dd1540795ad7dd56f2331a947ab3a97340270dc4b89d1608bd641a",
+      "apkBytes": 82302830,
+      "provenanceDigest": "e84311a1230716704afd3e89cc6a047dcbd90d3046df1d1f8ca24eebdfb75807",
+      "status": "failed",
+      "build": "passed",
+      "install": "passed",
+      "launch": "passed",
+      "failedCheck": "cleanup_drain",
+      "warmSteps": [
+        {
+          "id": "four_indexes",
+          "status": "passed",
+          "documentEmbeddings": 4,
+          "queryEmbeddings": 0,
+          "rerankCalls": 0,
+          "nativeStarted": 4,
+          "nativeSettled": 4,
+          "restored": 4,
+          "indexCount": 4,
+          "oldIndexesRetained": true
+        },
+        {
+          "id": "fifth_new_chat",
+          "status": "passed",
+          "actualMode": "hybrid+rerank",
+          "cacheFailure": "quota_exceeded",
+          "documentEmbeddings": 1,
+          "queryEmbeddings": 1,
+          "rerankCalls": 1,
+          "nativeStarted": 3,
+          "nativeSettled": 3,
+          "restored": 1,
+          "callbackCount": 1,
+          "userCount": 1,
+          "assistantCount": 1,
+          "outputCharacters": 337,
+          "tokensPredicted": 127,
+          "tokensEvaluated": 186,
+          "noReady": true,
+          "oldIndexesRetained": true,
+          "historyRetained": true,
+          "attachmentsRetained": true,
+          "profileRestored": true,
+          "loraApplied": true,
+          "completionDrained": true,
+          "answerMatched": true
+        },
+        {
+          "id": "fifth_existing_chat",
+          "status": "passed",
+          "actualMode": "hybrid+rerank",
+          "cacheFailure": "quota_exceeded",
+          "documentEmbeddings": 2,
+          "queryEmbeddings": 1,
+          "rerankCalls": 1,
+          "nativeStarted": 4,
+          "nativeSettled": 4,
+          "restored": 1,
+          "callbackCount": 1,
+          "userCount": 1,
+          "assistantCount": 1,
+          "outputCharacters": 342,
+          "tokensPredicted": 127,
+          "tokensEvaluated": 480,
+          "noReady": true,
+          "oldIndexesRetained": true,
+          "historyRetained": true,
+          "attachmentsRetained": true,
+          "profileRestored": true,
+          "loraApplied": true,
+          "completionDrained": true,
+          "answerMatched": true
+        },
+        {
+          "id": "stop",
+          "status": "passed",
+          "documentEmbeddings": 1,
+          "queryEmbeddings": 0,
+          "rerankCalls": 0,
+          "nativeStarted": 1,
+          "nativeSettled": 1,
+          "restored": 0,
+          "noReady": true,
+          "completionDrained": true,
+          "cancelled": true
+        },
+        {
+          "id": "after_stop",
+          "status": "passed",
+          "userCount": 1,
+          "assistantCount": 1,
+          "outputCharacters": 151,
+          "tokensPredicted": 36,
+          "tokensEvaluated": 623,
+          "completionDrained": true,
+          "answerMatched": false
+        }
+      ],
+      "coldSteps": [
+        {
+          "id": "four_indexes",
+          "status": "passed",
+          "documentEmbeddings": 4,
+          "queryEmbeddings": 0,
+          "rerankCalls": 0,
+          "nativeStarted": 4,
+          "nativeSettled": 4,
+          "restored": 4,
+          "indexCount": 4,
+          "oldIndexesRetained": true
+        },
+        {
+          "id": "fifth_new_chat",
+          "status": "passed",
+          "actualMode": "hybrid+rerank",
+          "cacheFailure": "quota_exceeded",
+          "documentEmbeddings": 1,
+          "queryEmbeddings": 1,
+          "rerankCalls": 1,
+          "nativeStarted": 3,
+          "nativeSettled": 3,
+          "restored": 1,
+          "callbackCount": 1,
+          "userCount": 1,
+          "assistantCount": 1,
+          "outputCharacters": 337,
+          "tokensPredicted": 127,
+          "tokensEvaluated": 186,
+          "noReady": true,
+          "oldIndexesRetained": true,
+          "historyRetained": true,
+          "attachmentsRetained": true,
+          "profileRestored": true,
+          "loraApplied": true,
+          "completionDrained": true,
+          "answerMatched": true
+        },
+        {
+          "id": "fifth_existing_chat",
+          "status": "passed",
+          "actualMode": "hybrid+rerank",
+          "cacheFailure": "quota_exceeded",
+          "documentEmbeddings": 2,
+          "queryEmbeddings": 1,
+          "rerankCalls": 1,
+          "nativeStarted": 4,
+          "nativeSettled": 4,
+          "restored": 1,
+          "callbackCount": 1,
+          "userCount": 1,
+          "assistantCount": 1,
+          "outputCharacters": 342,
+          "tokensPredicted": 127,
+          "tokensEvaluated": 480,
+          "noReady": true,
+          "oldIndexesRetained": true,
+          "historyRetained": true,
+          "attachmentsRetained": true,
+          "profileRestored": true,
+          "loraApplied": true,
+          "completionDrained": true,
+          "answerMatched": true
+        },
+        {
+          "id": "stop",
+          "status": "passed",
+          "documentEmbeddings": 1,
+          "queryEmbeddings": 0,
+          "rerankCalls": 0,
+          "nativeStarted": 1,
+          "nativeSettled": 1,
+          "restored": 0,
+          "noReady": true,
+          "completionDrained": true,
+          "cancelled": true
+        },
+        {
+          "id": "after_stop",
+          "status": "passed",
+          "userCount": 1,
+          "assistantCount": 1,
+          "outputCharacters": 151,
+          "tokensPredicted": 36,
+          "tokensEvaluated": 623,
+          "completionDrained": true,
+          "answerMatched": false
+        },
+        {
+          "id": "cold_retention",
+          "status": "passed",
+          "indexCount": 4,
+          "noReady": true,
+          "oldIndexesRetained": true,
+          "historyRetained": true,
+          "attachmentsRetained": true
+        },
+        {
+          "id": "next_query",
+          "status": "passed",
+          "userCount": 1,
+          "assistantCount": 1,
+          "outputCharacters": 151,
+          "tokensPredicted": 36,
+          "tokensEvaluated": 675,
+          "completionDrained": true,
+          "answerMatched": false
+        },
+        {
+          "id": "cleanup",
+          "status": "passed",
+          "completionDrained": false
+        }
+      ],
+      "activeOperationKindRecorded": false,
+      "ownedProcessesRemainingAfterCleanup": 0
+    },
+    {
+      "id": "final_cpu_baselines_retained_fixture_threads",
+      "publicSource": "81a3fe0b95381a0caa78aac0f02069e1fd6fe478",
+      "appTree": "031662c55ac0751c9f3cea9cb7e1e4c5ca9de6d0",
+      "apkSha256": "d903eade0ce2cbc44b91e086e7d95a2bcde9b65ad7a81e168b873b2ef95acef7",
+      "apkBytes": 82302894,
+      "provenanceDigest": "de886c2724911d1b83248531e2f80a89a40154968e1e5bb65eef2800030294d1",
+      "status": "failed",
+      "failureCode": "assertion",
+      "failedCheck": "tool_cold_history_or_reexecution",
+      "durationMs": 136585,
+      "threadCount": 3,
+      "pendingCalls": 0,
+      "runningRuns": 0,
+      "processRunStarts": 0,
+      "busy": false,
+      "hydrated": true,
+      "documentToolContinuation": "passed",
+      "stopAndNextQuery": "passed",
+      "recoveryAfterColdAssertion": "not_run",
+      "staleEarlierRecoveryExcluded": true,
+      "scenarios": [
+        {
+          "id": "runtime-inference-lifecycle",
+          "status": "passed",
+          "durationMs": 30494
+        },
+        {
+          "id": "runtime-model-resources",
+          "status": "passed",
+          "durationMs": 68298
+        },
+        {
+          "id": "runtime-stage3",
+          "status": "passed",
+          "durationMs": 79334
+        },
+        {
+          "id": "runtime-local-tools",
+          "status": "failed",
+          "durationMs": 136585
+        }
+      ],
+      "warmSteps": [
+        {
+          "id": "prepare_model",
+          "status": "passed",
+          "fixtureVerified": true
+        },
+        {
+          "id": "cpu_load",
+          "status": "passed",
+          "cpuConfirmed": true
+        },
+        {
+          "id": "calculate_required",
+          "nativeStage": "completion",
+          "status": "passed",
+          "nativeSteps": 2,
+          "nativeCalls": 1,
+          "executedCalls": 1,
+          "outputCharacters": 44,
+          "resultReturned": true,
+          "referenceMatched": true,
+          "finalReferencePresent": true,
+          "completionDrained": true
+        },
+        {
+          "id": "calculate_auto",
+          "nativeStage": "completion",
+          "status": "observed",
+          "nativeSteps": 1,
+          "nativeCalls": 0,
+          "executedCalls": 0,
+          "outputCharacters": 78,
+          "automaticCallSelected": false,
+          "resultReturned": false,
+          "referenceMatched": false,
+          "finalReferencePresent": false,
+          "completionDrained": true
+        },
+        {
+          "id": "ordinary_auto",
+          "nativeStage": "completion",
+          "status": "passed",
+          "nativeSteps": 1,
+          "nativeCalls": 0,
+          "executedCalls": 0,
+          "outputCharacters": 28,
+          "resultReturned": false,
+          "completionDrained": true
+        },
+        {
+          "id": "document_search",
+          "nativeStage": "completion",
+          "status": "passed",
+          "nativeSteps": 2,
+          "nativeCalls": 1,
+          "executedCalls": 1,
+          "outputCharacters": 84,
+          "resultReturned": true,
+          "referenceMatched": true,
+          "membershipMatched": true,
+          "locatorMatched": true,
+          "finalReferencePresent": true,
+          "completionDrained": true
+        },
+        {
+          "id": "json_schema",
+          "nativeStage": "completion",
+          "status": "passed",
+          "nativeSteps": 3,
+          "nativeCalls": 1,
+          "executedCalls": 1,
+          "outputCharacters": 14,
+          "resultReturned": true,
+          "referenceMatched": true,
+          "schemaAnswerMatched": true,
+          "structuredValid": true,
+          "completionDrained": true
+        },
+        {
+          "id": "stop",
+          "nativeStage": "completion",
+          "status": "passed",
+          "nativeSteps": 1,
+          "nativeCalls": 1,
+          "executedCalls": 0,
+          "resultReturned": false,
+          "cancelled": true,
+          "completionDrained": true
+        },
+        {
+          "id": "ordinary_after_stop",
+          "status": "passed",
+          "outputCharacters": 53,
+          "completionDrained": true
+        },
+        {
+          "id": "cleanup",
+          "status": "passed",
+          "historyRetained": true,
+          "profileRestored": true
+        }
+      ],
+      "ownedProcessesRemainingAfterCleanup": 0
+    },
+    {
+      "id": "final_cpu_fresh_data_launcher_status",
+      "publicSource": "81a3fe0b95381a0caa78aac0f02069e1fd6fe478",
+      "appTree": "031662c55ac0751c9f3cea9cb7e1e4c5ca9de6d0",
+      "apkSha256": "d903eade0ce2cbc44b91e086e7d95a2bcde9b65ad7a81e168b873b2ef95acef7",
+      "apkBytes": 82302894,
+      "provenanceDigest": "de886c2724911d1b83248531e2f80a89a40154968e1e5bb65eef2800030294d1",
+      "status": "failed",
+      "build": "not_run",
+      "launch": "failed",
+      "failure": "launcher_status_not_confirmed",
+      "appCrashConfirmed": false,
+      "scenarios": "not_run",
+      "ownedProcessesRemainingAfterCleanup": 0
+    }
+  ]
+}

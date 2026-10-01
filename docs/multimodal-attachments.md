@@ -1,6 +1,6 @@
 # Multimodal Attachment Architecture
 
-Last updated: 2026-08-10
+Last updated: 2026-10-01
 
 Pocket AI's multimodal attachment pipeline is designed to keep user files local while passing
 supported media to the on-device `llama.rn` runtime. The current product surface uses one shared
@@ -12,7 +12,7 @@ old persisted video metadata may still be read for chat-history compatibility.
 ## Current Runtime Contract
 
 The app pins `llama.rn` through `package.json` and validates the installed runtime declarations
-before relying on native multimodal behavior. With `llama.rn@0.12.9`, the native chat message
+before relying on native multimodal behavior. With exactly pinned `llama.rn@0.13.0-rc.3`, the native chat message
 contract accepts:
 
 - plain text message content
@@ -140,6 +140,30 @@ eviction, memory pressure, attachment or conversation deletion, private-storage 
 exit release the cached source. This cache is not a durable full-document index; see
 [`document-processing.md`](./document-processing.md) for exact limits and cleanup semantics.
 
+Document search defaults to Keywords and the existing lexical/overview selection. The user can
+explicitly select Hybrid and optional independent local reranking for the current chat. Auxiliary
+embedding/reranker models are selected separately from the chat model; Keywords with reranking
+does not require an embedding model or index. Prepare selected committed documents explicitly,
+or let an ordinary Hybrid document request prepare missing compatible indexes.
+
+Prepared indexes are bounded sensitive derived data in encrypted private storage, separate from
+the process-local parsed-source cache. They retain bounded embedding subchunks, vectors and exact
+source/extractor/model/tokenizer/runtime compatibility identities. Compatible document vectors
+can be reused after restart by reopening and revalidating only files still owned by the chat;
+opaque parser handles are never restored from disk. Source or profile changes require preparation
+again. Draft indexes publish only after the attachment's real message ownership commits. Opening
+search options or restoring history does not automatically prepare documents.
+
+Committed attachment/message removal, branch pruning, thread deletion and history clearing
+invalidate corresponding derived indexes. Startup reconciliation recovers orphaned generations
+once chat ownership has hydrated. Private-storage blocking invalidates active publication epochs
+and retains temporary resources until actual work drains; a successful confirmed private-data
+reset clears encrypted derived data. These index rules do not change image/audio/video inputs.
+The [Stage 5 acceptance report](./llama-rn-013-stage5-acceptance.md) records Android CPU
+retrieval, LoRA/Hybrid-tool continuation, Stop and cold reuse/deletion on fixed direct-text
+English/Russian fixtures. Ordinary control checks and other document-format retrieval
+matrices retain separate verification scope.
+
 ## Video Attachments
 
 Video attachment processing is currently disabled. The composer does not expose a video picker, the
@@ -157,3 +181,4 @@ The app must not log raw prompts, extracted document text, private file paths, i
 bytes, legacy video bytes, picker URIs, or base64 media payloads. Error reports may include non-sensitive
 readiness and capability state, attachment counts, byte counts, processor IDs, and error codes, but
 media paths and structured media payloads must be redacted before export or logging.
+Derived-index excerpts, vectors and reconstructible compatibility identities must also stay out of diagnostics and exported error reports.

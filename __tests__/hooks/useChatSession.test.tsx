@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { act, render, waitFor } from '@testing-library/react-native';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as RNFS from 'react-native-fs';
 import { useChatSession } from '../../src/hooks/useChatSession';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { getGenerationParametersForModel, getSettings } from '../../src/services/SettingsStore';
@@ -31,6 +32,7 @@ import {
 import {
   DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER,
   type LlmChatCompletionOptions,
+  type ChatMessage,
 } from '../../src/types/chat';
 import { presetManager } from '../../src/services/PresetManager';
 import { AppError } from '../../src/services/AppError';
@@ -69,6 +71,13 @@ import {
 } from '../../src/services/AndroidQaGenerationEvidence';
 import { MAX_CHAT_IMAGE_ATTACHMENTS } from '../../src/utils/chatImageAttachments';
 import { documentSessionContextCache } from '../../src/services/DocumentSessionContextCache';
+import * as documentRetrievalService from '../../src/services/DocumentRetrievalService';
+import * as documentRetrievalDocuments from '../../src/services/DocumentRetrievalDocuments';
+import { DocumentIndexStore, documentIndexStore, type PrivateDocumentIndex } from '../../src/services/DocumentIndexStore';
+import * as documentRetrievalRuntime from '../../src/services/DocumentRetrievalRuntime';
+import { VERIFIED_RETRIEVAL_PROFILES } from '../../src/services/DocumentRetrievalProfiles';
+import { DOCUMENT_RETRIEVAL_LIMITS, type DocumentIndexIdentity } from '../../src/types/documentRetrieval';
+import { getDocumentRetrievalStatus } from '../../src/services/DocumentRetrievalStatus';
 
 function expectNoStreamingProgressArtifacts(threadId: string): void {
   expect(listChatStreamingProgressStorageKeys(storage).filter(
@@ -76,6 +85,28 @@ function expectNoStreamingProgressArtifacts(threadId: string): void {
   )).toEqual([]);
 }
 
+// Native-document fixtures change directories at runtime. Export one shared
+// facade so Babel namespace imports observe the same private path boundary.
+jest.mock('expo-file-system/legacy', () => ({
+  __esModule: true,
+  createDownloadResumable: jest.fn().mockReturnValue({
+    downloadAsync: jest.fn().mockResolvedValue({ status: 200 }),
+    pauseAsync: jest.fn().mockResolvedValue({ resumeData: 'resume-data' }),
+    savable: jest.fn().mockReturnValue({ resumeData: 'resume-data' }),
+  }),
+  getInfoAsync: jest.fn().mockResolvedValue({ exists: true, size: 1024 }),
+  readAsStringAsync: jest.fn().mockResolvedValue(''),
+  readDirectoryAsync: jest.fn().mockResolvedValue([]),
+  deleteAsync: jest.fn().mockResolvedValue(undefined),
+  copyAsync: jest.fn().mockResolvedValue(undefined),
+  moveAsync: jest.fn().mockResolvedValue(undefined),
+  getFreeDiskStorageAsync: jest.fn().mockResolvedValue(10 * 1024 * 1024 * 1024),
+  getTotalDiskCapacityAsync: jest.fn().mockResolvedValue(100 * 1024 * 1024 * 1024),
+  makeDirectoryAsync: jest.fn().mockResolvedValue(undefined),
+  EncodingType: { Base64: 'base64', UTF8: 'utf8' },
+  documentDirectory: 'test-dir/',
+  cacheDirectory: 'test-cache/',
+}));
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
@@ -733,6 +764,821 @@ describe('useChatSession', () => {
     expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
   });
 
+  describe('integrated document retrieval', () => {
+    let retrievalSpy: jest.SpyInstance;
+    let publishSpy: jest.SpyInstance;
+    let loaderSpy: jest.SpyInstance | undefined;
+    let contextEpoch: number;
+    const identity = () => `context-generation:${contextEpoch}\u0001author/model-q4`;
+
+    beforeEach(() => {
+      contextEpoch = 1;
+      (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue('Original lexical document context.');
+      (llmEngineService.getPromptContextIdentity as jest.Mock).mockImplementation(identity);
+      retrievalSpy = jest.spyOn(documentRetrievalService, 'retrieveDocumentCandidates');
+      retrievalSpy.mockImplementation(async (...args: Parameters<typeof documentRetrievalService.retrieveDocumentCandidates>) => {
+        const [, entries, settings, options] = args;
+        options.assertCurrent();
+        entries.filter(entry => entry.attachment.threadId === 'pending')
+          .forEach(entry => options.assertProvisionalEntryCurrent?.(entry));
+        const previousContextIdentity = identity();
+        (llmEngineService.getState as jest.Mock).mockReturnValue({ status: EngineStatus.IDLE, activeModelId: null });
+        // Selection ownership remains valid while A is temporarily unloaded.
+        options.assertCurrent();
+        contextEpoch += 1;
+        (llmEngineService.getState as jest.Mock).mockReturnValue({ status: EngineStatus.READY, activeModelId: 'author/model-q4' });
+        options.onRestored?.({ previousContextIdentity, restoredContextIdentity: identity(), modelId: 'author/model-q4' });
+        return {
+          candidates: entries.map(entry => ({
+            attachmentId: entry.attachment.id,
+            chunk: { index: 7, kind: 'paragraph' as const, text: 'SEMANTIC-CONTEXT: the renewal is 2031-04-15.' },
+          })),
+          actualMode: settings.rerank ? 'hybrid+rerank' as const : 'hybrid' as const,
+          preparedIndexes: new Map(entries.filter(entry => entry.attachment.threadId === 'pending')
+            .map(entry => [entry.attachment.id, {} as PrivateDocumentIndex])),
+        };
+      });
+      publishSpy = jest.spyOn(documentRetrievalService, 'publishPreparedDocumentIndexes');
+      publishSpy.mockImplementation(async (...args: Parameters<typeof documentRetrievalService.publishPreparedDocumentIndexes>) => {
+        const [threadId, , indexes, check] = args;
+        check();
+        const committed = useChatStore.getState().getThread(threadId)!;
+        for (const attachmentId of indexes.keys()) {
+          expect(committed.messages.some(message => message.role === 'user'
+            && message.attachments?.some(attachment => attachment.id === attachmentId))).toBe(true);
+        }
+        const publishedAttachmentIds = [...indexes.keys()];
+        indexes.clear();
+        return { publishedAttachmentIds, cacheFailures: [] };
+      });
+    });
+
+    afterEach(() => {
+      retrievalSpy.mockRestore();
+      publishSpy.mockRestore();
+      loaderSpy?.mockRestore();
+      loaderSpy = undefined;
+    });
+
+    it('uses a verified restoration receipt before new-chat hybrid inference and publishes after append', async () => {
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('What is the renewal date?', {
+        newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
+        documentAttachmentDrafts: [createCopiedDocumentDraft('hybrid-new')],
+      }); });
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.documentRetrieval).toEqual({ mode: 'hybrid', rerank: true });
+      expect(retrievalSpy).toHaveBeenCalledTimes(1);
+      expect(publishSpy).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify((llmEngineService.chatCompletion as jest.Mock).mock.calls[0][0].messages)).toContain('SEMANTIC-CONTEXT');
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+      expect(thread.messages.at(-1)?.state).toBe('complete');
+      act(() => { getSession()?.startNewChat(); });
+      await act(async () => { await getSession()?.appendUserMessage('A separate ordinary chat'); });
+      expect(useChatStore.getState().getActiveThread()?.documentRetrieval).toBeUndefined();
+      expect(retrievalSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves overview selection without native retrieval under an enabled hybrid setting', async () => {
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('Summarize this document', {
+        newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
+        documentAttachmentDrafts: [createCopiedDocumentDraft('hybrid-overview')],
+      }); });
+      expect(retrievalSpy).not.toHaveBeenCalled();
+      expect(JSON.stringify((llmEngineService.chatCompletion as jest.Mock).mock.calls[0][0].messages)).toContain('Original lexical');
+    });
+
+    it('publishes the actual lexical fallback status after the first hybrid message gains real ownership', async () => {
+      const native = retrievalSpy.getMockImplementation()!;
+      retrievalSpy.mockImplementation(async (...args: Parameters<typeof documentRetrievalService.retrieveDocumentCandidates>) => {
+        await native(...args);
+        return { candidates: args[1].flatMap(entry => entry.result.chunks.map(chunk => ({ attachmentId: entry.attachment.id, chunk }))),
+          actualMode: 'lexical', fallbackReason: 'native_failed', preparedIndexes: new Map() };
+      });
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('What is the renewal date?', {
+        newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
+        documentAttachmentDrafts: [createCopiedDocumentDraft('hybrid-first-fallback')],
+      }); });
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(getDocumentRetrievalStatus(thread.id).lastSearch).toEqual({ actualMode: 'lexical', fallbackReason: 'native_failed' });
+      expect(thread.messages.at(-1)?.state).toBe('complete');
+      expect(JSON.stringify((llmEngineService.chatCompletion as jest.Mock).mock.calls[0][0].messages)).toContain('Original lexical');
+    });
+
+    it('uses common retrieval for follow-up, last-response regeneration and edited document branches', async () => {
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('Read this document', {
+        documentAttachmentDrafts: [createCopiedDocumentDraft('hybrid-existing')],
+      }); });
+      const originalThread = useChatStore.getState().getActiveThread()!;
+      const originalUserId = originalThread.messages.find(message => message.role === 'user')!.id;
+      act(() => { useChatStore.getState().updateThreadDocumentRetrieval(originalThread.id, { mode: 'hybrid', rerank: true }); });
+      await act(async () => { await getSession()?.appendUserMessage('What is the renewal date?'); });
+      let thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.messages.filter(message => message.role === 'user').at(-1)?.contentParts).toBeUndefined();
+      expect(thread.messages.filter(message => message.role === 'user').at(-1)?.attachments).toBeUndefined();
+      await act(async () => { await getSession()?.regenerateLastResponse(); });
+      await act(async () => { await getSession()?.regenerateFromUserMessage(originalUserId, 'Explain the renewal date'); });
+      thread = useChatStore.getState().getActiveThread()!;
+      expect(retrievalSpy.mock.calls.map(call => call[0])).toEqual([
+        'What is the renewal date?', 'What is the renewal date?', 'Explain the renewal date',
+      ]);
+      expect(thread.messages.at(-1)).toMatchObject({ state: 'complete', content: 'Hello back' });
+      expect(JSON.stringify((llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0].messages)).toContain('SEMANTIC-CONTEXT');
+      expect(documentSessionContextCache.getStats().entryCount).toBe(1);
+    });
+
+    it('does not publish provisional vectors when an empty edited response rolls back the branch', async () => {
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('Read this document', {
+        documentAttachmentDrafts: [createCopiedDocumentDraft('hybrid-rollback')],
+      }); });
+      const original = useChatStore.getState().getActiveThread()!;
+      const originalUser = original.messages.find(message => message.role === 'user')!;
+      act(() => { useChatStore.getState().updateThreadDocumentRetrieval(original.id, { mode: 'hybrid', rerank: false }); });
+      publishSpy.mockClear();
+      (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(async () => ({ text: '' }));
+      await act(async () => { await getSession()?.regenerateFromUserMessage(originalUser.id, 'Explain the renewal date'); });
+      expect(retrievalSpy).toHaveBeenCalledTimes(1);
+      expect(publishSpy).not.toHaveBeenCalled();
+      expect(useChatStore.getState().getActiveThread()?.messages.find(message => message.id === originalUser.id)?.contentParts)
+        .toEqual(originalUser.contentParts);
+      expect(documentSessionContextCache.getStats().entryCount).toBe(1);
+    });
+
+    it('retrieves an edited target and earlier documents in one owned sequence', async () => {
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('Read the earlier document', {
+        documentAttachmentDrafts: [createCopiedDocumentDraft('hybrid-edit-earlier')],
+      }); });
+      await act(async () => { await getSession()?.appendUserMessage('Read the target document', {
+        documentAttachmentDrafts: [createCopiedDocumentDraft('hybrid-edit-target')],
+      }); });
+      const original = useChatStore.getState().getActiveThread()!;
+      const target = original.messages.filter(message => message.role === 'user').at(-1)!;
+      act(() => { useChatStore.getState().updateThreadDocumentRetrieval(original.id, { mode: 'hybrid', rerank: true }); });
+      retrievalSpy.mockClear();
+      await act(async () => { await getSession()?.regenerateFromUserMessage(target.id, 'Compare renewal dates'); });
+      expect(retrievalSpy).toHaveBeenCalledTimes(1);
+      expect(retrievalSpy.mock.calls[0][1].map((entry: documentRetrievalService.DocumentRetrievalEntry) => entry.attachment.id).sort())
+        .toEqual(['hybrid-edit-earlier', 'hybrid-edit-target']);
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.messages.filter(message => message.role === 'user')).toHaveLength(2);
+      expect(thread.messages.find(message => message.id === target.id)?.attachments?.map(attachment => attachment.id))
+        .toEqual(['hybrid-edit-target']);
+      expect(documentSessionContextCache.getStats().entryCount).toBe(2);
+    });
+
+    it.each(['previous', 'model', 'missing'] as const)('rejects a %s restoration receipt before native chat or message commit', async mismatch => {
+      retrievalSpy.mockImplementation(async (...args: Parameters<typeof documentRetrievalService.retrieveDocumentCandidates>) => {
+        const [, entries, , options] = args;
+        const previousContextIdentity = identity();
+        contextEpoch += 1;
+        if (mismatch !== 'missing') options.onRestored?.({
+          previousContextIdentity: mismatch === 'previous' ? 'unrelated-context' : previousContextIdentity,
+          restoredContextIdentity: identity(), modelId: mismatch === 'model' ? 'other/model' : 'author/model-q4',
+        });
+        return { candidates: entries.flatMap(entry => entry.result.chunks.map(chunk => ({ attachmentId: entry.attachment.id, chunk }))),
+          actualMode: 'hybrid' as const, preparedIndexes: new Map() };
+      });
+      const getSession = renderHookHarness();
+      await act(async () => { await expect(getSession()?.appendUserMessage('What is the renewal date?', {
+        newThreadDocumentRetrieval: { mode: 'hybrid', rerank: false },
+        documentAttachmentDrafts: [createCopiedDocumentDraft(`receipt-${mismatch}`)],
+      })).rejects.toMatchObject({ code: 'engine_not_ready' }); });
+      expect(useChatStore.getState().getActiveThread()).toBeNull();
+      expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+      expect(publishSpy).not.toHaveBeenCalled();
+    });
+
+    it('keeps cold owned-document resources until common retrieval and native chat settle', async () => {
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('Read this document', {
+        documentAttachmentDrafts: [createCopiedDocumentDraft('hybrid-cold')],
+      }); });
+      const thread = useChatStore.getState().getActiveThread()!;
+      const cached = await documentSessionContextCache.selectThreadDocuments(thread.id, {
+        query: 'renewal', maxChars: 64000, maxChunks: 64,
+      });
+      await documentSessionContextCache.clearAll();
+      const release = jest.fn(async () => undefined);
+      loaderSpy = jest.spyOn(documentRetrievalDocuments, 'loadOwnedRetrievalDocuments').mockResolvedValue({
+        entries: cached, truncated: false, release,
+      });
+      act(() => { useChatStore.getState().updateThreadDocumentRetrieval(thread.id, { mode: 'hybrid', rerank: false }); });
+      const pending = createDeferred<{ text: string }>();
+      (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(() => pending.promise);
+      let followup: Promise<void> | undefined;
+      await act(async () => { followup = getSession()?.appendUserMessage('What is the renewal date?'); });
+      await waitFor(() => expect(retrievalSpy).toHaveBeenCalledTimes(1));
+      expect(loaderSpy).toHaveBeenCalledWith(thread.id, ['hybrid-cold'], expect.objectContaining({ signal: expect.anything() }));
+      expect(release).not.toHaveBeenCalled();
+      await act(async () => { pending.resolve({ text: 'Renewal answer' }); await followup; });
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves semantic candidate order through exact prompt-budget backoff', async () => {
+      const retrieveNative = retrievalSpy.getMockImplementation()!;
+      retrievalSpy.mockImplementation(async (...args: Parameters<typeof documentRetrievalService.retrieveDocumentCandidates>) => {
+        const result = await retrieveNative(...args);
+        const attachmentId = args[1][0].attachment.id;
+        return { ...result, candidates: [
+          { attachmentId, chunk: { index: 7, kind: 'paragraph', text: 'SEMANTIC-PRIORITY: 2031-04-15.' } },
+          { attachmentId, chunk: { index: 0, kind: 'paragraph', text: 'LEXICAL-DECOY: renewal renewal renewal renewal.' } },
+        ] };
+      });
+      (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(async ({ messages }) => {
+        const text = JSON.stringify(messages);
+        return text.includes('SEMANTIC-PRIORITY') && text.includes('LEXICAL-DECOY') ? 1700
+          : text.includes('SEMANTIC-PRIORITY') || text.includes('LEXICAL-DECOY') ? 700 : 100;
+      });
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('What is the renewal date?', {
+        newThreadDocumentRetrieval: { mode: 'hybrid', rerank: false },
+        documentAttachmentDrafts: [createCopiedDocumentDraft('hybrid-budget')],
+      }); });
+      const messages = JSON.stringify((llmEngineService.chatCompletion as jest.Mock).mock.calls[0][0].messages);
+      expect(messages).toContain('SEMANTIC-PRIORITY');
+      expect(messages).not.toContain('LEXICAL-DECOY');
+    });
+
+    it('waits for an aborted retrieval to drain without committing a message, vectors or answer', async () => {
+      const pending = createDeferred<documentRetrievalService.DocumentRetrievalResult>();
+      retrievalSpy.mockImplementation(() => pending.promise);
+      const getSession = renderHookHarness();
+      let send: Promise<void> | undefined;
+      await act(async () => { send = getSession()?.appendUserMessage('What is the renewal date?', {
+        newThreadDocumentRetrieval: { mode: 'hybrid', rerank: false },
+        documentAttachmentDrafts: [createCopiedDocumentDraft('hybrid-stop')],
+      }); });
+      await waitFor(() => expect(retrievalSpy).toHaveBeenCalledTimes(1));
+      let stopped: Promise<void> | undefined;
+      await act(async () => { stopped = getSession()?.stopGeneration(); });
+      expect(retrievalSpy.mock.calls[0][3].signal.aborted).toBe(true);
+      expect(() => retrievalSpy.mock.calls[0][3].assertSelectionCurrent()).not.toThrow();
+      expect(() => retrievalSpy.mock.calls[0][3].assertProvisionalEntryCurrent(retrievalSpy.mock.calls[0][1][0])).not.toThrow();
+      expect(() => retrievalSpy.mock.calls[0][3].assertCurrent()).toThrow();
+      const previousSettings = getSettings();
+      (getSettings as jest.Mock).mockReturnValue({ ...previousSettings, activeModelId: 'other/model' });
+      expect(() => retrievalSpy.mock.calls[0][3].assertSelectionCurrent()).toThrow();
+      (getSettings as jest.Mock).mockReturnValue(previousSettings);
+      expect(hasActiveChatGenerationWork()).toBe(true);
+      expect(useChatStore.getState().getActiveThread()).toBeNull();
+      await act(async () => {
+        pending.resolve({ candidates: [], actualMode: 'hybrid', preparedIndexes: new Map() });
+        await send;
+        await stopped;
+      });
+      expect(hasActiveChatGenerationWork()).toBe(false);
+      expect(useChatStore.getState().getActiveThread()).toBeNull();
+      expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+      expect(publishSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('post-commit document index publication', () => {
+    const documentText = 'The renewal is 2031-04-15 and the payment deadline is 2031-04-01.';
+    const profile = VERIFIED_RETRIEVAL_PROFILES.find(item => item.role === 'embedding')!;
+    let runtimeSpy: jest.SpyInstance;
+    let bindingSpy: jest.SpyInstance;
+    let retrievalSpy: jest.SpyInstance;
+    let publishSpy: jest.SpyInstance;
+    let storePublishSpy: jest.SpyInstance;
+    let contextEpoch: number;
+    let embedding: jest.Mock;
+    let rerank: jest.Mock;
+    const identity = () => `context-generation:${contextEpoch}\u0001author/model-q4`;
+
+    function fixtureIndex(): PrivateDocumentIndex {
+      const indexIdentity: DocumentIndexIdentity = {
+        documentSha256: 'a'.repeat(64), extractionIdentity: 'fixture-owned-v1',
+        chunkingVersion: 'document-chunks-v1', preprocessingVersion: 'tokenizer-prose-subchunks-v1',
+        modelSha256: profile.modelSha256, modelRevision: profile.modelRevision, modelBytes: profile.modelBytes,
+        tokenizerIdentity: 'fixture-tokenizer', pooling: 'mean', normalization: 2,
+        queryPrefix: profile.queryPrefix, documentPrefix: profile.documentPrefix,
+        dimensions: profile.dimensions!, vectorFormat: 'float32', runtimeIdentity: 'fixture-runtime',
+      };
+      return { identity: indexIdentity, rows: [{ chunk: { index: 0, text: documentText, kind: 'paragraph' },
+        start: 0, end: documentText.length, vector: Array.from({ length: profile.dimensions! }, (_, index) => index === 0 ? 1 : 0) }] };
+    }
+
+    function indexScope(threadId: string, attachmentId: string): string {
+      return `document-retrieval-v1:${encodeURIComponent(threadId)}:${encodeURIComponent(attachmentId)}:`;
+    }
+
+    function readIndexRecords(): Map<string, string | undefined> {
+      return new Map(storage.getAllKeys().filter(key => key.startsWith('document-retrieval-v1:'))
+        .map(key => [key, storage.getString(key)]));
+    }
+
+    async function seedOwnedIndexes(count: number = DOCUMENT_RETRIEVAL_LIMITS.documents) {
+      const owners: Array<{ threadId: string; attachmentId: string; index: PrivateDocumentIndex }> = [];
+      for (let position = 0; position < count; position++) {
+        const threadId = createSavedThreadForNavigation();
+        const attachmentId = `published-fixture-${position}`;
+        const messageId = `published-fixture-message-${position}`;
+        useChatStore.getState().appendMessage(threadId, { id: messageId, role: 'user', content: 'Owned fixture',
+          state: 'complete', createdAt: position + 1,
+          attachments: [{ id: attachmentId,
+            localUri: `test-dir/chat-attachments/${threadId}/${attachmentId}.txt`, pathCategory: 'chat_attachment',
+            fileName: `${attachmentId}.txt`, mimeType: 'text/plain', sizeBytes: documentText.length,
+            kind: 'document', state: 'ready', threadId, messageId, source: 'document_picker', createdAt: position + 1,
+            document: { processorId: 'document-text', processorVersion: DOCUMENT_TEXT_PROCESSOR_VERSION } }] });
+        flushPendingChatPersistenceWrites();
+        const durableOwner = JSON.parse(storage.getString(getChatThreadStorageKey(threadId))!);
+        expect(durableOwner.thread.messages[0].attachments).toEqual(useChatStore.getState().getThread(threadId)!.messages[0].attachments);
+        const index = fixtureIndex();
+        await documentIndexStore.publish(threadId, attachmentId, index, () => {});
+        owners.push({ threadId, attachmentId, index });
+      }
+      useChatStore.getState().setActiveThread(null);
+      storePublishSpy.mockClear();
+      return owners;
+    }
+
+    async function expectOwnersUnchanged(owners: Awaited<ReturnType<typeof seedOwnedIndexes>>, before: Map<string, string | undefined>) {
+      for (const owner of owners) {
+        await expect(documentIndexStore.read(owner.threadId, owner.attachmentId, owner.index.identity, () => {})).resolves.toEqual(owner.index);
+        await expect(documentIndexStore.read('another-owner', owner.attachmentId, owner.index.identity, () => {})).resolves.toBeNull();
+      }
+      for (const [key, value] of before) expect(storage.getString(key)).toBe(value);
+    }
+
+    beforeEach(() => {
+      contextEpoch = 1;
+      (RNFS.hash as jest.Mock).mockResolvedValue('a'.repeat(64));
+      documentIndexStore.clear();
+      (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(documentText);
+      (llmEngineService.getPromptContextIdentity as jest.Mock).mockImplementation(identity);
+      embedding = jest.fn(async () => ({ embedding: Array.from({ length: profile.dimensions! }, (_, index) => index === 0 ? 1 : 0) }));
+      rerank = jest.fn(async (_query: string, documents: string[]) => documents.map((_document, index) => ({ index, score: index })));
+      const contexts = Object.fromEntries(['embedding', 'reranker'].map(role => {
+        const verified = VERIFIED_RETRIEVAL_PROFILES.find(item => item.role === role)!;
+        return [role, { model: { nEmbd: verified.dimensions ?? 1024, metadata: { 'tokenizer.ggml.model': verified.ggufTokenizer } },
+          tokenize: jest.fn(async (text: string) => ({ tokens: Array.from(text, (_, index) => index + 10) })),
+          detokenize: jest.fn(async () => 'native formatted pair'), embedding, rerank }];
+      }));
+      bindingSpy = jest.spyOn(documentRetrievalRuntime, 'resolveRetrievalRuntimeBinding').mockImplementation(role => ({
+        modelId: role, fileIdentity: `fixture-${role}`, profile: VERIFIED_RETRIEVAL_PROFILES.find(item => item.role === role)!,
+        request: { modelId: role }, isSelectionCurrent: () => true,
+      } as ReturnType<typeof documentRetrievalRuntime.resolveRetrievalRuntimeBinding>));
+      // Only the native context boundary is replaced. Parsing, retrieval, ranking,
+      // source/ownership checks, production publisher and encrypted-record facade are real.
+      runtimeSpy = jest.spyOn(documentRetrievalRuntime, 'runDocumentRetrievalRuntime').mockImplementation(async (_bindings, options, operation) => {
+        options.assertCurrent();
+        const previousContextIdentity = identity();
+        (llmEngineService.getState as jest.Mock).mockReturnValue({ status: EngineStatus.IDLE, activeModelId: null });
+        const result = await operation({ withContext: async (request, callback) => callback(contexts[request.modelId] as never) }, options.assertCurrent);
+        contextEpoch++;
+        (llmEngineService.getState as jest.Mock).mockReturnValue({ status: EngineStatus.READY, activeModelId: 'author/model-q4' });
+        options.onRestored?.({ previousContextIdentity, restoredContextIdentity: identity(), modelId: 'author/model-q4' });
+        return result;
+      });
+      retrievalSpy = jest.spyOn(documentRetrievalService, 'retrieveDocumentCandidates');
+      publishSpy = jest.spyOn(documentRetrievalService, 'publishPreparedDocumentIndexes');
+      storePublishSpy = jest.spyOn(documentIndexStore, 'publish');
+    });
+
+    afterEach(() => {
+      runtimeSpy.mockRestore();
+      bindingSpy.mockRestore();
+      retrievalSpy.mockRestore();
+      publishSpy.mockRestore();
+      storePublishSpy.mockRestore();
+      documentIndexStore.clear();
+    });
+
+    it.each(['new', 'existing'] as const)('completes a %s Hybrid chat after the real fifth-index quota failure', async chatKind => {
+      const owners = await seedOwnedIndexes();
+      const beforeIndexes = readIndexRecords();
+      const fixtureHistory = owners.map(owner => useChatStore.getState().getThread(owner.threadId));
+      const getSession = renderHookHarness();
+      if (chatKind === 'existing') {
+        await act(async () => { await getSession()?.appendUserMessage('Earlier accepted turn'); });
+        act(() => { useChatStore.getState().updateThreadDocumentRetrieval(useChatStore.getState().activeThreadId!, { mode: 'hybrid', rerank: true }); });
+        (llmEngineService.chatCompletion as jest.Mock).mockClear();
+        publishSpy.mockClear();
+      }
+      const previousMessages = useChatStore.getState().getActiveThread()?.messages ?? [];
+      const onUserMessageAppended = jest.fn();
+      let failure: unknown;
+      await act(async () => {
+        try {
+          await getSession()?.appendUserMessage('What is the renewal date?', {
+            newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
+            documentAttachmentDrafts: [createCopiedDocumentDraft('fifth-document')], onUserMessageAppended,
+          });
+        } catch (error) { failure = error; }
+      });
+      const thread = useChatStore.getState().getActiveThread()!;
+      // This assertion reproduces the lost accepted turn before the production fix.
+      expect(failure).toBeUndefined();
+      expect(thread.messages).toHaveLength(previousMessages.length + 2);
+      expect(thread.messages.slice(0, previousMessages.length)).toEqual(previousMessages);
+      expect(thread.messages.at(-1)).toMatchObject({ role: 'assistant', state: 'complete', content: 'Hello back' });
+      expect(onUserMessageAppended).toHaveBeenCalledTimes(1);
+      expect(onUserMessageAppended).toHaveBeenCalledWith(thread.messages.at(-2));
+      expect(thread.messages.at(-2)?.attachments).toEqual([expect.objectContaining({ id: 'fifth-document', threadId: thread.id, kind: 'document', state: 'ready' })]);
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+      expect(retrievalSpy).toHaveBeenCalledTimes(1);
+      expect(embedding.mock.calls).toHaveLength(2); // One document and one query, no retry.
+      expect(rerank).toHaveBeenCalledTimes(1);
+      expect(publishSpy).toHaveBeenCalledTimes(1);
+      expect(storePublishSpy).toHaveBeenCalledTimes(1);
+      expect(publishSpy.mock.calls[0][2].size).toBe(0);
+      expect(getDocumentRetrievalStatus(thread.id)).toMatchObject({ lastSearch: { actualMode: 'hybrid+rerank' },
+        cacheFailures: [{ attachmentId: 'fifth-document', reason: 'quota_exceeded' }] });
+      expect(readIndexRecords()).toEqual(beforeIndexes);
+      await expectOwnersUnchanged(owners, beforeIndexes);
+      owners.forEach((owner, index) => expect(useChatStore.getState().getThread(owner.threadId)).toEqual(fixtureHistory[index]));
+      expect(hasActiveChatGenerationWork()).toBe(false);
+      expectNoStreamingProgressArtifacts(thread.id);
+      const restored = new DocumentIndexStore(() => getAppStorage());
+      restored.reconcile(new Map([...owners.map(owner => [owner.threadId, new Set([owner.attachmentId])] as const), [thread.id, new Set(['fifth-document'])]]));
+      await expect(restored.read(thread.id, 'fifth-document', fixtureIndex().identity, () => {})).resolves.toBeNull();
+      expect(readIndexRecords()).toEqual(beforeIndexes);
+      await act(async () => { await getSession()?.appendUserMessage('What is the payment deadline?'); });
+      const followedUp = useChatStore.getState().getActiveThread()!;
+      expect(followedUp.id).toBe(thread.id);
+      expect(followedUp.messages).toHaveLength(previousMessages.length + 4);
+      expect(followedUp.messages.at(-1)?.state).toBe('complete');
+      expect(followedUp.messages.at(-2)?.attachments).toBeUndefined();
+      expect(followedUp.messages[previousMessages.length].attachments).toEqual(thread.messages.at(-2)?.attachments);
+      expect(embedding).toHaveBeenCalledTimes(4);
+      expect(rerank).toHaveBeenCalledTimes(2);
+      expect(getDocumentRetrievalStatus(thread.id)).toMatchObject({ lastSearch: { actualMode: 'hybrid+rerank' },
+        cacheFailures: [{ attachmentId: 'fifth-document', reason: 'quota_exceeded' }] });
+      expect(readIndexRecords()).toEqual(beforeIndexes);
+      act(() => { getSession()?.startNewChat(); });
+      await act(async () => { await getSession()?.appendUserMessage('Next ordinary request'); });
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)?.state).toBe('complete');
+      expect(hasActiveChatGenerationWork()).toBe(false);
+    });
+
+    it('retains a successful first publication when a second new document hits the global quota', async () => {
+      const owners = await seedOwnedIndexes(3);
+      const beforeIndexes = readIndexRecords();
+      const getSession = renderHookHarness();
+      const onUserMessageAppended = jest.fn();
+      await act(async () => { await getSession()?.appendUserMessage('Compare renewal dates', {
+        newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
+        documentAttachmentDrafts: [createCopiedDocumentDraft('partial-first'), createCopiedDocumentDraft('partial-second')],
+        onUserMessageAppended,
+      }); });
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.messages.map(message => message.role)).toEqual(['user', 'assistant']);
+      expect(thread.messages[0].attachments?.map(attachment => attachment.id)).toEqual(['partial-first', 'partial-second']);
+      expect(thread.messages.at(-1)).toMatchObject({ state: 'complete', content: 'Hello back' });
+      expect(onUserMessageAppended).toHaveBeenCalledTimes(1);
+      expect(embedding).toHaveBeenCalledTimes(3);
+      expect(rerank).toHaveBeenCalledTimes(1);
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+      expect(publishSpy).toHaveBeenCalledTimes(1);
+      expect(storePublishSpy).toHaveBeenCalledTimes(2);
+      expect(publishSpy.mock.calls[0][2].size).toBe(0);
+      expect(getDocumentRetrievalStatus(thread.id)).toMatchObject({ lastSearch: { actualMode: 'hybrid+rerank' },
+        cacheFailures: [{ attachmentId: 'partial-second', reason: 'quota_exceeded' }] });
+      const readyKey = `${indexScope(thread.id, 'partial-first')}ready`;
+      const publishedIdentity = JSON.parse(storage.getString(readyKey)!).identity as DocumentIndexIdentity;
+      await expect(documentIndexStore.read(thread.id, 'partial-first', publishedIdentity, () => {})).resolves.not.toBeNull();
+      expect(storage.getAllKeys().some(key => key.startsWith(indexScope(thread.id, 'partial-second')))).toBe(false);
+      await expectOwnersUnchanged(owners, beforeIndexes);
+      const ownersAfterCommit = new Map([...owners.map(owner => [owner.threadId, new Set([owner.attachmentId])] as const),
+        [thread.id, new Set(['partial-first', 'partial-second'])]]);
+      const restarted = new DocumentIndexStore(() => getAppStorage());
+      restarted.reconcile(ownersAfterCommit);
+      await expect(restarted.read(thread.id, 'partial-first', publishedIdentity, () => {})).resolves.not.toBeNull();
+      await expect(restarted.read(thread.id, 'partial-second', publishedIdentity, () => {})).resolves.toBeNull();
+      expect(storage.getAllKeys().filter(key => key.startsWith('document-retrieval-v1:') && key.endsWith(':ready'))).toHaveLength(4);
+      expect(documentSessionContextCache.getStats().entryCount).toBe(2);
+      expect(hasActiveChatGenerationWork()).toBe(false);
+    });
+
+    it.each(['Stop', 'chat switch', 'model selection', 'permissions', 'private reset'] as const)('prevents stale completion after %s during actual publication and admits the next request', async action => {
+      const owners = await seedOwnedIndexes(1);
+      const beforeIndexes = readIndexRecords();
+      const unrelatedThread = createSavedThreadForNavigation();
+      useChatStore.getState().setActiveThread(null);
+      const publication = createDeferred<void>();
+      const realPublish = DocumentIndexStore.prototype.publish.bind(documentIndexStore);
+      storePublishSpy.mockImplementationOnce(async (...args: Parameters<typeof documentIndexStore.publish>) => {
+        await publication.promise;
+        return realPublish(...args);
+      });
+      const getSession = renderHookHarness();
+      const onUserMessageAppended = jest.fn();
+      let send: Promise<void> | undefined;
+      let sendFailure: unknown;
+      let stop: Promise<void> | undefined;
+      await act(async () => {
+        send = getSession()?.appendUserMessage('What is the renewal date?', {
+          newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
+          documentAttachmentDrafts: [createCopiedDocumentDraft(`interrupted-${action.replace(/ /gu, '-')}`)], onUserMessageAppended,
+        }).catch(error => { sendFailure = error; });
+      });
+      await waitFor(() => expect(storePublishSpy).toHaveBeenCalledTimes(1));
+      const acceptedThread = useChatStore.getState().getActiveThread()!;
+      expect(acceptedThread.messages).toHaveLength(1);
+      expect(acceptedThread.messages[0].role).toBe('user');
+      expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+      expect(hasActiveChatGenerationWork()).toBe(true);
+      try {
+        await act(async () => {
+          if (action === 'Stop') stop = getSession()?.stopGeneration();
+          if (action === 'chat switch') useChatStore.getState().setActiveThread(unrelatedThread);
+          if (action === 'model selection') useChatStore.getState().switchThreadModel(acceptedThread.id, 'author/model-q8');
+          if (action === 'permissions') useChatStore.getState().updateThreadToolSettings(acceptedThread.id, { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' });
+          if (action === 'private reset') {
+            (isPrivateStorageWritable as jest.Mock).mockReturnValue(false);
+            (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue({ status: 'blocked', retryable: false,
+              requiresExplicitReset: true, lastUpdatedAt: 2 });
+            resetActiveChatGenerationRuntimeForPrivateStorageReset();
+            documentIndexStore.clear();
+          }
+          publication.resolve();
+          await send;
+          await stop;
+        });
+        expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+        expect(useChatStore.getState().getThread(acceptedThread.id)?.messages.filter(message => message.role === 'assistant')).toEqual([]);
+        expect(onUserMessageAppended).toHaveBeenCalledTimes(1);
+        expect(publishSpy.mock.calls[0][2].size).toBe(0);
+        expect(storage.getAllKeys().some(key => key.startsWith(indexScope(acceptedThread.id, `interrupted-${action.replace(/ /gu, '-')}`)))).toBe(false);
+        expect(hasActiveChatGenerationWork()).toBe(false);
+        if (action === 'chat switch') expect(sendFailure).toBeDefined();
+        if (action !== 'private reset') await expectOwnersUnchanged(owners, beforeIndexes);
+      } finally {
+        (isPrivateStorageWritable as jest.Mock).mockReturnValue(true);
+        (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue({ status: 'ready', retryable: false,
+          requiresExplicitReset: false, lastUpdatedAt: 3 });
+        publication.resolve();
+        await send;
+        await stop;
+      }
+      act(() => { getSession()?.startNewChat(); });
+      await act(async () => { await getSession()?.appendUserMessage('Next ordinary request'); });
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)?.state).toBe('complete');
+      expect(hasActiveChatGenerationWork()).toBe(false);
+    });
+
+    it('preserves message-owned source and materialized images when publication is unsaved', async () => {
+      const owners = await seedOwnedIndexes();
+      const beforeIndexes = readIndexRecords();
+      const draft = createCopiedDocumentDraft('unsaved-image-document');
+      (llmEngineService.getContextSize as jest.Mock).mockReturnValue(8192);
+      const originalProcess = chatAttachmentProcessorRegistry.processDocumentTextAttachment.bind(chatAttachmentProcessorRegistry);
+      let sourceReleaseSpy: jest.SpyInstance | undefined;
+      // Keep real text extraction and indexing. The native asset lease alone is
+      // supplied at its platform boundary, like the native embedding context.
+      const processSpy = jest.spyOn(chatAttachmentProcessorRegistry, 'processDocumentTextAttachment').mockImplementation(async (...args) => {
+        const result = await originalProcess(...args);
+        const source = result.sessionContextSource!;
+        sourceReleaseSpy = jest.spyOn(source, 'release');
+        const enumerate = source.enumerateChunks!.bind(source);
+        source.enumerateChunks = async options => {
+          const page = await enumerate(options);
+          return { ...page, chunks: page.chunks.map(chunk => ({ ...chunk, assetIds: [0] })) };
+        };
+        const assetSource = Object.assign(source, {
+          assets: [{ id: 0, mediaType: 'image/png', byteLength: 512, sha256: 'd'.repeat(64), width: 32, height: 24 }],
+          materializeAsset: jest.fn(async () => ({ assetId: 0, id: 0, mediaType: 'image/png', byteLength: 512,
+            sha256: 'd'.repeat(64), width: 32, height: 24,
+            localUri: 'file:///data/user/0/com.pocket/cache/pocket-anydoc-assets/00000000000000000000000000000000.png' })),
+        });
+        args[1]?.onNativeAssetLeaseCreated?.(assetSource);
+        return { ...result, assetCount: 1, assets: assetSource.assets, chunks: result.chunks.map(chunk => ({ ...chunk, assetIds: [0] })), nativeAssetLease: assetSource };
+      });
+      const copySpy = jest.spyOn(chatAttachmentStorageService, 'copyImageAssetToDraft').mockResolvedValue({
+        ...copiedDraftImageAttachment, id: 'unsaved-owned-image', localUri: 'test-dir/chat-attachments/unsaved-owned-image.png',
+        previewUri: 'test-dir/chat-attachments/unsaved-owned-image.png', fileName: 'unsaved-owned-image.png', mediaType: 'image/png',
+      });
+      const discardSpy = jest.spyOn(chatAttachmentStorageService, 'discardDrafts');
+      const discardOneSpy = jest.spyOn(chatAttachmentStorageService, 'discardDraft');
+      const getSession = renderHookHarness();
+      const onUserMessageAppended = jest.fn();
+      try {
+        await act(async () => { await getSession()?.appendUserMessage('What is the date in the embedded image?', {
+          newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
+          documentAttachmentDrafts: [draft], attachmentDrafts: [copiedDraftImageAttachment],
+          multimodalReadiness: { modelId: 'author/model-q4', status: 'ready', support: ['vision'], checkedAt: 1 },
+          onUserMessageAppended,
+        }); });
+        const thread = useChatStore.getState().getActiveThread()!;
+        expect(thread.messages).toHaveLength(2);
+        const attachments = thread.messages[0].attachments!;
+        expect(attachments.map(attachment => attachment.id).sort()).toEqual(['draft-image-1', 'unsaved-image-document', 'unsaved-owned-image']);
+        expect(attachments.every(attachment => attachment.threadId === thread.id && attachment.messageId === thread.messages[0].id)).toBe(true);
+        expect(attachments.find(attachment => attachment.id === 'unsaved-owned-image')).toMatchObject({
+          source: 'derived_processor', derivedFromAttachmentId: draft.id, derivedFromAssetId: 0,
+        });
+        expect(copySpy).toHaveBeenCalledTimes(1);
+        expect(discardSpy.mock.calls.flatMap(([drafts]) => drafts).map(item => item.id)).not.toContain('unsaved-owned-image');
+        expect(discardOneSpy.mock.calls.map(([item]) => item.id)).not.toContain('unsaved-owned-image');
+        expect(sourceReleaseSpy).not.toHaveBeenCalled();
+        expect(documentSessionContextCache.getStats().entryCount).toBe(1);
+        expect(onUserMessageAppended).toHaveBeenCalledTimes(1);
+        expect(thread.messages.at(-1)?.state).toBe('complete');
+        const durableAttachments = readPersistedThreadRecord(thread.id).thread?.messages?.[0].attachments as Array<Record<string, unknown>>;
+        expect(durableAttachments.map(attachment => attachment.id)).toEqual(attachments.map(attachment => attachment.id));
+        attachments.forEach(attachment => {
+          expect(durableAttachments.find(item => item.id === attachment.id)).toMatchObject({
+            id: attachment.id, localUri: attachment.localUri, threadId: thread.id,
+            messageId: thread.messages[0].id, pathCategory: 'chat_attachment', source: attachment.source,
+          });
+        });
+        expect(durableAttachments.find(attachment => attachment.id === 'unsaved-owned-image')).toMatchObject({
+          kind: 'image', state: 'ready', source: 'derived_processor', mimeType: 'image/png',
+          sizeBytes: copiedDraftImageAttachment.size, image: { width: copiedDraftImageAttachment.width, height: copiedDraftImageAttachment.height },
+          derivedFromAttachmentId: draft.id, derivedFromAssetId: 0,
+        });
+        expect(durableAttachments.find(attachment => attachment.id === 'draft-image-1')).toEqual(attachments.find(attachment => attachment.id === 'draft-image-1'));
+        expect(durableAttachments.find(attachment => attachment.id === draft.id)).toEqual(attachments.find(attachment => attachment.id === draft.id));
+        expect(getDocumentRetrievalStatus(thread.id)).toMatchObject({ lastSearch: { actualMode: 'hybrid+rerank' },
+          cacheFailures: [{ attachmentId: draft.id!, reason: 'quota_exceeded' }] });
+        await expectOwnersUnchanged(owners, beforeIndexes);
+      } finally {
+        processSpy.mockRestore(); copySpy.mockRestore(); discardSpy.mockRestore(); discardOneSpy.mockRestore(); sourceReleaseSpy?.mockRestore();
+      }
+    });
+    it('keeps a committed edited branch and cleans its removed tail after a post-commit cache write failure', async () => {
+      const owners = await seedOwnedIndexes(1);
+      const beforeIndexes = readIndexRecords();
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('Read target document', {
+        documentAttachmentDrafts: [createCopiedDocumentDraft('edited-unsaved-target')],
+      }); });
+      await act(async () => { await getSession()?.appendUserMessage('Read tail document', {
+        documentAttachmentDrafts: [createCopiedDocumentDraft('edited-removed-tail')],
+      }); });
+      const original = useChatStore.getState().getActiveThread()!;
+      const target = original.messages[0];
+      await documentIndexStore.publish(original.id, 'edited-removed-tail', fixtureIndex(), () => {});
+      expect(documentSessionContextCache.getStats().entryCount).toBe(2);
+      act(() => { useChatStore.getState().updateThreadDocumentRetrieval(original.id, { mode: 'hybrid', rerank: true }); });
+      const appStorage = getAppStorage();
+      const originalSet = appStorage.set;
+      appStorage.set = jest.fn((key, value) => {
+        if (key.startsWith(indexScope(original.id, 'edited-unsaved-target'))) throw new Error('fixture branch cache write failed');
+        originalSet(key, value);
+      });
+      const retainSpy = jest.spyOn(documentSessionContextCache, 'retainThreadAttachments');
+      (llmEngineService.chatCompletion as jest.Mock).mockClear();
+      (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(async ({ onToken }) => {
+        onToken?.('Committed edited reply'); return { text: 'Committed edited reply' };
+      });
+      let committed: boolean | undefined;
+      try {
+        await act(async () => { committed = await getSession()?.regenerateFromUserMessage(target.id, 'What is the renewal date?'); });
+        const thread = useChatStore.getState().getActiveThread()!;
+        expect(committed).toBe(true);
+        expect(thread.messages.map(message => message.role)).toEqual(['user', 'assistant']);
+        expect(thread.messages[0]).toMatchObject({ id: target.id, content: 'What is the renewal date?' });
+        expect(thread.messages[0].attachments?.map(attachment => attachment.id)).toEqual(['edited-unsaved-target']);
+        expect(thread.messages[1]).toMatchObject({ state: 'complete', content: 'Committed edited reply' });
+        expect(readPersistedThreadRecord(thread.id).thread?.messages?.map(message => message.role)).toEqual(['user', 'assistant']);
+        expect(readPersistedThreadRecord(thread.id).thread?.messages?.at(-1)?.content).toBe('Committed edited reply');
+        expect(embedding).toHaveBeenCalledTimes(2);
+        expect(rerank).toHaveBeenCalledTimes(1);
+        expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+        expect(retainSpy).toHaveBeenCalledWith(thread.id, new Set(['edited-unsaved-target']));
+        expect(documentSessionContextCache.getStats().entryCount).toBe(1);
+        expect(storage.getAllKeys().some(key => key.startsWith(indexScope(thread.id, 'edited-removed-tail')))).toBe(false);
+        expect(storage.getAllKeys().some(key => key.startsWith(indexScope(thread.id, 'edited-unsaved-target')))).toBe(false);
+        expect(getDocumentRetrievalStatus(thread.id)).toMatchObject({ lastSearch: { actualMode: 'hybrid+rerank' },
+          cacheFailures: [{ attachmentId: 'edited-unsaved-target', reason: 'cache_write_failed' }] });
+        await expectOwnersUnchanged(owners, beforeIndexes);
+        expect(hasActiveChatGenerationWork()).toBe(false);
+        await act(async () => { await getSession()?.appendUserMessage('Next ordinary request'); });
+        expect(useChatStore.getState().getActiveThread()?.messages.at(-1)?.state).toBe('complete');
+      } finally { appStorage.set = originalSet; retainSpy.mockRestore(); }
+    });
+
+    it.each(['changed', 'deleted'] as const)('rejects a %s source during publication before a quota failure can be classified as safe', async sourceChange => {
+      await seedOwnedIndexes();
+      const hash = createDeferred<string>();
+      const attachmentId = `publication-source-${sourceChange}`;
+      let publicationHashStarted = false;
+      const hashSpy = jest.spyOn(RNFS, 'hash').mockImplementation(async path => {
+        const committed = Object.values(useChatStore.getState().threads).some(thread => thread.messages.some(message => message.attachments?.some(attachment => attachment.id === attachmentId)));
+        if (path.includes(attachmentId) && committed) {
+          publicationHashStarted = true;
+          return hash.promise;
+        }
+        return 'a'.repeat(64);
+      });
+      const getSession = renderHookHarness();
+      let send: Promise<void> | undefined;
+      let failure: unknown;
+      await act(async () => {
+        send = getSession()?.appendUserMessage('What is the renewal date?', {
+          newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true }, documentAttachmentDrafts: [createCopiedDocumentDraft(attachmentId)],
+        }).catch(error => { failure = error; });
+      });
+      await waitFor(() => expect(publicationHashStarted).toBe(true));
+      try {
+        await act(async () => {
+          if (sourceChange === 'changed') hash.resolve('b'.repeat(64)); else hash.reject(new Error('fixture source deleted'));
+          await send;
+        });
+        expect(failure).toBeDefined();
+        if (sourceChange === 'changed') expect(failure).toMatchObject({ code: 'ownership_changed' });
+        expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+        expect(useChatStore.getState().getActiveThread()?.messages).toHaveLength(1);
+        expect(getDocumentRetrievalStatus(useChatStore.getState().activeThreadId!).cacheFailures).toBeUndefined();
+        expect(publishSpy.mock.calls[0][2].size).toBe(0);
+        expect(hasActiveChatGenerationWork()).toBe(false);
+      } finally { hash.resolve('a'.repeat(64)); await send; hashSpy.mockRestore(); }
+    });
+
+    it('requires confirmed restoration of A before a cache failure can continue generation', async () => {
+      await seedOwnedIndexes();
+      runtimeSpy.mockImplementationOnce(async (_bindings, options, operation) => {
+        const context = { model: { nEmbd: profile.dimensions, metadata: { 'tokenizer.ggml.model': profile.ggufTokenizer } },
+          tokenize: async (text: string) => ({ tokens: Array.from(text, (_, index) => index + 10) }), embedding, rerank,
+          detokenize: async () => 'native formatted pair' };
+        const result = await operation({ withContext: async (_request: unknown, callback: (context: never) => Promise<unknown>) => callback(context as never) }, options.assertCurrent);
+        contextEpoch++;
+        return result;
+      });
+      const getSession = renderHookHarness();
+      await act(async () => { await expect(getSession()?.appendUserMessage('What is the renewal date?', {
+        newThreadDocumentRetrieval: { mode: 'hybrid', rerank: false }, documentAttachmentDrafts: [createCopiedDocumentDraft('unrestored-document')],
+      })).rejects.toMatchObject({ code: 'engine_not_ready' }); });
+      expect(useChatStore.getState().getActiveThread()).toBeNull();
+      expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+      expect(publishSpy).not.toHaveBeenCalled();
+      expect(hasActiveChatGenerationWork()).toBe(false);
+    });
+    it('does not classify a private storage access failure as an ordinary cache write failure', async () => {
+      const getSession = renderHookHarness();
+      const appStorage = getAppStorage();
+      const originalSet = appStorage.set;
+      appStorage.set = jest.fn((key, value) => {
+        if (key.startsWith('document-retrieval-v1:')) {
+          throw new PrivateStorageUnavailableError('secure_key_unavailable', { status: 'blocked', retryable: false,
+            requiresExplicitReset: true, lastUpdatedAt: 2 });
+        }
+        originalSet(key, value);
+      });
+      let failure: unknown;
+      try {
+        await act(async () => { try {
+          await getSession()?.appendUserMessage('What is the renewal date?', {
+            newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
+            documentAttachmentDrafts: [createCopiedDocumentDraft('private-blocked-document')],
+          });
+        } catch (error) { failure = error; } });
+        expect(failure).toBeInstanceOf(PrivateStorageUnavailableError);
+        expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+        expect(useChatStore.getState().getActiveThread()?.messages.filter(message => message.role === 'assistant')).toEqual([]);
+        expect(getDocumentRetrievalStatus(useChatStore.getState().activeThreadId!).cacheFailures).toBeUndefined();
+        expect(storage.getAllKeys().some(key => key.startsWith('document-retrieval-v1:'))).toBe(false);
+        expect(hasActiveChatGenerationWork()).toBe(false);
+      } finally { appStorage.set = originalSet; }
+    });
+    it.each(['shard', 'ready'] as const)('completes Hybrid inference after a real %s write failure without publishing incomplete ready data', async writeKind => {
+      const owners = await seedOwnedIndexes(1);
+      const beforeIndexes = readIndexRecords();
+      const appStorage = getAppStorage();
+      const originalSet = appStorage.set;
+      appStorage.set = jest.fn((key, value) => {
+        if (key.startsWith('document-retrieval-v1:') && key.includes(':write-failed-document:') && (key.endsWith(':ready') === (writeKind === 'ready'))) {
+          throw new Error(`fixture ${writeKind} write failure`);
+        }
+        originalSet(key, value);
+      });
+      const getSession = renderHookHarness();
+      const onUserMessageAppended = jest.fn();
+      let failure: unknown;
+      try {
+        await act(async () => { try {
+          await getSession()?.appendUserMessage('What is the renewal date?', {
+            newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
+            documentAttachmentDrafts: [createCopiedDocumentDraft('write-failed-document')], onUserMessageAppended,
+          });
+        } catch (error) { failure = error; } });
+        const thread = useChatStore.getState().getActiveThread()!;
+        expect(failure).toBeUndefined();
+        expect(thread.messages.map(message => message.role)).toEqual(['user', 'assistant']);
+        expect(thread.messages.at(-1)).toMatchObject({ state: 'complete', content: 'Hello back' });
+        expect(onUserMessageAppended).toHaveBeenCalledTimes(1);
+        expect(embedding).toHaveBeenCalledTimes(2);
+        expect(rerank).toHaveBeenCalledTimes(1);
+        expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+        expect(getDocumentRetrievalStatus(thread.id)).toMatchObject({ lastSearch: { actualMode: 'hybrid+rerank' },
+          cacheFailures: [{ attachmentId: 'write-failed-document', reason: 'cache_write_failed' }] });
+        expect(storage.getAllKeys().some(key => key.startsWith(indexScope(thread.id, 'write-failed-document')))).toBe(false);
+        const restored = new DocumentIndexStore(() => getAppStorage());
+        restored.reconcile();
+        expect(readIndexRecords()).toEqual(beforeIndexes);
+        await expectOwnersUnchanged(owners, beforeIndexes);
+        expect(hasActiveChatGenerationWork()).toBe(false);
+      } finally { appStorage.set = originalSet; }
+    });
+  });
   describe('integrated local tools', () => {
     const settings = { enabled: true, allowedTools: ['calculate' as const], toolChoice: 'auto' as const };
     const proposal = () => ({ content: '', text: '', tokens_predicted: 12,
@@ -747,6 +1593,8 @@ describe('useChatSession', () => {
         const controller = new AbortController(); leaseControllers.push(controller);
         return { token: Symbol('tool-run'), signal: controller.signal, finish,
           assertCanPublish: () => undefined,
+          assertSelectionCurrent: () => { if (controller.signal.aborted) throw new Error('Cancelled tool owner'); },
+          assertRestorationSelectionCurrent: () => undefined,
           assertCurrent: () => { if (controller.signal.aborted) throw new Error('Cancelled tool owner'); } };
       });
       (llmEngineService.stopCompletion as jest.Mock).mockImplementation(async () => {
@@ -7175,40 +8023,39 @@ describe('useChatSession', () => {
       const userMessageId = initialThread.messages[0].id;
       const staleDerivedUri = 'test-dir/chat-attachments/stale-derived-document-image.png';
       act(() => {
+        // Commit the fixture's old history so branch identity includes its
+        // stale derived image before regeneration safely removes that image.
+        const attachments: NonNullable<ChatMessage['attachments']> = [
+          ...(initialThread.messages[0].attachments ?? []),
+          {
+            id: 'stale-derived-document-image',
+            threadId: initialThread.id,
+            messageId: userMessageId,
+            localUri: staleDerivedUri,
+            pathCategory: 'chat_attachment',
+            mediaType: 'image/png',
+            fileName: 'stale-derived-document-image.png',
+            size: 256,
+            width: 32,
+            height: 32,
+            source: 'derived_processor',
+            derivedFromAttachmentId: documentDraft.id,
+            derivedFromAssetId: 0,
+            createdAt: 1,
+          },
+        ];
         useChatStore.setState((state) => ({
           threads: {
             ...state.threads,
             [initialThread.id]: {
-              ...initialThread,
-              messages: initialThread.messages.map((message) => (
-                message.id === userMessageId
-                  ? {
-                      ...message,
-                      attachments: [
-                        ...(message.attachments ?? []),
-                        {
-                          id: 'stale-derived-document-image',
-                          threadId: initialThread.id,
-                          messageId: userMessageId,
-                          localUri: staleDerivedUri,
-                          pathCategory: 'chat_attachment' as const,
-                          mediaType: 'image/png',
-                          fileName: 'stale-derived-document-image.png',
-                          size: 256,
-                          width: 32,
-                          height: 32,
-                          source: 'derived_processor' as const,
-                          derivedFromAttachmentId: documentDraft.id,
-                          derivedFromAssetId: 0,
-                          createdAt: 1,
-                        },
-                      ],
-                    }
-                  : message
+              ...state.threads[initialThread.id],
+              messages: state.threads[initialThread.id].messages.map(message => (
+                message.id === userMessageId ? { ...message, attachments } : message
               )),
             },
           },
         }));
+        useChatStore.getState().finalizeThreadStatus(initialThread.id, 'idle');
       });
       await waitFor(() => {
         expect(getSession()?.activeThread?.messages[0]?.attachments).toHaveLength(2);

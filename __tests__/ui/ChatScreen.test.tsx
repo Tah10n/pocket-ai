@@ -30,6 +30,7 @@ jest.mock('@shopify/flash-list', () => {
       ListHeaderComponent,
       ListEmptyComponent,
       maintainVisibleContentPosition,
+      contentContainerStyle,
       onContentSizeChange,
       onScroll,
       onScrollBeginDrag,
@@ -47,6 +48,7 @@ jest.mock('@shopify/flash-list', () => {
           data,
           extraData,
           maintainVisibleContentPosition,
+          contentContainerStyle,
           onContentSizeChange,
           onScroll,
           onScrollBeginDrag,
@@ -1176,6 +1178,109 @@ describe('ChatScreen', () => {
       expect(lastModelParametersSheetProps.params.output).toBeUndefined();
       expect(lastModelParametersSheetProps.params.temperature).toBe(getGenerationParametersForModel(null).temperature);
     } finally { presetSpy.mockRestore(); }
+  });
+
+  it('keeps document retrieval lexical for existing chats and scopes explicit new-chat options to their draft', async () => {
+    const view = render(React.createElement(ChatScreen));
+    fireEvent.press(view.getByTestId('chat-retrieval-expand'));
+    expect(view.getByTestId('chat-retrieval-mode-lexical').props.accessibilityState.selected).toBe(true);
+    expect(view.getByTestId('chat-retrieval-rerank').props.accessibilityState.checked).toBe(false);
+    expect(useChatStore.getState().getActiveThread().documentRetrieval).toBeUndefined();
+    await act(async () => { fireEvent.press(view.getByTestId('chat-retrieval-mode-hybrid')); view.rerender(React.createElement(ChatScreen)); });
+    await act(async () => { fireEvent.press(view.getByTestId('chat-retrieval-rerank')); view.rerender(React.createElement(ChatScreen)); });
+    expect(useChatStore.getState().getActiveThread().documentRetrieval).toEqual({ mode: 'hybrid', rerank: true });
+    await act(async () => { useChatStore.setState({ activeThreadId: null }); view.rerender(React.createElement(ChatScreen)); });
+    fireEvent.press(view.getByTestId('chat-retrieval-expand'));
+    expect(view.getByTestId('chat-retrieval-mode-lexical').props.accessibilityState.selected).toBe(true);
+    await act(async () => { fireEvent.press(view.getByTestId('chat-retrieval-mode-hybrid')); });
+    await act(async () => { fireEvent.press(view.getByTestId('chat-retrieval-rerank')); });
+    await act(async () => { await lastChatInputBarProps.onSendMessage('Search this document'); });
+    expect(mockAppendUserMessage).toHaveBeenLastCalledWith('Search this document', expect.objectContaining({
+      newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
+    }));
+    await act(async () => { useChatStore.setState({ newThreadRevision: useChatStore.getState().newThreadRevision + 1 }); });
+    fireEvent.press(view.getByTestId('chat-retrieval-expand'));
+    expect(view.getByTestId('chat-retrieval-mode-lexical').props.accessibilityState.selected).toBe(true);
+    expect(view.getByTestId('chat-retrieval-rerank').props.accessibilityState.checked).toBe(false);
+  });
+
+  it('blocks document retrieval preparation overlap until cancellation has drained and shows the actual fallback', async () => {
+    reactI18nextMock.__setTranslationOverride('chat.retrieval.actualMode', 'Used: {{mode}}');
+    reactI18nextMock.__setTranslationOverride('chat.retrieval.fallback', 'Fallback: {{reason}}');
+    const preparation = jest.requireActual('../../src/services/DocumentRetrievalPreparation');
+    const status = jest.requireActual('../../src/services/DocumentRetrievalStatus');
+    const auxiliary = jest.requireActual('../../src/services/AuxiliaryModelService');
+    const pending = createDeferred<void>();
+    const documents = jest.spyOn(preparation, 'getDocumentRetrievalPreparationDocuments').mockReturnValue([
+      { attachmentId: 'doc-1', displayName: 'Report', status: 'not_ready' },
+    ]);
+    const selected = jest.spyOn(auxiliary, 'getAuxiliarySelection').mockImplementation(() => ({ name: 'Embedding B' }));
+    const prepare = jest.spyOn(preparation, 'prepareDocumentRetrieval').mockReturnValue(pending.promise);
+    const cancel = jest.spyOn(preparation, 'cancelDocumentRetrievalPreparation').mockImplementation(() => undefined);
+    const view = render(React.createElement(ChatScreen));
+    try {
+      fireEvent.press(view.getByTestId('chat-retrieval-expand'));
+      await act(async () => { fireEvent.press(view.getByTestId('chat-retrieval-mode-hybrid')); view.rerender(React.createElement(ChatScreen)); });
+      const staleSendHandler = lastChatInputBarProps.onSendMessage;
+      await act(async () => { fireEvent.press(view.getByTestId('document-preparation-start-doc-1')); });
+      expect(prepare).toHaveBeenCalledWith('thread-1', ['doc-1']);
+      expect(lastChatInputBarProps.disabled).toBe(true);
+      expect(lastChatHeaderProps.canStartNewChat).toBe(false);
+      fireEvent.press(view.getByTestId('document-preparation-start-doc-1'));
+      await act(async () => { await staleSendHandler('Do not overlap'); });
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(mockAppendUserMessage).not.toHaveBeenCalled();
+      documents.mockReturnValue([{ attachmentId: 'doc-1', displayName: 'Report', status: 'preparing', processed: 2, total: 4 }]);
+      await act(async () => { status.updateDocumentRetrievalStatus('thread-1', {
+        preparation: { phase: 'preparing', attachmentId: 'doc-1', processed: 2, total: 4 },
+      }); });
+      expect(view.getByTestId('document-preparation-progress-doc-1').props.accessibilityValue.now).toBe(50);
+      fireEvent.press(view.getByTestId('document-preparation-cancel-doc-1'));
+      expect(cancel).toHaveBeenCalledWith('thread-1');
+      await act(async () => { status.updateDocumentRetrievalStatus('thread-1', {
+        preparation: { phase: 'cancelling', attachmentId: 'doc-1', processed: 2, total: 4 },
+      }); });
+      expect(view.getByTestId('document-preparation-cancel-doc-1').props.accessibilityState.disabled).toBe(true);
+      expect(lastChatInputBarProps.disabled).toBe(true);
+      await act(async () => {
+        status.updateDocumentRetrievalStatus('thread-1', { preparation: { phase: 'cancelled', processed: 2, total: 4 },
+          lastSearch: { actualMode: 'lexical', fallbackReason: 'profile_unverified' } });
+        pending.resolve();
+        await pending.promise;
+      });
+      expect(lastChatInputBarProps.disabled).toBe(false);
+      expect(view.getByText(/Fallback: chat.retrieval.reasons.profile_unverified/)).toBeTruthy();
+    } finally {
+      view.unmount(); status.clearDocumentRetrievalStatus();
+      documents.mockRestore(); selected.mockRestore(); prepare.mockRestore(); cancel.mockRestore();
+    }
+  });
+
+  it('releases the screen preparation owner after admission rejection so another explicit attempt can start', async () => {
+    const preparation = jest.requireActual('../../src/services/DocumentRetrievalPreparation');
+    const auxiliary = jest.requireActual('../../src/services/AuxiliaryModelService');
+    const status = jest.requireActual('../../src/services/DocumentRetrievalStatus');
+    const documents = jest.spyOn(preparation, 'getDocumentRetrievalPreparationDocuments').mockReturnValue([
+      { attachmentId: 'doc-1', displayName: 'Report', status: 'not_ready' },
+    ]);
+    const selected = jest.spyOn(auxiliary, 'getAuxiliarySelection').mockImplementation(() => ({ name: 'Embedding B' }));
+    const prepare = jest.spyOn(preparation, 'prepareDocumentRetrieval')
+      .mockRejectedValueOnce(new Error('work admission denied')).mockResolvedValue(undefined);
+    const view = render(React.createElement(ChatScreen));
+    try {
+      fireEvent.press(view.getByTestId('chat-retrieval-expand'));
+      await act(async () => { fireEvent.press(view.getByTestId('chat-retrieval-mode-hybrid')); view.rerender(React.createElement(ChatScreen)); });
+      await act(async () => { fireEvent.press(view.getByTestId('document-preparation-start-doc-1')); });
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(lastChatInputBarProps.disabled).toBe(false);
+      expect(view.getByTestId('document-preparation-start-doc-1').props.accessibilityState.disabled).toBe(false);
+      await act(async () => { fireEvent.press(view.getByTestId('document-preparation-start-doc-1')); });
+      expect(prepare).toHaveBeenCalledTimes(2);
+      expect(lastChatInputBarProps.disabled).toBe(false);
+    } finally {
+      view.unmount(); status.clearDocumentRetrievalStatus();
+      documents.mockRestore(); selected.mockRestore(); prepare.mockRestore();
+    }
   });
 
   it('edits advanced generation settings without contaminating another chat snapshot or history', async () => {
@@ -3899,6 +4004,39 @@ describe('ChatScreen', () => {
   });
 
   it.each([
+    { status: 'running', requiresForceStop: false },
+    { status: 'ready_for_cold_reopen', requiresForceStop: false },
+    { status: 'ready_for_deleted_reopen', requiresForceStop: false },
+    { status: 'failed', requiresForceStop: true },
+    { status: 'passed', requiresForceStop: false },
+    { status: 'idle', requiresForceStop: true },
+  ] as const)('keeps the Stage 5 QA loader owner while status=$status forceStop=$requiresForceStop', async ({
+    status, requiresForceStop,
+  }) => {
+    const qaBootstrap = jest.requireActual('../../src/services/AndroidQaDocumentModelBootstrap');
+    const qaRetrieval = jest.requireActual('../../src/services/AndroidQaDocumentRetrieval');
+    const gate = jest.spyOn(qaBootstrap, 'isAndroidQaDocumentModelBootstrapEnabled').mockReturnValue(true);
+    const evidence = jest.spyOn(qaRetrieval, 'getAndroidQaDocumentRetrievalEvidence').mockReturnValue({
+      ...qaRetrieval.getAndroidQaDocumentRetrievalEvidence(), status, requiresForceStop,
+    });
+    registry.saveModels([{
+      id: 'author/model-q4', name: 'Model Q4', author: 'Test', size: 1024,
+      localPath: 'model-q4.gguf', lifecycleStatus: 'downloaded',
+    }]);
+    const view = render(React.createElement(ChatScreen));
+    try {
+      await act(async () => {
+        mockEngineState = { status: 'idle', loadProgress: 0, activeModelId: null };
+        view.rerender(React.createElement(ChatScreen));
+      });
+      expect(mockLoadModel).not.toHaveBeenCalled();
+      expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe('author/model-q4');
+    } finally {
+      view.unmount(); evidence.mockRestore(); gate.mockRestore();
+    }
+  });
+
+  it.each([
     { qaEnabled: true, status: 'running', shouldLoad: false },
     { qaEnabled: true, status: 'failed', shouldLoad: false },
     { qaEnabled: true, status: 'passed', shouldLoad: false },
@@ -5112,7 +5250,7 @@ describe('ChatScreen', () => {
     expect(queryByText('Saved user prompt')).toBeNull();
   });
 
-  it('keeps the empty-chat copy below the floating header', () => {
+  it('keeps document controls and empty-chat copy below the floating header with one measured inset', () => {
     const scrollInsets = require('../../src/hooks/useTabBarContentInset');
     const insetSpy = jest.spyOn(scrollInsets, 'useFloatingScrollInsets').mockReturnValue({
       paddingTop: 180,
@@ -5127,12 +5265,23 @@ describe('ChatScreen', () => {
 
       const { getByTestId } = render(React.createElement(ChatScreen));
 
-      expect(StyleSheet.flatten(getByTestId('chat-empty-state').props.style)).toMatchObject({
+      expect(StyleSheet.flatten(getByTestId('chat-document-controls-region').props.style)).toMatchObject({
         paddingTop: 180,
       });
+      expect(StyleSheet.flatten(getByTestId('chat-empty-state').props.style)?.paddingTop).toBeUndefined();
     } finally {
       insetSpy.mockRestore();
     }
+  });
+
+  it('reserves the floating header once above document controls and the existing transcript', () => {
+    const scrollInsets = jest.requireActual('../../src/hooks/useTabBarContentInset');
+    const insetSpy = jest.spyOn(scrollInsets, 'useFloatingScrollInsets').mockReturnValue({ paddingTop: 180, paddingBottom: 0 });
+    try {
+      const view = render(React.createElement(ChatScreen));
+      expect(StyleSheet.flatten(view.getByTestId('chat-document-controls-region').props.style).paddingTop).toBe(180);
+      expect(view.getByTestId('chat-flash-list').props.contentContainerStyle.paddingTop).toBe(4);
+    } finally { insetSpy.mockRestore(); }
   });
 
   it('shows an alert instead of throwing when header new chat fails synchronously', () => {

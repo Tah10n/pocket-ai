@@ -24,8 +24,13 @@ import { resetModelsStoreForPrivateStorageReset } from '../store/modelsStore';
 import { chatAttachmentStorageService } from './ChatAttachmentStorageService';
 import { documentSessionContextCache } from './DocumentSessionContextCache';
 import { llmEngineService } from './LLMEngineService';
+import { documentIndexStore } from './DocumentIndexStore';
+import { stopDocumentRetrievalPreparation } from './DocumentRetrievalPreparation';
+import { clearDocumentRetrievalStatus } from './DocumentRetrievalStatus';
 
 export function invalidatePrivateStorageRuntimeHandles(): void {
+  documentIndexStore.invalidate();
+  clearDocumentRetrievalStatus();
   invalidateAppStorageForPrivateReset();
   invalidateSettingsStorageForPrivateReset();
   invalidatePresetStorageForPrivateReset();
@@ -43,8 +48,10 @@ export function resetPrivatePersistedRuntimeStateForStorageReset(): void {
 }
 
 export async function stopPrivateRuntimeWorkForStorageBlocked(): Promise<void> {
+  documentIndexStore.invalidate();
   llmEngineService.invalidateAuxiliaryContextOperation();
   await Promise.all([
+    stopDocumentRetrievalPreparation(),
     stopModelDownloadManagerForPrivateStorageBlocked(),
     stopActiveChatGenerationForPrivateStorageBlocked(),
   ]);
@@ -52,8 +59,10 @@ export async function stopPrivateRuntimeWorkForStorageBlocked(): Promise<void> {
 }
 
 export async function resetPrivateAppStorageAndRuntimeStateAfterConfirmation(): Promise<PrivateStorageHealthSnapshot> {
+  documentIndexStore.invalidate();
   llmEngineService.invalidateAuxiliaryContextOperation();
   await Promise.all([
+    stopDocumentRetrievalPreparation(),
     resetModelDownloadManagerForPrivateStorageReset(),
     stopActiveChatGenerationForPrivateStorageBlocked(),
   ]);

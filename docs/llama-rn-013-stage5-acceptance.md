@@ -2,6 +2,8 @@
 
 Android CPU native acceptance passed on 2026-10-01 for the exact source and installed APK below. All five scenarios passed, including the earlier inference, resource, generation-profile and local-tool baselines. The Stage 5 protocol completed fourteen steps and all 36 frozen English/Russian ranking cases across three app processes and two cold reopens. Ordinary English/Russian document controls and measured touch targets were verified separately on the same source/APK, with the capture and answer-quality limits below.
 
+> These native results apply to the exact source and installed APK identified below. The later [index-publication correction](llama-rn-013-stage5-index-publication-fix.md) has its own source/APK evidence; source-level regression tests do not extend this historical binary's native acceptance.
+
 ## Reproducible identity
 
 The [sanitized identity](validation/llama-rn-stage5/cpu-evidence/identity.json) binds the public source, embedded fixture, guarded runtime patch, built APK and installed APK. The [fixture manifest](validation/llama-rn-stage5/retrieval-fixtures.json) and [model sources](validation/llama-rn-stage5/model-sources.md) retain the model revisions, file hashes, licenses, languages and preprocessing contracts fixed before native results.

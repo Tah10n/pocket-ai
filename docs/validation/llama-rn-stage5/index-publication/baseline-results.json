@@ -1,0 +1,836 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "apkSha256": "d903eade0ce2cbc44b91e086e7d95a2bcde9b65ad7a81e168b873b2ef95acef7",
+    "installedApkSha256": "d903eade0ce2cbc44b91e086e7d95a2bcde9b65ad7a81e168b873b2ef95acef7",
+    "provenanceDigest": "de886c2724911d1b83248531e2f80a89a40154968e1e5bb65eef2800030294d1"
+  },
+  "results": [
+    {
+      "id": "runtime-inference-lifecycle",
+      "status": "passed",
+      "durationMs": 30392,
+      "details": {
+        "schemaVersion": 1,
+        "status": "passed",
+        "phase": "complete",
+        "requiresForceStop": false,
+        "steps": [
+          {
+            "id": "backend_discovery",
+            "status": "passed",
+            "discoveredDeviceCount": 1
+          },
+          {
+            "id": "cpu_load",
+            "status": "passed",
+            "loadedGpuLayers": 0,
+            "backendMode": "cpu",
+            "actualGpuAccelerated": false
+          },
+          {
+            "id": "generate",
+            "status": "passed",
+            "callbacks": 21,
+            "outputCharacters": 102,
+            "tokensPredicted": 20,
+            "tokensEvaluated": 36,
+            "inputMessages": 2
+          },
+          {
+            "id": "stop_after_token",
+            "status": "passed",
+            "callbacks": 1,
+            "outputCharacters": 1,
+            "inputMessages": 4
+          },
+          {
+            "id": "generate_after_stop",
+            "status": "passed",
+            "callbacks": 21,
+            "outputCharacters": 102,
+            "tokensPredicted": 20,
+            "tokensEvaluated": 97,
+            "inputMessages": 5
+          },
+          {
+            "id": "new_chat_isolation",
+            "status": "passed",
+            "callbacks": 21,
+            "outputCharacters": 102,
+            "tokensPredicted": 21,
+            "tokensEvaluated": 36,
+            "inputMessages": 2
+          },
+          {
+            "id": "unload",
+            "status": "passed"
+          },
+          {
+            "id": "cpu_reload",
+            "status": "passed",
+            "loadedGpuLayers": 0,
+            "backendMode": "cpu",
+            "actualGpuAccelerated": false
+          },
+          {
+            "id": "generate_after_reload",
+            "status": "passed",
+            "callbacks": 21,
+            "outputCharacters": 102,
+            "tokensPredicted": 20,
+            "tokensEvaluated": 77,
+            "inputMessages": 4
+          }
+        ]
+      }
+    },
+    {
+      "id": "runtime-model-resources",
+      "status": "passed",
+      "durationMs": 72312,
+      "details": {
+        "schemaVersion": 1,
+        "status": "passed",
+        "phase": "complete",
+        "requiresForceStop": false,
+        "steps": [
+          {
+            "id": "cpu_load",
+            "status": "passed"
+          },
+          {
+            "id": "generate_before",
+            "status": "passed",
+            "callbacks": 21,
+            "tokensPredicted": 20,
+            "tokensEvaluated": 36,
+            "outputCharacters": 102
+          },
+          {
+            "id": "prepare_embedding",
+            "status": "passed"
+          },
+          {
+            "id": "embedding_check",
+            "status": "passed",
+            "dimensions": 384,
+            "finite": true
+          },
+          {
+            "id": "restore_chat",
+            "status": "passed",
+            "chatUnchanged": true,
+            "settingsUnchanged": true,
+            "contextChanged": true
+          },
+          {
+            "id": "generate_after",
+            "status": "passed",
+            "callbacks": 21,
+            "tokensPredicted": 20,
+            "tokensEvaluated": 77,
+            "outputCharacters": 102
+          },
+          {
+            "id": "offload_unused_embedding",
+            "status": "passed",
+            "chatUnchanged": true,
+            "settingsUnchanged": true,
+            "contextUnchanged": true,
+            "fileRemoved": true
+          },
+          {
+            "id": "generate_after_offload",
+            "status": "passed",
+            "callbacks": 21,
+            "tokensPredicted": 20,
+            "tokensEvaluated": 118,
+            "outputCharacters": 102
+          },
+          {
+            "id": "confirm_context_retained",
+            "status": "passed",
+            "contextUnchanged": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "runtime-stage3",
+      "status": "passed",
+      "durationMs": 78190,
+      "details": {
+        "schemaVersion": 1,
+        "status": "passed",
+        "phase": "complete",
+        "requiresForceStop": false,
+        "runtimeVersion": "0.13.0-rc.3",
+        "backend": "cpu",
+        "steps": [
+          {
+            "id": "cpu_load",
+            "status": "passed"
+          },
+          {
+            "id": "text",
+            "status": "passed",
+            "callbacks": 21,
+            "tokensPredicted": 20,
+            "tokensEvaluated": 39,
+            "outputCharacters": 89,
+            "tokenCount": 39,
+            "contentCharacters": 89,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": false,
+            "stoppedEos": true,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "stop",
+            "status": "passed",
+            "callbacks": 1,
+            "tokensPredicted": 0,
+            "tokensEvaluated": 45,
+            "outputCharacters": 4,
+            "contentCharacters": 0,
+            "stopped": true,
+            "hasContent": false,
+            "hasReasoning": false,
+            "stoppedLimit": false,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": true,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "json_object",
+            "status": "passed",
+            "callbacks": 17,
+            "tokensPredicted": 16,
+            "tokensEvaluated": 43,
+            "outputCharacters": 43,
+            "contentCharacters": 43,
+            "valid": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": false,
+            "stoppedEos": true,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "json_schema",
+            "status": "passed",
+            "callbacks": 13,
+            "tokensPredicted": 12,
+            "tokensEvaluated": 38,
+            "outputCharacters": 21,
+            "contentCharacters": 21,
+            "valid": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": false,
+            "stoppedEos": true,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "gbnf",
+            "status": "passed",
+            "callbacks": 1,
+            "tokensPredicted": 0,
+            "tokensEvaluated": 34,
+            "outputCharacters": 3,
+            "contentCharacters": 3,
+            "valid": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": false,
+            "stoppedEos": true,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true,
+            "exactConstraintMatch": true
+          },
+          {
+            "id": "template_prefill",
+            "status": "passed",
+            "tokensPredicted": 0,
+            "tokensEvaluated": 16,
+            "tokenCount": 16,
+            "templateGenerationTokensEvaluated": 16,
+            "templateGenerationCallbacks": 3,
+            "templateGenerationOutputCharacters": 3,
+            "historyUnchanged": true
+          },
+          {
+            "id": "token_diagnostics",
+            "status": "passed",
+            "tokenCount": 4,
+            "valid": true
+          },
+          {
+            "id": "invalid_schema",
+            "status": "passed",
+            "valid": true
+          },
+          {
+            "id": "invalid_grammar",
+            "status": "passed",
+            "valid": true
+          },
+          {
+            "id": "unsupported_grammar",
+            "status": "passed",
+            "valid": true,
+            "completionDrained": true
+          },
+          {
+            "id": "ordinary_after_unsupported",
+            "status": "passed",
+            "callbacks": 21,
+            "tokensPredicted": 20,
+            "tokensEvaluated": 39,
+            "outputCharacters": 89,
+            "contentCharacters": 89,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": false,
+            "stoppedEos": true,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "gbnf_literal",
+            "status": "passed",
+            "callbacks": 9,
+            "tokensPredicted": 9,
+            "tokensEvaluated": 39,
+            "outputCharacters": 11,
+            "contentCharacters": 11,
+            "valid": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": false,
+            "stoppedEos": true,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true,
+            "exactConstraintMatch": true
+          },
+          {
+            "id": "truncated_json",
+            "status": "passed",
+            "callbacks": 1,
+            "tokensPredicted": 0,
+            "tokensEvaluated": 36,
+            "outputCharacters": 1,
+            "contentCharacters": 1,
+            "valid": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": true,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "structured_cancel",
+            "status": "passed",
+            "callbacks": 1,
+            "tokensPredicted": 0,
+            "tokensEvaluated": 45,
+            "outputCharacters": 1,
+            "contentCharacters": 0,
+            "structuredIncomplete": true,
+            "stopped": true,
+            "hasContent": false,
+            "hasReasoning": false,
+            "stoppedLimit": false,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": true,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "ordinary_after_failure",
+            "status": "passed",
+            "callbacks": 21,
+            "tokensPredicted": 20,
+            "tokensEvaluated": 39,
+            "outputCharacters": 89,
+            "contentCharacters": 89,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": false,
+            "stoppedEos": true,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "prepare_adapter",
+            "status": "passed"
+          },
+          {
+            "id": "probability_baseline",
+            "status": "passed",
+            "callbacks": 1,
+            "tokensPredicted": 0,
+            "tokensEvaluated": 59,
+            "outputCharacters": 4,
+            "sharedTokens": 10,
+            "contentCharacters": 4,
+            "sampledTokens": 1,
+            "repeatedTokensPredicted": 1,
+            "repeatedSampledTokens": 1,
+            "probabilitiesValidated": true,
+            "supportMatched": true,
+            "finite": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": true,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "logit_bias",
+            "status": "passed",
+            "callbacks": 1,
+            "tokensPredicted": 1,
+            "tokensEvaluated": 59,
+            "outputCharacters": 4,
+            "contentCharacters": 4,
+            "sampledTokens": 1,
+            "probabilitiesValidated": true,
+            "valid": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": true,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "ignore_eos",
+            "status": "passed",
+            "callbacks": 1,
+            "tokensPredicted": 1,
+            "tokensEvaluated": 59,
+            "outputCharacters": 4,
+            "contentCharacters": 4,
+            "sampledTokens": 1,
+            "probabilitiesValidated": true,
+            "valid": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": true,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true,
+            "eosConfirmed": true
+          },
+          {
+            "id": "invalid_logit_bias",
+            "status": "passed",
+            "valid": true
+          },
+          {
+            "id": "sampling_reset",
+            "status": "passed",
+            "callbacks": 1,
+            "tokensPredicted": 1,
+            "tokensEvaluated": 59,
+            "outputCharacters": 4,
+            "sharedTokens": 10,
+            "contentCharacters": 4,
+            "sampledTokens": 1,
+            "probabilitiesValidated": true,
+            "supportMatched": true,
+            "valid": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": true,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true,
+            "resetEosConfirmed": true
+          },
+          {
+            "id": "lora_apply",
+            "status": "passed",
+            "callbacks": 0,
+            "tokensPredicted": 0,
+            "tokensEvaluated": 59,
+            "outputCharacters": 1,
+            "adapterCount": 1,
+            "sharedTokens": 6,
+            "contentCharacters": 1,
+            "sampledTokens": 1,
+            "probabilitiesValidated": true,
+            "loadedListConfirmed": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": true,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "lora_scale",
+            "status": "passed",
+            "callbacks": 0,
+            "tokensPredicted": 0,
+            "tokensEvaluated": 59,
+            "outputCharacters": 1,
+            "adapterCount": 1,
+            "sharedTokens": 9,
+            "contentCharacters": 1,
+            "sampledTokens": 1,
+            "probabilitiesValidated": true,
+            "loadedListConfirmed": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": true,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "lora_remove",
+            "status": "passed",
+            "adapterCount": 0,
+            "loadedListConfirmed": true
+          },
+          {
+            "id": "lora_restore_baseline",
+            "status": "passed",
+            "callbacks": 1,
+            "tokensPredicted": 0,
+            "tokensEvaluated": 59,
+            "outputCharacters": 4,
+            "sharedTokens": 10,
+            "contentCharacters": 4,
+            "sampledTokens": 1,
+            "probabilitiesValidated": true,
+            "supportMatched": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": true,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "prepare_embedding",
+            "status": "passed"
+          },
+          {
+            "id": "lora_auxiliary_restore",
+            "status": "passed",
+            "callbacks": 0,
+            "tokensPredicted": 0,
+            "tokensEvaluated": 59,
+            "outputCharacters": 1,
+            "sharedTokens": 10,
+            "dimensions": 384,
+            "contentCharacters": 1,
+            "sampledTokens": 1,
+            "probabilitiesValidated": true,
+            "supportMatched": true,
+            "historyUnchanged": true,
+            "profileRestored": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": true,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "lora_delete_guard",
+            "status": "passed",
+            "deletionRejected": true
+          },
+          {
+            "id": "native_disabled_grammar",
+            "status": "passed",
+            "callbacks": 32,
+            "tokensPredicted": 31,
+            "tokensEvaluated": 3,
+            "outputCharacters": 111,
+            "contentCharacters": 111,
+            "nativeErrorMatched": true,
+            "contextReleased": true,
+            "valid": true,
+            "hasContent": true,
+            "hasReasoning": false,
+            "stoppedLimit": true,
+            "stoppedEos": false,
+            "stoppedWord": false,
+            "interrupted": false,
+            "truncated": false,
+            "contextFull": false,
+            "completionDrained": true
+          },
+          {
+            "id": "cleanup",
+            "status": "passed",
+            "adapterCount": 0,
+            "loadedListConfirmed": true
+          }
+        ],
+        "notRun": [
+          {
+            "backend": "ios",
+            "reason": "cpu_only_fixture"
+          },
+          {
+            "backend": "gpu",
+            "reason": "cpu_only_fixture"
+          },
+          {
+            "backend": "npu",
+            "reason": "cpu_only_fixture"
+          },
+          {
+            "backend": "mtp",
+            "reason": "cpu_only_fixture"
+          }
+        ]
+      }
+    },
+    {
+      "id": "runtime-local-tools",
+      "status": "passed",
+      "durationMs": 300520,
+      "details": {
+        "schemaVersion": 1,
+        "status": "passed",
+        "phase": "complete",
+        "requiresForceStop": false,
+        "runtimeVersion": "0.13.0-rc.3",
+        "backend": "cpu",
+        "steps": [
+          {
+            "id": "prepare_model",
+            "status": "passed",
+            "fixtureVerified": true
+          },
+          {
+            "id": "cpu_load",
+            "status": "passed",
+            "cpuConfirmed": true
+          },
+          {
+            "id": "calculate_required",
+            "nativeStage": "completion",
+            "status": "passed",
+            "nativeSteps": 2,
+            "nativeCalls": 1,
+            "executedCalls": 1,
+            "outputCharacters": 44,
+            "resultReturned": true,
+            "referenceMatched": true,
+            "finalReferencePresent": true,
+            "completionDrained": true
+          },
+          {
+            "id": "calculate_auto",
+            "nativeStage": "completion",
+            "status": "observed",
+            "nativeSteps": 1,
+            "nativeCalls": 0,
+            "executedCalls": 0,
+            "outputCharacters": 78,
+            "automaticCallSelected": false,
+            "resultReturned": false,
+            "referenceMatched": false,
+            "finalReferencePresent": false,
+            "completionDrained": true
+          },
+          {
+            "id": "ordinary_auto",
+            "nativeStage": "completion",
+            "status": "passed",
+            "nativeSteps": 1,
+            "nativeCalls": 0,
+            "executedCalls": 0,
+            "outputCharacters": 28,
+            "resultReturned": false,
+            "completionDrained": true
+          },
+          {
+            "id": "document_search",
+            "nativeStage": "completion",
+            "status": "passed",
+            "nativeSteps": 2,
+            "nativeCalls": 1,
+            "executedCalls": 1,
+            "outputCharacters": 129,
+            "resultReturned": true,
+            "referenceMatched": true,
+            "membershipMatched": true,
+            "locatorMatched": true,
+            "finalReferencePresent": true,
+            "completionDrained": true
+          },
+          {
+            "id": "json_schema",
+            "nativeStage": "completion",
+            "status": "passed",
+            "nativeSteps": 3,
+            "nativeCalls": 1,
+            "executedCalls": 1,
+            "outputCharacters": 14,
+            "resultReturned": true,
+            "referenceMatched": true,
+            "schemaAnswerMatched": true,
+            "structuredValid": true,
+            "completionDrained": true
+          },
+          {
+            "id": "stop",
+            "nativeStage": "completion",
+            "status": "passed",
+            "nativeSteps": 1,
+            "nativeCalls": 1,
+            "executedCalls": 0,
+            "resultReturned": false,
+            "cancelled": true,
+            "completionDrained": true
+          },
+          {
+            "id": "ordinary_after_stop",
+            "status": "passed",
+            "outputCharacters": 53,
+            "completionDrained": true
+          },
+          {
+            "id": "cleanup",
+            "status": "passed",
+            "historyRetained": true,
+            "profileRestored": true
+          }
+        ],
+        "coldReopen": {
+          "historyUnchanged": true,
+          "noReexecution": true,
+          "callCount": 4,
+          "completedCalls": 3
+        },
+        "recovery": {
+          "schemaVersion": 1,
+          "status": "passed",
+          "phase": "complete",
+          "requiresForceStop": false,
+          "steps": [
+            {
+              "id": "ordinary_auto_limit",
+              "status": "passed",
+              "nativeSteps": 1,
+              "nativeCalls": 0,
+              "executedCalls": 0,
+              "outputCharacters": 146,
+              "stoppedLimit": true,
+              "parsedContentRetained": true,
+              "storedStopped": true,
+              "completionDrained": true
+            },
+            {
+              "id": "empty_regenerate_stop",
+              "status": "passed",
+              "nativeSteps": 1,
+              "nativeCalls": 0,
+              "executedCalls": 0,
+              "completionDrained": true,
+              "firstNativeTokenObserved": true,
+              "emptyRunObserved": true,
+              "historyUnchanged": true,
+              "attachmentsRetained": true,
+              "otherChatsUnchanged": true
+            },
+            {
+              "id": "empty_branch_stop",
+              "status": "passed",
+              "nativeSteps": 1,
+              "nativeCalls": 0,
+              "executedCalls": 0,
+              "completionDrained": true,
+              "firstNativeTokenObserved": true,
+              "emptyRunObserved": true,
+              "historyUnchanged": true,
+              "attachmentsRetained": true,
+              "otherChatsUnchanged": true
+            },
+            {
+              "id": "empty_checkpoint_cold_recovery",
+              "status": "passed",
+              "completionDrained": true,
+              "historyUnchanged": true,
+              "attachmentsRetained": true,
+              "otherChatsUnchanged": true,
+              "emptyWriteRejected": true,
+              "legacyCheckpointSeeded": true,
+              "legacyCheckpointRejected": true,
+              "noReexecution": true
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

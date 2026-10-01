@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "publicSourceCommit": "81a3fe0b95381a0caa78aac0f02069e1fd6fe478",
+  "publicAppTree": "031662c55ac0751c9f3cea9cb7e1e4c5ca9de6d0",
+  "sourcePatchSha256": "5093423b44e29c70a6757c61a59bfa986af7f7909b8e63c9333359bda1253cf4",
+  "retrievalFixtureSha256": "b71691fda62cfbcb3e7114eaaa95654c52bbba46595b05e65fa570a524429eb7",
+  "apkSha256": "d903eade0ce2cbc44b91e086e7d95a2bcde9b65ad7a81e168b873b2ef95acef7",
+  "installedApkSha256": "d903eade0ce2cbc44b91e086e7d95a2bcde9b65ad7a81e168b873b2ef95acef7",
+  "provenanceDigest": "de886c2724911d1b83248531e2f80a89a40154968e1e5bb65eef2800030294d1",
+  "runtimeVersion": "0.13.0-rc.3",
+  "backend": "cpu",
+  "variant": "release",
+  "abi": "x86_64",
+  "packagedAbis": [
+    "x86_64"
+  ],
+  "embeddedBundle": true,
+  "packageName": "com.github.tah10n.pocketai.qa",
+  "apkBytes": 82302894
+}

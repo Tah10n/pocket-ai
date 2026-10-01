@@ -23,6 +23,48 @@ describe('optional Android QA event routing', () => {
       .toEqual({ run: true, pack, diagnostics: true });
   });
 
+  it.each([
+    ['Run-Android-Checks', 'runtime'],
+    ['RUN-ANDROID-SCENARIOS', 'extended'],
+    ['Android-Pack-All', 'all'],
+    ['aNdRoId-PaCk-DoCuMeNtS', 'documents'],
+    ['Android-Pack-Native', 'native'],
+    ['ANDROID-PACK-RUNTIME', 'runtime'],
+    ['Android-Pack-Dependency-UI', 'dependency-ui'],
+    ['Android-Pack-Catalog', 'catalog'],
+    ['ANDROID-PACK-EXTENDED', 'extended'],
+  ])('matches mixed-case %s labels and changed-label payloads', (label, pack) => {
+    expect(evaluateQaRequest('pull_request', event('labeled', pr([label]), { label: { name: label.toUpperCase() } })))
+      .toEqual({ run: true, pack, diagnostics: true });
+  });
+
+  it.each([
+    ['- [x] run android checks', 'runtime'],
+    ['- [X] RuN aNdRoId ChEcKs', 'runtime'],
+    ['- [x] run android scenarios', 'extended'],
+    ['- [X] RUN ANDROID SCENARIOS', 'extended'],
+    ['- [x] run android document pack', 'documents'],
+    ['- [X] RuN AnDrOiD DoCuMeNt PaCk', 'documents'],
+  ])('matches mixed-case checked request %s', (body, pack) => {
+    expect(evaluateQaRequest('pull_request', event('edited', pr([], body), { changes: { body: { from: body.replace(/\[[xX]\]/, '[ ]') } } })))
+      .toEqual({ run: true, pack, diagnostics: true });
+  });
+
+  it('keeps pack precedence with mixed-case labels and checkbox text', () => {
+    expect(selectQaPack(pr(['ANDROID-PACK-ALL', 'Android-Pack-Native'], '- [X] run android document pack'))).toBe('all');
+    expect(selectQaPack(pr(['Android-Pack-Native'], '- [x] RUN ANDROID DOCUMENT PACK'))).toBe('documents');
+    expect(selectQaPack(pr(['Android-Pack-Catalog'], '- [X] RUN ANDROID SCENARIOS'))).toBe('catalog');
+  });
+
+  it('does not rerun QA for a checkbox text case-only edit', () => {
+    expect(evaluateQaRequest('pull_request', event('edited', pr([], '- [X] RUN ANDROID CHECKS'), { changes: { body: { from: '- [x] run android checks' } } })).run).toBe(false);
+  });
+
+  it('selects the lower-priority request after removing a mixed-case label', () => {
+    expect(evaluateQaRequest('pull_request', event('unlabeled', pr(['Android-Pack-Native']), { label: { name: 'ANDROID-PACK-ALL' } })))
+      .toEqual({ run: true, pack: 'native', diagnostics: true });
+  });
+
   it.each(['x', 'X'])('preserves checked %s boxes and ignores unchecked boxes', (mark) => {
     for (const [text, pack] of [
       ['Run Android checks', 'runtime'],

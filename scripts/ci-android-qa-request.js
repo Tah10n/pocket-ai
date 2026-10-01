@@ -3,9 +3,10 @@
 const fs = require("fs");
 
 function selectQaPack(pullRequest) {
-  const labels = new Set((pullRequest.labels || []).map((label) => label.name));
-  const body = pullRequest.body || "";
-  const checked = (text) => body.includes(`- [x] ${text}`) || body.includes(`- [X] ${text}`);
+  // GitHub Actions contains() compares strings without regard to case.
+  const labels = new Set((pullRequest.labels || []).map((label) => label.name.toLowerCase()));
+  const body = (pullRequest.body || "").toLowerCase();
+  const checked = (text) => body.includes(`- [x] ${text.toLowerCase()}`);
 
   // Keep the documented pack priority and existing checkbox semantics.
   if (labels.has("android-pack-all")) return "all";
@@ -40,7 +41,8 @@ function evaluateQaRequest(eventName, event) {
   }
   if (["labeled", "unlabeled"].includes(event.action)) {
     if (!event.label?.name) throw new Error("Missing changed label.");
-    const labels = (current.labels || []).filter((label) => label.name !== event.label.name);
+    const changedLabel = event.label.name.toLowerCase();
+    const labels = (current.labels || []).filter((label) => label.name.toLowerCase() !== changedLabel);
     if (event.action === "unlabeled") labels.push(event.label);
     return { ...result, run: selectQaPack({ ...current, labels }) !== pack };
   }

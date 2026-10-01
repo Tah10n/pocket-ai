@@ -48,11 +48,22 @@ type SeedProgress = AndroidQaDocumentIndexCounters & {
   seedIndex: number; completedSeeds: number; operation: SeedOperation; completionDrained?: boolean;
   operationErrorCode?: DocumentRetrievalIssue | 'engine_busy' | 'engine_unloading' | 'model_load_failed' | 'engine_recovery_required';
 };
+type TurnOperation = 'new_thread_begin' | 'profile_check' | 'dispatch' | 'after_append' | 'terminal_history'
+  | 'answer_match' | 'status_cache' | 'ownership' | 'native_counts' | 'profile_restoration';
+type TurnProgress = Omit<Receipt, 'id' | 'status' | 'actualMode' | 'cacheFailure'> & {
+  turn: 'fifth_new_chat' | 'fifth_existing_chat'; operation: TurnOperation; attachmentCount?: number;
+  threadPresent?: boolean; assistantTerminal?: boolean; assistantError?: boolean;
+  actualMode?: 'lexical' | 'hybrid' | 'lexical+rerank' | 'hybrid+rerank';
+  cacheFailure?: 'quota_exceeded' | 'cache_write_failed'; fallbackReason?: DocumentRetrievalIssue;
+  operationErrorCode?: SeedProgress['operationErrorCode'] | 'action_failed' | 'chat_model_not_loaded'
+    | 'chat_model_mismatch' | 'engine_not_ready' | 'model_memory_insufficient' | 'message_too_long';
+};
 export type AndroidQaDocumentIndexPublicationEvidence = {
   schemaVersion: 1; fixtureId: string; runtimeVersion: string; backend: 'cpu';
   status: 'idle' | 'running' | 'ready_for_cold_reopen' | 'passed' | 'failed';
   phase: StepId | 'idle' | 'preconditions' | 'complete'; steps: Receipt[]; requiresForceStop: boolean;
   seedProgress?: SeedProgress;
+  turnProgress?: TurnProgress;
   failureCode?: 'precondition' | 'assertion' | 'operation_failed' | 'timeout' | 'cleanup_failed';
 };
 type Owner = { threadId: string; attachmentId: string; fingerprint: string; historyDigest: string };
@@ -96,9 +107,15 @@ function fail(error: unknown): void {
   const operationErrorCode = error instanceof DocumentRetrievalError ? error.code
     : error instanceof AppError && ['engine_busy', 'engine_unloading', 'model_load_failed', 'engine_recovery_required'].includes(error.code)
       ? error.code as SeedProgress['operationErrorCode'] : undefined;
+  const turnErrorCode = operationErrorCode ?? (error instanceof AppError
+    && ['action_failed', 'chat_model_not_loaded', 'chat_model_mismatch', 'engine_not_ready', 'model_memory_insufficient', 'message_too_long'].includes(error.code)
+    ? error.code as TurnProgress['operationErrorCode'] : undefined);
   publish({ status: 'failed', failureCode: error instanceof QaFailure ? error.code : 'operation_failed',
     ...(failedPhase === 'four_indexes' && evidence.seedProgress ? { seedProgress: {
       ...evidence.seedProgress, completionDrained: idle(), operationErrorCode,
+    } } : {}),
+    ...((failedPhase === 'fifth_new_chat' || failedPhase === 'fifth_existing_chat') && evidence.turnProgress ? { turnProgress: {
+      ...evidence.turnProgress, completionDrained: idle(), operationErrorCode: turnErrorCode,
     } } : {}),
     requiresForceStop: error instanceof QaFailure ? error.forceStop || !idle() : !idle(),
     steps: [...evidence.steps, ...ANDROID_QA_DOCUMENT_INDEX_STEPS.filter(id => !evidence.steps.some(step => step.id === id))
@@ -173,12 +190,18 @@ async function seedIndex(documentIndex: number, ownedThreads: string[], timeoutM
     return { threadId, attachmentId: attachment.id, fingerprint: documentIndexFingerprint(identity), historyDigest: threadHistory(threadId) };
   } finally { if (!committed) await chatAttachmentStorageService.discardDocumentDraft(draft); }
 }
-function answerReceipt(thread: ChatThread, previousCount: number): Omit<Receipt, 'id' | 'status'> {
+function answerReceipt(thread: ChatThread, previousCount: number,
+  recordDiagnostics?: (receipt: Partial<TurnProgress>) => void): Omit<Receipt, 'id' | 'status'> {
   const added = thread.messages.slice(previousCount); const users = added.filter(message => message.role === 'user');
   const assistants = added.filter(message => message.role === 'assistant');
+  recordDiagnostics?.({ userCount: users.length, assistantCount: assistants.length,
+    assistantTerminal: assistants.length === 1 && assistants[0].state !== 'streaming' && assistants[0].state !== 'error',
+    assistantError: assistants.some(message => message.state === 'error') });
   check(users.length === 1 && assistants.length === 1 && assistants[0].state !== 'streaming' && assistants[0].state !== 'error');
   const answer = getAssistantPresentation(assistants[0].content).finalContent.trim();
   const telemetry = assistants[0].inferenceMetrics;
+  recordDiagnostics?.({ outputCharacters: answer.length, tokensPredicted: telemetry?.tokensPredicted ?? 0,
+    tokensEvaluated: telemetry?.tokensEvaluated ?? 0, answerMatched: /Wednesday/iu.test(answer) && /18[:.]00/u.test(answer) });
   check(answer.length > 0 && (telemetry?.tokensPredicted ?? 0) > 0 && (telemetry?.tokensEvaluated ?? 0) > 0);
   return { userCount: users.length, assistantCount: assistants.length, outputCharacters: answer.length,
     tokensPredicted: telemetry?.tokensPredicted, tokensEvaluated: telemetry?.tokensEvaluated,
@@ -186,14 +209,23 @@ function answerReceipt(thread: ChatThread, previousCount: number): Omit<Receipt,
 }
 async function quotaTurn(getActions: () => AndroidQaDocumentIndexHookActions, owners: Owner[],
   ownedThreads: string[], existing: boolean, timeoutMs: number): Promise<string> {
+  const turn = existing ? 'fifth_existing_chat' : 'fifth_new_chat';
+  let observation: ReturnType<typeof observeAndroidQaDocumentIndexNativeOperations> | undefined;
+  let callbackCount = 0; let committedThread: string | undefined;
+  publish({ turnProgress: { turn, operation: existing ? 'profile_check' : 'new_thread_begin', callbackCount: 0,
+    documentEmbeddings: 0, queryEmbeddings: 0, rerankCalls: 0, nativeStarted: 0, nativeSettled: 0, restored: 0 } });
+  const recordProgress = (operation: TurnOperation, patch: Partial<TurnProgress> = {}) => publish({ turnProgress: {
+    ...evidence.turnProgress!, turn, operation, callbackCount, ...observation?.counters, ...patch,
+  } });
   if (!existing) { check(useChatStore.getState().beginNewThread()); await renderHook(); }
   const before = existing ? useChatStore.getState().getActiveThread()!.messages.length : 0;
   const effectiveAdapters = llmEngineService.getEffectiveLoadParameters()?.loraAdapters;
+  recordProgress('profile_check', { loraApplied: effectiveAdapters?.length === 1 && effectiveAdapters[0].scale === 0.5 });
   check(effectiveAdapters?.length === 1 && effectiveAdapters[0].scale === 0.5);
   const previousProfile = getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters());
-  const draft = await copyFixtureDraft(0); const observation = observeAndroidQaDocumentIndexNativeOperations();
-  let callbackCount = 0; let committedThread: string | undefined;
+  const draft = await copyFixtureDraft(0); observation = observeAndroidQaDocumentIndexNativeOperations();
   try {
+    recordProgress('dispatch');
     await bounded(getActions().appendUserMessage('Quote the registration deadline from the attached Cedar document. Include the weekday and exact time.', {
       documentAttachmentDrafts: [draft], newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
       ...(!existing ? { newThreadParameters: { modelId: ANDROID_QA_DOCUMENT_MODEL_ID, presetId: null,
@@ -204,28 +236,52 @@ async function quotaTurn(getActions: () => AndroidQaDocumentIndexHookActions, ow
           ownedThreads.push(committedThread); check(useChatStore.getState().renameThread(committedThread, TITLE));
         } },
     }), timeoutMs);
+    recordProgress('after_append');
     await waitIdle(timeoutMs);
-    const thread = useChatStore.getState().getActiveThread(); check(thread && callbackCount === 1);
-    const receipt = answerReceipt(thread, before);
+    const thread = useChatStore.getState().getActiveThread();
+    const added = thread?.messages.slice(before) ?? [];
+    recordProgress('after_append', { threadPresent: Boolean(thread), userCount: added.filter(message => message.role === 'user').length,
+      assistantCount: added.filter(message => message.role === 'assistant').length });
+    check(thread && callbackCount === 1);
+    const observedStatus = getDocumentRetrievalStatus(thread.id);
+    const observedDocuments = added.filter(message => message.role === 'user').flatMap(message => message.attachments ?? [])
+      .filter(attachment => 'kind' in attachment && attachment.kind === 'document');
+    recordProgress('terminal_history', { attachmentCount: observedDocuments.length, actualMode: observedStatus.lastSearch?.actualMode,
+      fallbackReason: observedStatus.lastSearch?.fallbackReason,
+      cacheFailure: observedStatus.cacheFailures?.find(failure => observedDocuments.some(attachment => attachment.id === failure.attachmentId))?.reason });
+    const receipt = answerReceipt(thread, before, patch => recordProgress('terminal_history', patch));
+    recordProgress('answer_match', { answerMatched: receipt.answerMatched });
     check(receipt.answerMatched);
     const status = getDocumentRetrievalStatus(thread.id);
     const documents = thread.messages.at(-2)?.attachments?.filter(attachment => 'kind' in attachment && attachment.kind === 'document') ?? [];
+    recordProgress('status_cache', { attachmentCount: documents.length, actualMode: status.lastSearch?.actualMode,
+      fallbackReason: status.lastSearch?.fallbackReason });
     check(documents.length === 1);
     const attachmentId = documents[0].id;
+    const noReady = !documentIndexStore.inspect(thread.id, attachmentId);
+    recordProgress('status_cache', { cacheFailure: status.cacheFailures?.find(failure => failure.attachmentId === attachmentId)?.reason,
+      noReady });
     check(status.lastSearch?.actualMode === 'hybrid+rerank' && !status.lastSearch.fallbackReason
       && status.cacheFailures?.some(failure => failure.attachmentId === attachmentId && failure.reason === 'quota_exceeded')
-      && !documentIndexStore.inspect(thread.id, attachmentId));
+      && noReady);
+    recordProgress('ownership');
     await assertOwners(owners);
-    check(await attachmentsUnchanged([...owners.map(owner => owner.threadId), thread.id]));
+    const retained = await attachmentsUnchanged([...owners.map(owner => owner.threadId), thread.id]);
+    recordProgress('ownership', { oldIndexesRetained: true, attachmentsRetained: retained });
+    check(retained);
+    recordProgress('native_counts');
     check(observation.counters.documentEmbeddings === (existing ? 2 : 1) && observation.counters.queryEmbeddings === 1
       && observation.counters.rerankCalls === 1 && observation.counters.nativeStarted === observation.counters.nativeSettled
-      && observation.counters.restored === 1 && previousProfile === getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters()));
+      && observation.counters.restored === 1);
+    const profileRestored = previousProfile === getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters());
+    recordProgress('profile_restoration', { profileRestored }); check(profileRestored);
     pass({ id: existing ? 'fifth_existing_chat' : 'fifth_new_chat', ...receipt, ...observation.counters, callbackCount,
       actualMode: 'hybrid+rerank', cacheFailure: 'quota_exceeded', noReady: true, oldIndexesRetained: true,
       historyRetained: true, attachmentsRetained: true,
       profileRestored: true, loraApplied: true, completionDrained: true });
     return thread.id;
   } finally {
+    recordProgress(evidence.turnProgress!.operation);
     observation.release();
     if (!committedThread) {
       const committed = Object.values(useChatStore.getState().threads).find(thread => thread.messages.some(message =>

@@ -68,6 +68,44 @@ describe('publication QA host evidence boundary', () => {
     expect(sanitizeDocumentIndexPublicationEvidence({ ...completeEvidence(), seedProgress }).seedProgress)
       .toEqual({ seedIndex: 1, completedSeeds: 0, operation: 'seed_prepare' });
   });
+  it('preserves actual quota-turn counts and failed answer checks without exposing model output', async () => {
+    const diagnostics = { turn: 'fifth_new_chat', operation: 'answer_match', callbackCount: 1, userCount: 1, assistantCount: 1,
+      documentEmbeddings: 1, queryEmbeddings: 1, rerankCalls: 1, nativeStarted: 3, nativeSettled: 3, restored: 1,
+      threadPresent: true, assistantTerminal: true, assistantError: false, loraApplied: true, answerMatched: false,
+      outputCharacters: 30, tokensPredicted: 18, tokensEvaluated: 140, completionDrained: true };
+    const input = { ...completeEvidence(), status: 'failed', phase: 'fifth_new_chat', failureCode: 'assertion',
+      turnProgress: { ...diagnostics, threadId: 'private-chat', answer: 'private output', documentText: 'private source',
+        localUri: '/private/file', vector: [0.2], score: 0.5 } };
+    const safe = sanitizeDocumentIndexPublicationEvidence(input);
+    expect(safe.turnProgress).toEqual(diagnostics);
+    expect(JSON.stringify(safe)).not.toMatch(/private|vector|threadId|documentText|score/u);
+    await expect(waitForDocumentIndexPublicationEvidence(() => input)).rejects.toThrow(
+      'turn=fifth_new_chat, operation=answer_match, callback=1');
+    expect(() => validateDocumentIndexPublicationEvidence(input)).toThrow();
+  });
+  it('preserves fallback/cache/profile diagnostics while required acceptance counts still fail', () => {
+    const diagnostics = { turn: 'fifth_existing_chat', operation: 'status_cache', callbackCount: 1, attachmentCount: 1,
+      actualMode: 'lexical', fallbackReason: 'invalid_ranking', cacheFailure: 'cache_write_failed', noReady: true,
+      nativeStarted: 2, nativeSettled: 2, restored: 1, profileRestored: false, operationErrorCode: 'action_failed' };
+    const input = { ...completeEvidence(), turnProgress: diagnostics };
+    expect(sanitizeDocumentIndexPublicationEvidence(input).turnProgress).toEqual(diagnostics);
+    input.steps.find(step => step.id === 'fifth_existing_chat').nativeSettled = 0;
+    expect(() => validateDocumentIndexPublicationEvidence(input)).toThrow();
+  });
+  it.each([
+    ['turn', 'private-chat'], ['operation', '/private/operation'],
+  ])('drops invalid quota-turn checkpoint %s', (field, value) => {
+    const turnProgress = { turn: 'fifth_new_chat', operation: 'dispatch', [field]: value };
+    expect(sanitizeDocumentIndexPublicationEvidence({ ...completeEvidence(), turnProgress }).turnProgress).toBeUndefined();
+  });
+  it('strips unsafe quota diagnostics and keeps zero counts and false booleans', () => {
+    const turnProgress = { turn: 'fifth_new_chat', operation: 'terminal_history', callbackCount: 0, userCount: -1,
+      assistantCount: Infinity, nativeStarted: 1000001, nativeSettled: 0.5, outputCharacters: 'private length',
+      actualMode: 'private mode', fallbackReason: 'engine_busy', cacheFailure: '/private/cache',
+      operationErrorCode: '/private/error', assistantTerminal: false, assistantError: 'private error' };
+    expect(sanitizeDocumentIndexPublicationEvidence({ ...completeEvidence(), turnProgress }).turnProgress)
+      .toEqual({ turn: 'fifth_new_chat', operation: 'terminal_history', callbackCount: 0, assistantTerminal: false });
+  });
   it('rejects failed and timed-out evidence rather than calling a deadline completion', async () => {
     await expect(waitForDocumentIndexPublicationEvidence(() => ({ ...completeEvidence(), status: 'failed', phase: 'stop', failureCode: 'timeout' })))
       .rejects.toThrow('phase=stop, code=timeout');

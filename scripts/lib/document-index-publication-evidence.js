@@ -5,9 +5,13 @@ const NUMBERS = ['documentEmbeddings', 'queryEmbeddings', 'rerankCalls', 'native
 const BOOLEANS = ['noReady', 'oldIndexesRetained', 'historyRetained', 'attachmentsRetained', 'profileRestored', 'loraApplied', 'completionDrained', 'cancelled', 'answerMatched'];
 const SEED_OPERATIONS = ['seed_create', 'seed_idle_before', 'seed_parse', 'seed_prepare', 'seed_idle_after', 'seed_ready', 'seed_owners', 'seed_native_counts'];
 const SEED_COUNTERS = ['documentEmbeddings', 'queryEmbeddings', 'rerankCalls', 'nativeStarted', 'nativeSettled', 'restored'];
-const SEED_ERRORS = ['model_unavailable', 'profile_unverified', 'index_not_ready', 'index_stale', 'quota_exceeded', 'input_too_large',
-  'invalid_vector', 'invalid_ranking', 'native_failed', 'cancelled', 'ownership_changed', 'restore_failed', 'cache_write_failed',
-  'engine_busy', 'engine_unloading', 'model_load_failed', 'engine_recovery_required'];
+const RETRIEVAL_ERRORS = ['model_unavailable', 'profile_unverified', 'index_not_ready', 'index_stale', 'quota_exceeded', 'input_too_large',
+  'invalid_vector', 'invalid_ranking', 'native_failed', 'cancelled', 'ownership_changed', 'restore_failed', 'cache_write_failed'];
+const SEED_ERRORS = [...RETRIEVAL_ERRORS, 'engine_busy', 'engine_unloading', 'model_load_failed', 'engine_recovery_required'];
+const TURN_OPERATIONS = ['new_thread_begin', 'profile_check', 'dispatch', 'after_append', 'terminal_history', 'answer_match',
+  'status_cache', 'ownership', 'native_counts', 'profile_restoration'];
+const TURN_ERRORS = [...SEED_ERRORS, 'action_failed', 'chat_model_not_loaded', 'chat_model_mismatch', 'engine_not_ready',
+  'model_memory_insufficient', 'message_too_long'];
 function sanitizeSeedProgress(input) {
   if (!input || !SEED_OPERATIONS.includes(input.operation) || !Number.isSafeInteger(input.seedIndex)
     || input.seedIndex < 1 || input.seedIndex > 4 || !Number.isSafeInteger(input.completedSeeds)
@@ -17,6 +21,19 @@ function sanitizeSeedProgress(input) {
       .map(key => [key, input[key]])),
     ...(typeof input.completionDrained === 'boolean' ? { completionDrained: input.completionDrained } : {}),
     ...(SEED_ERRORS.includes(input.operationErrorCode) ? { operationErrorCode: input.operationErrorCode } : {}),
+  };
+}
+function sanitizeTurnProgress(input) {
+  if (!input || !['fifth_new_chat', 'fifth_existing_chat'].includes(input.turn) || !TURN_OPERATIONS.includes(input.operation)) return undefined;
+  return { turn: input.turn, operation: input.operation,
+    ...Object.fromEntries([...NUMBERS, 'attachmentCount'].filter(key => Number.isSafeInteger(input[key]) && input[key] >= 0 && input[key] <= 1000000)
+      .map(key => [key, input[key]])),
+    ...Object.fromEntries([...BOOLEANS, 'threadPresent', 'assistantTerminal', 'assistantError'].filter(key => typeof input[key] === 'boolean')
+      .map(key => [key, input[key]])),
+    ...(['lexical', 'hybrid', 'lexical+rerank', 'hybrid+rerank'].includes(input.actualMode) ? { actualMode: input.actualMode } : {}),
+    ...(['quota_exceeded', 'cache_write_failed'].includes(input.cacheFailure) ? { cacheFailure: input.cacheFailure } : {}),
+    ...(RETRIEVAL_ERRORS.includes(input.fallbackReason) ? { fallbackReason: input.fallbackReason } : {}),
+    ...(TURN_ERRORS.includes(input.operationErrorCode) ? { operationErrorCode: input.operationErrorCode } : {}),
   };
 }
 function sanitizeDocumentIndexPublicationEvidence(input) {
@@ -29,6 +46,7 @@ function sanitizeDocumentIndexPublicationEvidence(input) {
     requiresForceStop: typeof input?.requiresForceStop === 'boolean' ? input.requiresForceStop : null,
     failureCode: ['precondition', 'assertion', 'operation_failed', 'timeout', 'cleanup_failed'].includes(input?.failureCode) ? input.failureCode : undefined,
     seedProgress: sanitizeSeedProgress(input?.seedProgress),
+    turnProgress: sanitizeTurnProgress(input?.turnProgress),
     steps: Array.isArray(input?.steps) ? input.steps.slice(0, STEP_IDS.length).map(step => ({
       id: STEP_IDS.includes(step?.id) ? step.id : 'unknown',
       status: ['passed', 'failed', 'not_run'].includes(step?.status) ? step.status : 'unknown',
@@ -85,8 +103,10 @@ async function waitForDocumentIndexPublicationEvidence(readEvidence, options = {
   while (now() < deadline) {
     const evidence = sanitizeDocumentIndexPublicationEvidence(await readEvidence());
     if (evidence.status === 'failed') {
-      const seed = evidence.seedProgress;
-      const diagnostic = seed ? ` seed=${seed.seedIndex}, completed=${seed.completedSeeds}, operation=${seed.operation}, error=${seed.operationErrorCode || 'unknown'}.` : '';
+      const seed = evidence.phase === 'four_indexes' ? evidence.seedProgress : undefined;
+      const turn = evidence.turnProgress?.turn === evidence.phase ? evidence.turnProgress : undefined;
+      const diagnostic = seed ? ` seed=${seed.seedIndex}, completed=${seed.completedSeeds}, operation=${seed.operation}, error=${seed.operationErrorCode || 'unknown'}.`
+        : turn ? ` turn=${turn.turn}, operation=${turn.operation}, callback=${turn.callbackCount ?? 'unknown'}, error=${turn.operationErrorCode || 'unknown'}.` : '';
       throw new Error(`Document index publication failed: phase=${evidence.phase}, code=${evidence.failureCode || 'unknown'}.${diagnostic}`);
     }
     if (evidence.status === (options.readyForColdReopen ? 'ready_for_cold_reopen' : 'passed')) return validateDocumentIndexPublicationEvidence(evidence, options);

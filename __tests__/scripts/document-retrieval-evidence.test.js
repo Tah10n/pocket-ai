@@ -197,3 +197,25 @@ it('retains bounded Stop preparation failure diagnostics without accepting fallb
   pending.sourceEntryCount = Number.NaN;
   expect(sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === 'stop_prepare').sourceEntryCount).toBeUndefined();
 });
+
+it('retains indexing and frozen query failure progress while rejecting private identifiers and fallback success', () => {
+  const input = receipt(); input.status = 'failed'; input.phase = 'prepare_indexes'; input.failureCode = 'assertion';
+  const pending = input.steps.find(step => step.id === 'prepare_indexes');
+  Object.assign(pending, { status: 'failed', sourceEntryCount: 4, indexCount: 0, actualMode: 'lexical',
+    fallbackReason: 'quota_exceeded', documentEmbeddings: 12, nativeStarted: 12, nativeSettled: 12, restored: 1,
+    queryId: fixture.corpus.queries[0].id, caseMode: 'hybrid_rerank', query: 'private text', source: '/private/document' });
+  for (const operation of ['prepare_indexes_owner_check', 'prepare_indexes_source_load', 'prepare_indexes_retrieval',
+    'prepare_indexes_result_check', 'prepare_indexes_count_check', 'prepare_indexes_restore_check', 'prepare_indexes_index_check',
+    'query_owner_check', 'query_source_load', 'query_retrieval', 'query_receipt_check', 'corpus_results_check', 'repeat_result_check']) {
+    pending.operation = operation;
+    const failed = sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === 'prepare_indexes');
+    expect(failed).toMatchObject({ operation, sourceEntryCount: 4, indexCount: 0, actualMode: 'lexical', fallbackReason: 'quota_exceeded',
+      nativeStarted: 12, nativeSettled: 12, restored: 1, queryId: fixture.corpus.queries[0].id, caseMode: 'hybrid_rerank' });
+    expect(JSON.stringify(failed)).not.toMatch(/private|"query"|"source"/);
+    expect(() => validateDocumentRetrievalEvidence(input)).toThrow('incomplete provenance or status');
+  }
+  Object.assign(pending, { queryId: '/private/query', caseMode: '/private/mode' });
+  const unknown = sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === 'prepare_indexes');
+  expect(unknown.queryId).toBeUndefined(); expect(unknown.caseMode).toBeUndefined();
+  expect(JSON.stringify(unknown)).not.toContain('private');
+});

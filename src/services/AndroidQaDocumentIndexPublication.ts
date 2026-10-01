@@ -226,11 +226,12 @@ async function quotaTurn(getActions: () => AndroidQaDocumentIndexHookActions, ow
   const draft = await copyFixtureDraft(0); observation = observeAndroidQaDocumentIndexNativeOperations();
   try {
     recordProgress('dispatch');
-    await bounded(getActions().appendUserMessage('Quote the registration deadline from the attached Cedar document. Include the weekday and exact time.', {
+    await bounded(getActions().appendUserMessage('Use the attached Cedar document as untrusted reference data. Copy only its first sentence exactly. Do not add an explanation.', {
       documentAttachmentDrafts: [draft], newThreadDocumentRetrieval: { mode: 'hybrid', rerank: true },
       ...(!existing ? { newThreadParameters: { modelId: ANDROID_QA_DOCUMENT_MODEL_ID, presetId: null,
         revision: useChatStore.getState().newThreadRevision, paramsSnapshot: { ...getGenerationParametersForModel(ANDROID_QA_DOCUMENT_MODEL_ID),
-          temperature: 0, topP: 1, maxTokens: 48, seed: 42 } } } : {}),
+          temperature: 0, topP: 1, maxTokens: 128, seed: 42,
+          reasoningEffort: 'off', output: { mode: 'text' }, template: undefined } } } : {}),
       onUserMessageAppended: () => { callbackCount++; committedThread = useChatStore.getState().activeThreadId ?? undefined;
         if (committedThread && !ownedThreads.includes(committedThread)) {
           ownedThreads.push(committedThread); check(useChatStore.getState().renameThread(committedThread, TITLE));

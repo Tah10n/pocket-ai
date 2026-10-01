@@ -76,6 +76,11 @@
   Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, and text-based PDF files
 - Follow-up document questions can reuse bounded parsed context while it remains in the
   current app session, without uploading or reparsing the source file
+- Document search defaults to Keywords; explicitly choose Hybrid and optional local
+  reranking, using separately selected compatible auxiliary models
+- Prepare selected chat documents for bounded encrypted embedding indexes; compatible
+  vectors can survive restart while their original owned files remain available.
+  Parsed-source handles remain limited to the current app session
 - In-chat model switching keeps one conversation thread while recording when the active model changes
 - Per-message model metadata keeps edits, regeneration, and history restoration aligned with the model that produced each turn
 - System prompt presets for different assistant behaviors
@@ -167,6 +172,7 @@ an ordered, destructive recovery matrix:
 npm run android:scenarios:runtime -- --fail-on-skip
 npm run android:scenarios:attachments -- --fail-on-skip
 npm run android:scenarios:native
+npm run android:scenarios:retrieval -- --emulator
 node scripts/android-scenarios.js --emulator --pack inference --isolated-qa-install --fail-on-skip
 npm run android:scenarios:documents
 npm run android:scenarios:branch-regeneration -- --fail-on-skip
@@ -191,6 +197,13 @@ and verifies LoRA restoration across an auxiliary embedding check and deletion p
 See the [LoRA fixture and acceptance protocol](docs/validation/llama-rn-stage3/lora-fixture.md),
 [model resource acceptance](docs/llama-rn-013-stage2-acceptance.md) and
 [runtime device validation](docs/runtime-hardening-device-validation.md#explicit-android-cpu-lifecycle-smoke).
+
+The explicit retrieval pack retains the Stage 1–4 CPU baseline and adds the fixed English/Russian
+document corpus, LoRA/tool handoff, Stop, and compatible encrypted-index reuse and deletion after
+cold restarts. Keywords remains the default; Hybrid and local reranking are explicit choices.
+The [Stage 5 acceptance report](docs/llama-rn-013-stage5-acceptance.md) records the complete
+Android CPU native protocol, including cold index reuse and deletion after another restart,
+on its exact source/APK. Ordinary EN/RU control captures and measured touch bounds are reported separately, with explicit capture and answer-quality limits.
 
 The document pack uses checked-in synthetic fixtures, requires a loaded local model, and
 verifies exact source/build/install provenance. See
@@ -226,7 +239,7 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 | [Changelog](CHANGELOG.md) | Release history |
 | [Privacy & Disclosures](docs/privacy-disclosures.md) | Data handling and privacy policies |
 | [Multimodal Attachments](docs/multimodal-attachments.md) | Local attachment lifecycle, runtime media contracts, and privacy boundaries |
-| [Document Processing](docs/document-processing.md) | Offline formats, session-only retrieval, native architecture, limits, and maintenance |
+| [Document Processing](docs/document-processing.md) | Offline formats, Keywords/Hybrid search, encrypted derived indexes, native architecture, limits, and maintenance |
 | [Local Tools](docs/local-tools.md) | Per-chat functions, permissions, execution limits and compatibility |
 | [Model Parameters](docs/model-parameters.md) | Generation settings, load profiles, and chat snapshot behavior |
 | [Runtime Performance](docs/runtime-performance.md) | Bounded streaming, persistence, model-load, catalog, cache-scan, and tracing contracts |

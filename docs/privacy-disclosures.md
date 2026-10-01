@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-09-21
+Last updated: 2026-10-01
 
 ## Summary
 
@@ -14,6 +14,7 @@ This document summarizes the current behavior of the app as configured in this r
 - Chat attachments selected from the device stay on the device during local inference. They are not uploaded to a hosted chat-completion API.
 - Downloaded GGUF files, multimodal projector companions, optional MTP draft, TTS codec/vocoder and LoRA adapter companions, and copied chat attachments are stored in app-managed local storage. Android release builds disable OS auto-backup, and iOS release builds mark the downloaded-model and chat-attachment storage directories as excluded from device and iCloud backups.
 - Conversation history is persisted locally on the device and encrypted at rest.
+- Derived document indexes are sensitive private data stored locally in encrypted app storage; excerpts and vectors are not uploaded.
 - While a response is generating, bounded encrypted recovery data for the active partial
   response may also be stored locally so a force-stop or crash can recover the last
   committed prefix without copying the complete conversation.
@@ -24,7 +25,7 @@ This document summarizes the current behavior of the app as configured in this r
 - Hugging Face popularity metadata, tag summaries, and routed model-detail state are cached locally only to improve catalog browsing on this device.
 - Storage cleanup controls are available in-app through `Storage Manager` and `All Conversations`, including model removal that can keep or reset saved per-model settings.
 
-Auxiliary role selections, explicit companion source bindings, and local compatibility-check results stay in encrypted app storage. A selected role or installed companion does not establish native compatibility. Embedding/reranker load checks temporarily use the on-device runtime and restore the previous chat model when its selection is still current; these checks do not upload chat content or enable document search, reranking or speech playback.
+Auxiliary role selections, explicit companion source bindings, and local compatibility-check results stay in encrypted app storage. A selected role or installed companion does not establish native compatibility. Embedding/reranker load checks temporarily use the on-device runtime and restore a previously loaded chat model when one exists and its selection is still current; compatibility checks themselves do not upload chat content or enable a chat search mode or speech playback. Document search separately defaults to Keywords, with explicit Hybrid and optional independent local reranking. Hybrid prepares selected owned documents through Prepare or an ordinary document request; local reranking can run on Keywords without an embedding index.
 
 ## Chat attachments
 
@@ -48,6 +49,13 @@ When a user adds an attachment to a chat:
   are not copied into each follow-up message. Cache entries are released on eviction,
   deletion, private-storage reset/blocking, memory warning, or process exit. Temporary
   derived assets remain app-managed and are removed when released or reconciled.
+- Prepared document embedding indexes are separate bounded encrypted derived data. They
+  contain sensitive source excerpts, vectors and compatibility identities, and can be reused after
+  restart only while the original document remains committed to the chat and the source,
+  extractor, embedding model and runtime identities still match. Compatible vectors are
+  reused; opaque parser handles remain process-local. Reopening an owned file can require
+  local parsing and byte revalidation. Opening search options or restoring history does
+  not automatically prepare indexes or run a search.
 - Video attachment processing is disabled. The app does not accept new video attachments, sample video frames, claim direct-video understanding, or extract video audio tracks.
 - Backup behavior follows the app's platform configuration: Android release builds disable OS auto-backup, and iOS release builds exclude downloaded model files and local chat attachments from device and iCloud backups.
 
@@ -57,7 +65,7 @@ Pocket AI uses the network only for model-management flows:
 
 - Hugging Face model catalog search
 - Optional metadata, repository file lists, README summary, and config fetches used for model hints, GGUF variant lists, popularity sorting, size recovery, context-window recovery, and gated-model access checks
-- Model file downloads for the selected GGUF variant and any compatible multimodal projector or optional MTP draft companion from remote hosting endpoints
+- Model file downloads for selected chat, embedding or reranker GGUF variants and any compatible multimodal projector or optional MTP draft companion from remote hosting endpoints
 - Optional TTS codec/vocoder and LoRA adapter downloads from HTTPS GGUF URLs explicitly supplied by the user. The hosting service receives these file requests. Hugging Face credentials are sent only to trusted Hugging Face resolve URLs, not arbitrary companion hosts.
 - If a Hugging Face access token is configured, the app attaches it to Hugging Face API requests as needed to surface gated or private repositories (including catalog browsing). Some endpoints are still probed anonymously first and retried with auth only when required.
 - When a user taps through to Hugging Face from the token screen or a model detail view, the app opens the public Hugging Face site in the device browser
@@ -74,11 +82,18 @@ Users can manage local data directly in the app:
 - offload downloaded models and associated multimodal projector, MTP draft, TTS codec/vocoder or LoRA adapter artifacts while keeping or resetting saved per-model settings
 - prepare, pause, retry, cancel or remove optional companion resources; shared installed files are retained while another resource still owns them
 - unload the active model
-- clear persisted chat history, including active-response recovery artifacts
+- clear persisted chat history, including active-response recovery artifacts and derived document indexes
 - discard attachment drafts and delete messages or conversations, which attempts to remove their associated local attachment files when cleanup runs
 - reset settings
 - reset private app storage, including a best-effort cleanup of local chat attachments
 - manage retention for older conversations
+
+Committed attachment/message removal, branch pruning, conversation deletion and history
+clearing invalidate the corresponding derived document indexes and trigger cleanup. Startup
+reconciliation retries orphan cleanup after durable chat ownership is established. Private-storage
+blocking invalidates active publication epochs, cancels work and retains temporary resources until
+the actual parser/native work settles; blocking itself is not a completed data reset. A successful,
+confirmed private-data reset clears the encrypted derived indexes along with the private stores.
 
 ## Device and resource limits
 

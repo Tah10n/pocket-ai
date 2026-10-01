@@ -1,0 +1,236 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "bff98b9c8e239b87167359c0359670ce0fb288e1",
+  "apkSha256": "22e491805c5520ab61b3a2ff078d4c7d969295aab175106df4da122d16e97ece",
+  "status": "passed_with_observation_limits",
+  "platform": "Isolated Android x86_64 release QA app, CPU",
+  "locales": [
+    "en",
+    "ru"
+  ],
+  "screenPixels": {
+    "height": 2400,
+    "width": 1080,
+    "densityDpi": 420
+  },
+  "fixtures": [
+    {
+      "bytes": 869,
+      "kind": "Repository AnyDoc multilingual Markdown fixture",
+      "sha256": "ca727e310122337ba6430f5a14125048f4b17922b5b59b52fcb683d61828c04c"
+    },
+    {
+      "bytes": 227602,
+      "kind": "Generated synthetic 384-paragraph cancellation/retry text",
+      "sha256": "a21285888dba1dd86a6b644a603162e1447b02de24309cf1647b31430b719b06"
+    }
+  ],
+  "controls": {
+    "freshChatRerank": false,
+    "retryReady": "passed_ru",
+    "firstLexicalTurnCommittedAttachment": "passed",
+    "preparingAndProgressBar": "observed_en_ru",
+    "collapsedCancel": "passed_ru",
+    "expandedCancel": "passed_en",
+    "cancelled": "observed_en_ru",
+    "numericProgress": "not_captured",
+    "freshChatMode": "lexical",
+    "cancellingTransient": "not_captured",
+    "downloadsAttachment": "passed"
+  },
+  "selection": {
+    "uiDocumentEmbeddingCount": "not_measured",
+    "weightsRetained": "passed",
+    "staleIndex": "observed",
+    "rerankerRetained": "passed",
+    "exactBReselectionReadyWithoutPrepare": "passed",
+    "clearEmbeddingOnly": "passed",
+    "prepareDisabledWithoutB": true
+  },
+  "questions": [
+    {
+      "completed": true,
+      "actualModeLabel": "not_recorded_for_legacy_compatible_first_turn",
+      "answerCheck": "correct",
+      "case": "initial_revenue_marker",
+      "requestedMode": "lexical"
+    },
+    {
+      "fallback": false,
+      "requestedMode": "hybrid",
+      "answerCheck": "correct",
+      "actualMode": "hybrid",
+      "case": "final_document_marker",
+      "completed": true
+    },
+    {
+      "fallbackReason": "model_unavailable",
+      "requestedMode": "hybrid",
+      "answerCheck": "correct",
+      "actualMode": "lexical",
+      "case": "north_table_value_without_b",
+      "completed": true
+    },
+    {
+      "fallback": false,
+      "requestedMode": "lexical_rerank",
+      "answerCheck": "incorrect_comparison_answer",
+      "actualMode": "lexical_rerank",
+      "case": "larger_region_without_b",
+      "completed": true
+    },
+    {
+      "fallback": false,
+      "requestedMode": "hybrid_rerank",
+      "answerCheck": "correct",
+      "actualMode": "hybrid_rerank",
+      "case": "south_table_value_after_b_reselection",
+      "completed": true
+    }
+  ],
+  "measuredDocumentControlHeightsDp": {
+    "lexical": 49.142857142857146,
+    "hybrid": 49.142857142857146,
+    "collapsedCancel": 49.142857142857146,
+    "rerank": 49.142857142857146,
+    "prepare": 49.142857142857146,
+    "expand": 48.76190476190476,
+    "scope": "Fully visible document-search targets only; excludes text labels and existing chat actions"
+  },
+  "logAudit": {
+    "serializedVectorProbe": 1,
+    "bytes": 193680,
+    "sha256": "9e92803890241a7b2baa13f6db61468fdd29f2710d7846e0f634ccc9bf2e52b5",
+    "broaderLoggingGuarantee": "not_established",
+    "scope": "Current QA app PID and retained logcat ring only",
+    "matches": 0,
+    "sentinelProbes": 4,
+    "positiveControlsPassed": true
+  },
+  "screenshotScope": "Synthetic repository/generated fixtures only. Screenshots retain sample question/answer text; native receipts remain sanitized.",
+  "screenshots": [
+    {
+      "file": "default-en.png",
+      "bytes": 193037,
+      "sha256": "db88418b3656923893224cda439854df3abb08b2ced6a7d61831bb7170ef8caf"
+    },
+    {
+      "file": "default-ru.png",
+      "bytes": 209068,
+      "sha256": "431d6d588ddc83156c92602a7f7c0f2602e2827fe5fe16e591bbc36043ca4b1e"
+    },
+    {
+      "file": "preparing-en.png",
+      "bytes": 253164,
+      "sha256": "252b004e23bbd0016bea9ecea1fd927d2fb1b6287755bf26eefa2b96a304f7e1"
+    },
+    {
+      "file": "cancelled-en.png",
+      "bytes": 255695,
+      "sha256": "ff2fcea14a7af972fecfc066fe69176e1409738a2d250e0b94ea874b9ddccf89"
+    },
+    {
+      "file": "preparing-ru.png",
+      "bytes": 274758,
+      "sha256": "34192296e375ba019c523010992ec62b856de14826c901e996036781496992f3"
+    },
+    {
+      "file": "cancelled-ru.png",
+      "bytes": 270510,
+      "sha256": "8d63fcb5e814903bb5d9310b7e30b89cd7b89320060c354c083a3c628898d073"
+    },
+    {
+      "file": "ready-ru.png",
+      "bytes": 277198,
+      "sha256": "1a6e6107541679be1f6295a8f2e8c49ff0e374af70234a0c4cf7d2ad1bdf5112"
+    },
+    {
+      "file": "missing-b.png",
+      "bytes": 270109,
+      "sha256": "3633508c33ca96eead44fc826663c0b84e3a5f2a02950099c6e36398b54d36ef"
+    },
+    {
+      "file": "fallback-answer.png",
+      "bytes": 282370,
+      "sha256": "0a32a8a05f47f483b20d490491cac2d63644b4ad8b003fb37e5b4df069f5edf7"
+    },
+    {
+      "file": "lexical-rerank-config.png",
+      "bytes": 291822,
+      "sha256": "c197888059aced93433b8c27b53cf834ba7e48a86b7ecac1ac7d0ac9d35a3d7a"
+    },
+    {
+      "file": "lexical-rerank-answer.png",
+      "bytes": 285139,
+      "sha256": "c334c77e3330fc9ab116bc12d20cfe0e539ed639d035c9214f3db4ee0ab0e307"
+    },
+    {
+      "file": "reselected-ready.png",
+      "bytes": 280947,
+      "sha256": "785d1f358667d3be560da3a541e2ad548356a8382284c5451ba533bc76f068c1"
+    },
+    {
+      "file": "hybrid-rerank-answer.png",
+      "bytes": 283283,
+      "sha256": "9da5382cae00c43b9116073d1de80340d619a7e5a7229c50ac359a2a97dfc26c"
+    }
+  ],
+  "rawHierarchyHashes": [
+    {
+      "receipt": "stage5-ui18-default-en",
+      "sha256": "03704b903adc4171addb69b8bd30cc9e26f214f01a69e98078ac80edd8ed76f9"
+    },
+    {
+      "receipt": "stage5-ui18-small-ru-default",
+      "sha256": "ff251719fdbabb87f76226f24c865cb344bd24a450cc7b6cf6c0a5983a7ac7aa"
+    },
+    {
+      "receipt": "stage5-ui18-first-question-progress-state",
+      "sha256": "fbc7ce244ef1d790aa385563738d9f090707a8a1feade19f1516163f21bf6027"
+    },
+    {
+      "receipt": "stage5-ui18-cancel-en-state",
+      "sha256": "8d92dbddcf7bc33e1a738a5da8261f78c34e6831945b4896f53418d40a2e4e4e"
+    },
+    {
+      "receipt": "stage5-ui18-cancel-ru-collapsed",
+      "sha256": "06bf31f95cd47629c28e8dcb674f71aa13cea21e069ce6b062ba64a69946f08a"
+    },
+    {
+      "receipt": "stage5-ui18-cancel-ru-result-state",
+      "sha256": "1ac3f308919c5cf92ad17230f9923b915e0788030369f545fc8464e51e2a472d"
+    },
+    {
+      "receipt": "stage5-ui18-retry-ru-progress-state",
+      "sha256": "b5ca20cf94c74936698c8f8fb6fe06b466fc53c55a94745376d42778b1e095fb"
+    },
+    {
+      "receipt": "stage5-ui18-small-hybrid-complete",
+      "sha256": "23ad33ba31d8882e556db889c8abaa11cf5023be9e660c8b491988738ce31b3f"
+    },
+    {
+      "receipt": "stage5-ui18-missing-b-state",
+      "sha256": "64080ea3200e95ed92c727112ba7978f0bf432d3ba07120f64e0475f3ccba104"
+    },
+    {
+      "receipt": "stage5-ui18-fallback-complete",
+      "sha256": "708234c926227cdc8f8ae44cb3a08c9d27b88536e8e9d69dff0d60dcf134c9b6"
+    },
+    {
+      "receipt": "stage5-ui18-c-only-config",
+      "sha256": "62b174e085ae01fc213df7baadb47a8262d838ff7d2a369c81ab60ba11494841"
+    },
+    {
+      "receipt": "stage5-ui18-c-only-complete",
+      "sha256": "4b95120524d5b3bf2bd167368189cb3b4016ab3e6cc9fb29ed137b3a68695062"
+    },
+    {
+      "receipt": "stage5-ui18-reselected-ready",
+      "sha256": "9195b1e2579ad6d385dd2898918a57591c20625504d2de0600eedc7f6b31ea9a"
+    },
+    {
+      "receipt": "stage5-ui18-hybrid-c-complete",
+      "sha256": "b57eb308c0ede21b0fbf358a8e06352383c2968faf1d8ace8e629801a7c454d2"
+    }
+  ]
+}

@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "scope": "Selected incomplete or failed attempts and final acceptance; not an exhaustive build timeline.",
+  "attempts": [
+    {
+      "attempt": 10,
+      "sourceCommit": "3a11743668ef4521a4c362db08d952ce50bc0a7d",
+      "apkSha256": "f04305a7eb57d6cf2f2c97c1634514ff1803a3d9bc63694786122094bb29bb4d",
+      "nativeAcceptance": "failed",
+      "baselinesPassed": 4,
+      "fullProtocolCompleted": false,
+      "failureCategory": "operation_failed",
+      "failedPhase": "tool_schema",
+      "passedRetrievalSteps": 7,
+      "recordedCorpusCases": 36,
+      "diagnosticLimit": "The receipt does not identify the rejected suboperation; a deadline diagnosis is an inference from timing.",
+      "notRun": [
+        "stop_drain",
+        "next_query",
+        "cold_reuse",
+        "delete_corpus",
+        "deleted_reuse",
+        "cleanup"
+      ]
+    },
+    {
+      "attempt": 12,
+      "sourceCommit": "3e3d376e46077957339fb2f4bb3acfa2c366f2f6",
+      "apkSha256": "e9c1f61ea820f8d543005471c9608a6d5e9415128496731a11c9b4c5d5a69dd9",
+      "nativeAcceptance": "failed",
+      "baselinesPassed": 4,
+      "fullProtocolCompleted": false,
+      "failureCategory": "model_incompatible_modal",
+      "failedPhase": "host_cold_navigation",
+      "passedRetrievalSteps": 10,
+      "recordedCorpusCases": 36,
+      "coldActionInvoked": false,
+      "notRun": [
+        "cold_reuse",
+        "delete_corpus",
+        "deleted_reuse",
+        "cleanup"
+      ]
+    },
+    {
+      "attempt": 13,
+      "sourceCommit": "01f0bd3b6f63245208a52a61f15b311093dc3b13",
+      "apkSha256": "d94ff0b8ed4d4a6c7b36bef9fca0ce529c3471a94d50af729166060b9f45b114",
+      "nativeAcceptance": "failed",
+      "baselinesPassed": 4,
+      "fullProtocolCompleted": false,
+      "failureCategory": "precondition",
+      "failedPhase": "preconditions",
+      "passedRetrievalSteps": 0,
+      "recordedCorpusCases": 0,
+      "notRun": [
+        "all_retrieval_steps",
+        "all_corpus_cases"
+      ]
+    },
+    {
+      "attempt": 16,
+      "sourceCommit": "09fd79be39708bde2e905dfe2f644eab069d9ff9",
+      "apkSha256": "8c5c0e608201891b42330472f27a6f1dc1e39df6f31da2f8c67f1cd7d8170b2f",
+      "nativeAcceptance": "failed",
+      "baselinesPassed": 4,
+      "fullProtocolCompleted": false,
+      "failureCategory": "ui_hierarchy_timeout",
+      "failedPhase": "host_corpus_rankings_poll",
+      "passedRetrievalSteps": 4,
+      "recordedCorpusCases": 2,
+      "diagnosticLimit": "The last captured retrieval status was running; the host failure does not prove an inference failure.",
+      "notRun": [
+        "complete_protocol_not_observed"
+      ]
+    },
+    {
+      "attempt": 17,
+      "sourceCommit": "09fd79be39708bde2e905dfe2f644eab069d9ff9",
+      "appTreeSha": "45a0788137a58d15e27e6c39900fd3225b7c4105",
+      "apkSha256": "8c5c0e608201891b42330472f27a6f1dc1e39df6f31da2f8c67f1cd7d8170b2f",
+      "nativeAcceptance": "passed",
+      "baselinesPassed": 4,
+      "fullProtocolCompleted": true,
+      "passedRetrievalSteps": 14,
+      "recordedCorpusCases": 36,
+      "processPhases": 3,
+      "coldReopens": 2,
+      "notRun": [
+        "ordinary_ui_verification",
+        "tool_hybrid_rerank",
+        "ios",
+        "physical_gpu_npu",
+        "other_models_languages",
+        "native_parser_format_retrieval_matrix"
+      ]
+    },
+    {
+      "attempt": 18,
+      "sourceCommit": "bff98b9c8e239b87167359c0359670ce0fb288e1",
+      "appTreeSha": "1816478ae629aa07c2d8cd27645b7a5097b9e1fc",
+      "apkSha256": "22e491805c5520ab61b3a2ff078d4c7d969295aab175106df4da122d16e97ece",
+      "provenanceDigest": "9df1a118aca28afb003e9f53530a33817b7be18c492ef8e49931879b210c7490",
+      "nativeAcceptance": "passed",
+      "baselinesPassed": 4,
+      "fullProtocolCompleted": true,
+      "passedRetrievalSteps": 14,
+      "recordedCorpusCases": 36,
+      "processPhases": 3,
+      "coldReopens": 2,
+      "notRun": [
+        "tool_hybrid_rerank",
+        "ios",
+        "physical_gpu_npu",
+        "other_models_languages",
+        "native_parser_format_retrieval_matrix"
+      ],
+      "ordinaryUiEvidence": "ordinary-ui/evidence.json",
+      "ordinaryUiStatus": "passed_with_observation_limits",
+      "notCaptured": [
+        "cancelling_transient",
+        "numeric_progress"
+      ]
+    }
+  ]
+}

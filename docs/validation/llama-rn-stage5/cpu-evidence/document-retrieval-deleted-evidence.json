@@ -1,0 +1,5251 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "stage5-fixed-retrieval-ru-en-v1",
+  "runtimeVersion": "0.13.0-rc.3",
+  "backend": "cpu",
+  "embeddingSha256": "e011debc1208e31bf7b6aebee2d9fc8bd2ca11694a77ed66ac9d0c9d0a877c93",
+  "rerankerSha256": "e186a244ed455b4ab66ec64339ce7427a6ae13f5c0b5e544de96e50f0f8b3673",
+  "status": "passed",
+  "phase": "complete",
+  "requiresForceStop": false,
+  "steps": [
+    {
+      "id": "prepare_models",
+      "status": "passed",
+      "nativeIndices": [],
+      "promptChunks": [],
+      "fixtureVerified": true
+    },
+    {
+      "id": "prepare_corpus",
+      "status": "passed",
+      "chunkCount": 12,
+      "nativeIndices": [],
+      "promptChunks": []
+    },
+    {
+      "id": "stop_prepare",
+      "status": "passed",
+      "documentEmbeddings": 1,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 0,
+      "sourceEntryCount": 1,
+      "indexCount": 0,
+      "nativeIndices": [],
+      "operation": "stop_prepare_index_check",
+      "promptChunks": [],
+      "modelRestored": true,
+      "profileRestored": true,
+      "cancelled": true,
+      "completionDrained": true,
+      "stopRequested": true
+    },
+    {
+      "id": "prepare_indexes",
+      "status": "passed",
+      "documentEmbeddings": 12,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 12,
+      "nativeSettled": 12,
+      "restored": 1,
+      "sourceEntryCount": 4,
+      "indexCount": 4,
+      "nativeIndices": [],
+      "operation": "prepare_indexes_index_check",
+      "actualMode": "lexical",
+      "promptChunks": []
+    },
+    {
+      "id": "corpus_rankings",
+      "status": "passed",
+      "nativeIndices": [],
+      "promptChunks": []
+    },
+    {
+      "id": "repeat_query",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "sourceEntryCount": 4,
+      "nativeIndices": [
+        0,
+        5,
+        1,
+        2,
+        7,
+        3,
+        4,
+        6
+      ],
+      "operation": "repeat_result_check",
+      "queryId": "en-paraphrase-signup",
+      "caseMode": "hybrid_rerank",
+      "actualMode": "hybrid+rerank",
+      "promptChunks": []
+    },
+    {
+      "id": "lora_handoff",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "outputCharacters": 95,
+      "promptTokens": 159,
+      "tokensEvaluated": 159,
+      "nativeIndices": [
+        0,
+        2,
+        4,
+        3,
+        7,
+        5,
+        1,
+        6
+      ],
+      "operation": "answer_check",
+      "promptChunks": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 1,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 2,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 3,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        }
+      ],
+      "profileRestored": true,
+      "probabilityRestored": true,
+      "completionDrained": true,
+      "nativeIdleBarrierWaited": true,
+      "adapterFound": true,
+      "adapterApplied": true,
+      "baselineProbeCompleted": true,
+      "repeatProbeCompleted": true,
+      "handoffCompleted": true,
+      "restoredProbeCompleted": true
+    },
+    {
+      "id": "tool_schema",
+      "status": "passed",
+      "nativeSteps": 3,
+      "toolCalls": 1,
+      "outputCharacters": 114,
+      "promptTokens": 641,
+      "tokensEvaluated": 641,
+      "nativeIndices": [],
+      "operation": "tool_commit",
+      "nativeStage": "first_token",
+      "actualMode": "hybrid",
+      "promptChunks": [],
+      "resultReturned": true,
+      "membershipMatched": true,
+      "locatorMatched": true,
+      "actualModeMatched": true,
+      "structuredValid": true,
+      "schemaAnswerMatched": true,
+      "completionDrained": true,
+      "modelLoaded": true,
+      "threadConfigured": true,
+      "toolRunCompleted": true,
+      "toolHistoryCommitted": true
+    },
+    {
+      "id": "stop_drain",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 0,
+      "nativeIndices": [],
+      "operation": "stop_check",
+      "promptChunks": [],
+      "cancelled": true,
+      "completionDrained": true,
+      "stopRequested": true
+    },
+    {
+      "id": "next_query",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        0,
+        5,
+        1,
+        2,
+        7,
+        3,
+        4,
+        6
+      ],
+      "operation": "next_check",
+      "promptChunks": [],
+      "completionDrained": true
+    },
+    {
+      "id": "cold_reuse",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "indexCount": 4,
+      "nativeIndices": [
+        0,
+        5,
+        1,
+        2,
+        7,
+        3,
+        4,
+        6
+      ],
+      "operation": "cold_history_check",
+      "promptChunks": [],
+      "completionDrained": true,
+      "noReexecution": true,
+      "modelLoaded": true,
+      "checkpointRead": true,
+      "indexesReconciled": true,
+      "indexFingerprintsMatched": true
+    },
+    {
+      "id": "delete_corpus",
+      "status": "passed",
+      "nativeIndices": [],
+      "operation": "index_delete_check",
+      "promptChunks": [],
+      "deleted": true,
+      "corpusDeleted": true
+    },
+    {
+      "id": "deleted_reuse",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "operation": "deleted_check",
+      "promptChunks": [],
+      "completionDrained": true,
+      "noReexecution": true,
+      "deleted": true,
+      "oldIdsRejected": true,
+      "checkpointRead": true,
+      "deletedFilesAbsent": true
+    },
+    {
+      "id": "cleanup",
+      "status": "passed",
+      "nativeIndices": [],
+      "operation": "cleanup_check",
+      "promptChunks": [],
+      "profileRestored": true,
+      "completionDrained": true,
+      "deleted": true,
+      "originalRestored": true
+    }
+  ],
+  "cases": [
+    {
+      "queryId": "en-paraphrase-signup",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 0,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-signup",
+          "rank": 6
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 1,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 2,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 3,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 4,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 5,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 6,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 7,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 8,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 10,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "en-paraphrase-signup",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 0,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-signup",
+          "rank": 4
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 1,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 2,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 3,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 4,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 5,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 6,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 7,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 8,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 11,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 12,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        }
+      ]
+    },
+    {
+      "queryId": "en-paraphrase-signup",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        0,
+        5,
+        1,
+        2,
+        7,
+        3,
+        4,
+        6
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-signup",
+          "rank": 2
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 1,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 2,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 3,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 4,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 5,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 6,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 7,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 9,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 11,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 12,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        }
+      ]
+    },
+    {
+      "queryId": "en-paraphrase-access",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-access",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 1,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 2,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 3,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 4,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 5,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 6,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 7,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 8,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 10,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "en-paraphrase-access",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-access",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 1,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 2,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 3,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 4,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 5,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 6,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 7,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 8,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 11,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 12,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        }
+      ]
+    },
+    {
+      "queryId": "en-paraphrase-access",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        0,
+        6,
+        4,
+        1,
+        5,
+        2,
+        3,
+        7
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-access",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 1,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 2,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 3,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 4,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 5,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 6,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 7,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 9,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 11,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 12,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        }
+      ]
+    },
+    {
+      "queryId": "en-exact-code",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "lab-204",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 1,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 2,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 3,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 4,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 5,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 6,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 7,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 8,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 10,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "en-exact-code",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "lab-204",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 1,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 2,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 3,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 4,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 5,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 6,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 7,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 9,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 10,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "en-exact-code",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        0,
+        2,
+        4,
+        3,
+        7,
+        5,
+        1,
+        6
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "lab-204",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 1,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 2,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 3,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 4,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 5,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 6,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 7,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 8,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 9,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 10,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "en-near-code",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "lab-240",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 1,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 2,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 3,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 4,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 5,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 6,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 7,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 8,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 10,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "en-near-code",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "lab-240",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 1,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 2,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 3,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 4,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 5,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 6,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 7,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 9,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 10,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "en-near-code",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        0,
+        4,
+        2,
+        7,
+        1,
+        3,
+        5,
+        6
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "lab-240",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 1,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 2,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 3,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 4,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 5,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 6,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 7,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 9,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 10,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "en-equipment",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 0,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-equipment",
+          "rank": 4
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 1,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 2,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 3,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 4,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 5,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 6,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 7,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 8,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 10,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "en-equipment",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-equipment",
+          "rank": 2
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 1,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 2,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 3,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 4,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 5,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 6,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 7,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 9,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 12,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        }
+      ]
+    },
+    {
+      "queryId": "en-equipment",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        1,
+        3,
+        4,
+        6,
+        2,
+        0,
+        5,
+        7
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-equipment",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 1,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 2,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 3,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 4,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 5,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 6,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 7,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 8,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 9,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 12,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        }
+      ]
+    },
+    {
+      "queryId": "ru-paraphrase-refund",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 0,
+      "relevantRanks": [
+        {
+          "paragraphId": "rail-refund",
+          "rank": 8
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 1,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 2,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 3,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 4,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 5,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 6,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 7,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 8,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 9,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 10,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "ru-paraphrase-refund",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "rail-refund",
+          "rank": 2
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 1,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 2,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 3,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 4,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 5,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 6,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 7,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 8,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 9,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 10,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 11,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 12,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        }
+      ]
+    },
+    {
+      "queryId": "ru-paraphrase-refund",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        4,
+        5,
+        0,
+        1,
+        7,
+        3,
+        2,
+        6
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "rail-refund",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 1,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 2,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 3,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 4,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 5,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 6,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 7,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 8,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 9,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 10,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 11,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 12,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        }
+      ]
+    },
+    {
+      "queryId": "ru-paraphrase-access",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "rail-access",
+          "rank": 2
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 1,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 2,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 3,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 4,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 5,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 6,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 7,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 8,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 10,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "ru-paraphrase-access",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "rail-access",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 1,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 2,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 3,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 4,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 5,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 6,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 7,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 8,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 9,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 10,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 11,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        }
+      ]
+    },
+    {
+      "queryId": "ru-paraphrase-access",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        0,
+        5,
+        4,
+        1,
+        2,
+        7,
+        3,
+        6
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "rail-access",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 1,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 2,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 3,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 4,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 5,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 6,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 7,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 9,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 10,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 11,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        }
+      ]
+    },
+    {
+      "queryId": "ru-exact-code",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "equipment-317",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 1,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 2,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 3,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 4,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 5,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 6,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 7,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 8,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 10,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 11,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        }
+      ]
+    },
+    {
+      "queryId": "ru-exact-code",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "equipment-317",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 1,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 2,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 3,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 4,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 5,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 6,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 7,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 9,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        }
+      ]
+    },
+    {
+      "queryId": "ru-exact-code",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        0,
+        5,
+        2,
+        4,
+        3,
+        7,
+        1,
+        6
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "equipment-317",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 1,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 2,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 3,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 4,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 5,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 6,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 7,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 9,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        }
+      ]
+    },
+    {
+      "queryId": "ru-near-code",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "equipment-371",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 1,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 2,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 3,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 4,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 5,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 6,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 7,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 8,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 10,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 11,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        }
+      ]
+    },
+    {
+      "queryId": "ru-near-code",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "equipment-371",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 1,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 2,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 3,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 4,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 5,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 6,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 7,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 8,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 9,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 10,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        }
+      ]
+    },
+    {
+      "queryId": "ru-near-code",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        0,
+        5,
+        2,
+        3,
+        6,
+        4,
+        7,
+        1
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "equipment-371",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 1,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 2,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 3,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 4,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 5,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 6,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 7,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 9,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 10,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        }
+      ]
+    },
+    {
+      "queryId": "ru-sharing",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 0,
+      "relevantRanks": [
+        {
+          "paragraphId": "equipment-sharing",
+          "rank": 12
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 1,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 2,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 3,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 4,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 5,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 6,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 7,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 8,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 9,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 10,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 11,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "ru-sharing",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 0,
+      "relevantRanks": [
+        {
+          "paragraphId": "equipment-sharing",
+          "rank": 5
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 1,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 2,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 3,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 4,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 5,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 6,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 7,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 9,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        }
+      ]
+    },
+    {
+      "queryId": "ru-sharing",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        5,
+        6,
+        7,
+        4,
+        1,
+        0,
+        3,
+        2
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "equipment-sharing",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 1,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 2,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 3,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 4,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 5,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 6,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 7,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 9,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        }
+      ]
+    },
+    {
+      "queryId": "en-multidocument-access",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 0.5,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-access",
+          "rank": 3
+        },
+        {
+          "paragraphId": "rail-access",
+          "rank": 8
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 1,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 2,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 3,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 4,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 5,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 6,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 7,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 8,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 10,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "en-multidocument-access",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 0.5,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-access",
+          "rank": 1
+        },
+        {
+          "paragraphId": "rail-access",
+          "rank": 5
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 1,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 2,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 3,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 4,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 5,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 6,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 7,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 9,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 12,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        }
+      ]
+    },
+    {
+      "queryId": "en-multidocument-access",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        0,
+        2,
+        5,
+        1,
+        4,
+        3,
+        6,
+        7
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "cedar-access",
+          "rank": 1
+        },
+        {
+          "paragraphId": "rail-access",
+          "rank": 2
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 1,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 2,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 3,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 4,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 5,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 6,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 7,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 9,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 10,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 11,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 12,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        }
+      ]
+    },
+    {
+      "queryId": "ru-multidocument-sensors",
+      "mode": "lexical",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 0,
+      "rerankCalls": 0,
+      "nativeStarted": 0,
+      "nativeSettled": 0,
+      "restored": 0,
+      "nativeIndices": [],
+      "actualMode": "lexical",
+      "recallAt3": 0.5,
+      "relevantRanks": [
+        {
+          "paragraphId": "lab-204",
+          "rank": 6
+        },
+        {
+          "paragraphId": "equipment-317",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 1,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 2,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 3,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 4,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 5,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 6,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 7,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 8,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 9,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 10,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 11,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 12,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        }
+      ]
+    },
+    {
+      "queryId": "ru-multidocument-sensors",
+      "mode": "hybrid",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 0,
+      "nativeStarted": 1,
+      "nativeSettled": 1,
+      "restored": 1,
+      "nativeIndices": [],
+      "actualMode": "hybrid",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "lab-204",
+          "rank": 3
+        },
+        {
+          "paragraphId": "equipment-317",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 1,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 2,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 3,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 4,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 5,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 6,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 7,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 9,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 10,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        }
+      ]
+    },
+    {
+      "queryId": "ru-multidocument-sensors",
+      "mode": "hybrid_rerank",
+      "status": "passed",
+      "documentEmbeddings": 0,
+      "queryEmbeddings": 1,
+      "rerankCalls": 1,
+      "nativeStarted": 2,
+      "nativeSettled": 2,
+      "restored": 1,
+      "nativeIndices": [
+        0,
+        4,
+        1,
+        6,
+        5,
+        3,
+        7,
+        2
+      ],
+      "actualMode": "hybrid+rerank",
+      "recallAt3": 1,
+      "relevantRanks": [
+        {
+          "paragraphId": "lab-204",
+          "rank": 3
+        },
+        {
+          "paragraphId": "equipment-317",
+          "rank": 1
+        }
+      ],
+      "selected": [
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-317",
+          "chunkIndex": 0,
+          "rank": 1,
+          "start": 0,
+          "end": 94,
+          "sourceStart": 0,
+          "sourceEnd": 94
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-371",
+          "chunkIndex": 1,
+          "rank": 2,
+          "start": 0,
+          "end": 96,
+          "sourceStart": 96,
+          "sourceEnd": 192
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-204",
+          "chunkIndex": 0,
+          "rank": 3,
+          "start": 0,
+          "end": 100,
+          "sourceStart": 0,
+          "sourceEnd": 100
+        },
+        {
+          "documentId": "equipment-rules",
+          "paragraphId": "equipment-sharing",
+          "chunkIndex": 2,
+          "rank": 4,
+          "start": 0,
+          "end": 133,
+          "sourceStart": 194,
+          "sourceEnd": 327
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-240",
+          "chunkIndex": 1,
+          "rank": 5,
+          "start": 0,
+          "end": 87,
+          "sourceStart": 102,
+          "sourceEnd": 189
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-refund",
+          "chunkIndex": 0,
+          "rank": 6,
+          "start": 0,
+          "end": 97,
+          "sourceStart": 0,
+          "sourceEnd": 97
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-equipment",
+          "chunkIndex": 2,
+          "rank": 7,
+          "start": 0,
+          "end": 81,
+          "sourceStart": 202,
+          "sourceEnd": 283
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-signup",
+          "chunkIndex": 0,
+          "rank": 8,
+          "start": 0,
+          "end": 85,
+          "sourceStart": 0,
+          "sourceEnd": 85
+        },
+        {
+          "documentId": "cedar-workshop",
+          "paragraphId": "cedar-access",
+          "chunkIndex": 1,
+          "rank": 9,
+          "start": 0,
+          "end": 113,
+          "sourceStart": 87,
+          "sourceEnd": 200
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-access",
+          "chunkIndex": 1,
+          "rank": 10,
+          "start": 0,
+          "end": 130,
+          "sourceStart": 99,
+          "sourceEnd": 229
+        },
+        {
+          "documentId": "lab-guide",
+          "paragraphId": "lab-near-miss",
+          "chunkIndex": 2,
+          "rank": 11,
+          "start": 0,
+          "end": 137,
+          "sourceStart": 191,
+          "sourceEnd": 328
+        },
+        {
+          "documentId": "railway-rules",
+          "paragraphId": "rail-near-miss",
+          "chunkIndex": 2,
+          "rank": 12,
+          "start": 0,
+          "end": 157,
+          "sourceStart": 231,
+          "sourceEnd": 388
+        }
+      ]
+    }
+  ]
+}

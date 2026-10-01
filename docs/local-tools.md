@@ -13,15 +13,15 @@ chats keep tools off by default. No confirmation is needed for each calculation.
 | --- | --- |
 | `calculate` | Decimal arithmetic using `+`, `-`, `*`, `/`, unary signs and parentheses. Returns a finite device-number result. Division by zero, overflow and unsupported syntax return errors. No JavaScript, shell, `eval` or executable expressions. |
 | `get_current_datetime` | Device time with its actual timezone or an explicitly requested supported zone. Returns timezone/offset information; an invalid zone is an error rather than a silent substitution. No network clock. |
-| `search_attached_documents` | Lexical search over ready documents attached to this chat. Optional document IDs narrow that set. Returns bounded excerpts with existing document IDs, chunk indices and available page, slide, sheet or source-offset locators. Empty matches are valid; unavailable locators are omitted. |
+| `search_attached_documents` | Searches up to four ready document attachments committed to the current chat using its selected Keywords/Hybrid mode and optional local reranking. Optional document IDs narrow the owned set. Returns bounded untrusted excerpts with original document/chunk IDs, real available locators, and the actual retrieval mode/fallback reason when an auxiliary mode was requested. Empty matches are valid. |
 
-Document IDs, current-chat ownership, attachment identity and availability are
-checked again before reading and after asynchronous work. Search reuses the
-existing AnyDoc/document-context path. It does not use embeddings or a reranker.
-Returned text is untrusted source material: instructions inside a document cannot
-register functions, change schemas or grant access to another file. The tools have
-no arbitrary filesystem, other-chat, model-catalog, credential or private-settings
-access. They do not send messages, use the network or write/delete files.
+Document IDs, current-chat ownership, attachment identity and availability are checked before reading, after asynchronous work and before returning results. Search shares `DocumentRetrievalService` with ordinary document context and editing/regeneration. Keywords preserves lexical filtering; Hybrid can return a semantically selected paraphrase even when it shares no query word. The model's proposed IDs never grant access to another chat or arbitrary file.
+
+Choose the chat's **Document search** options independently from **Local tools** permissions. Select exact compatible auxiliary models in Models, then prepare owned documents explicitly or through an ordinary document request. The tool reads compatible prepared vectors after restart and embeds only its current query. It passes `prepareMissing: false`: missing or stale indexes use explicit safe Keywords fallback where allowed, rather than creating cold embeddings inside the tool's ten-second deadline. Local reranking can also run on Keywords candidates without an embedding model.
+
+Requested and actual mode are separate. Auxiliary results include `retrievalMode` and an optional bounded `fallbackReason`; a Hybrid request that used Keywords is not a successful embedding result. Stop, changed ownership, unknown native drain and failed A restoration cannot return a hidden lexical result or start the next model completion.
+
+Returned text remains untrusted source data. Documents cannot register functions, alter schemas or grant new permissions. The static allowlist, fixed argument schemas, result-byte budget, sequential execution and independent final-output validation are unchanged. No new arbitrary filesystem, network, shell, catalog or private-settings tool is introduced.
 
 ## Settings, output and progress
 
@@ -60,6 +60,14 @@ content and a stopped/error status. Raw protocol text is not a partial-answer
 fallback. Incomplete tool proposals cannot execute, and incomplete or invalid
 constrained output cannot become successful. Results from invalidated ownership
 are discarded.
+
+## Retrieval ownership and deadlines
+
+The genuine `LocalToolRun` engine lease spans the native proposal, document retrieval and result-to-model continuation. A is temporarily suspended while Hybrid uses embedding B and optional reranker C sequentially; Keywords with reranking uses only C. Selection/permission ownership remains valid during that suspension; full native readiness is required again before continuation. Verified internal restoration updates the lease's context epoch only after the same actual A profile, ordered LoRA bindings/scales and companion identity are restored. A user-provided or model-generated owner token is never accepted.
+
+The existing limits remain **180 seconds per run and ten seconds per tool**, plus byte/token/context limits. Explicit document preparation has its own bounded preparation budget and does not enlarge tool deadlines. A deadline requests cancellation and blocks further calls/completions; it is not proof that native memory or an opaque document source was released. Ownership stays retained through the real callback, including tokenization, source enumeration and the complete in-flight rerank batch. rc.3 exposes no operation-wide embedding/rerank cancellation API, so Stop cannot release that batch early. Stop after confirmed drain may restore the unchanged A selection for the next request; changed selection/private-storage/document ownership cannot restore stale A or publish late results. Uncertain drain requires engine recovery or process restart.
+
+Completed call/result history remains encrypted and never reexecutes on hydration. [Stage 5 Android CPU acceptance](llama-rn-013-stage5-acceptance.md) verified genuine Hybrid feedback with reranking off, committed history and constrained final output with 641 prompt/native evaluated tokens under the unchanged ten-second deadline. Cold vector reuse and pre-native stale-ID rejection after deletion also passed. Separate corpus and LoRA cases establish C execution; Tool+C continuation within that deadline remains unverified. Ordinary control verification is recorded separately.
 
 ## Limits
 

@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { selectQaPack } = require('../scripts/ci-android-qa-request');
 
 const appRoot = path.resolve(__dirname, '..');
 
@@ -14,15 +15,6 @@ const packLabelPriority = [
   'android-pack-catalog',
   'android-pack-extended',
 ];
-
-const extractAndroidQaPackSelection = (workflow) => {
-  const match = workflow.match(/- name: Select Android QA pack[\s\S]+?echo "ANDROID_QA_PACK=\$pack"/);
-  if (!match) {
-    throw new Error('Could not find Android QA pack selection step in CI workflow.');
-  }
-
-  return match[0];
-};
 
 const extractWorkflowJob = (workflow, jobName) => {
   const lines = workflow.split(/\r?\n/);
@@ -59,7 +51,8 @@ const extractWorkflowStep = (workflowSection, stepName) => {
 const normalizeWhitespace = (value) => value.replace(/\s+/g, ' ').trim();
 
 describe('Android catalog QA CI configuration', () => {
-  const workflow = readAppFile('.github', 'workflows', 'ci.yml');
+  const workflow = readAppFile('.github', 'workflows', 'ci.yml') + '\n' +
+    readAppFile('.github', 'workflows', 'android-qa.yml');
   const prTemplate = readAppFile('.github', 'PULL_REQUEST_TEMPLATE.md');
   const contributing = readAppFile('CONTRIBUTING.md');
   const releaseChecklist = readAppFile('docs', 'release-checklist.md');
@@ -70,23 +63,18 @@ describe('Android catalog QA CI configuration', () => {
   const releaseWorkflow = readAppFile('.github', 'workflows', 'release-please.yml');
 
   it('lets the catalog pack label trigger Android QA and select the catalog pack', () => {
-    const selection = extractAndroidQaPackSelection(workflow);
-
-    expect(workflow).toContain("contains(github.event.pull_request.labels.*.name, 'android-pack-catalog')");
-    expect(selection).toContain("contains(github.event.pull_request.labels.*.name, 'android-pack-catalog')");
-    expect(selection).toContain('pack="catalog"');
+    expect(workflow).toContain('run: node scripts/ci-android-qa-request.js');
+    expect(workflow).toContain('ANDROID_QA_PACK: ${{ needs.request.outputs.pack }}');
+    expect(selectQaPack({ labels: [{ name: 'android-pack-catalog' }] })).toBe('catalog');
     expect(workflow).toContain('--pack "$ANDROID_QA_PACK"');
   });
 
   it('lets the document label and checkbox run the hosted release document pack', () => {
-    const selection = extractAndroidQaPackSelection(workflow);
     const hostedJob = extractWorkflowJob(workflow, 'android-qa');
 
     expect(hostedJob).toContain('timeout-minutes: 120');
-    expect(workflow).toContain("contains(github.event.pull_request.labels.*.name, 'android-pack-documents')");
-    expect(workflow).toContain("contains(github.event.pull_request.body, '- [x] Run Android document pack')");
-    expect(selection).toContain("contains(github.event.pull_request.labels.*.name, 'android-pack-documents')");
-    expect(selection).toContain('pack="documents"');
+    expect(selectQaPack({ labels: [{ name: 'android-pack-documents' }] })).toBe('documents');
+    expect(selectQaPack({ body: '- [x] Run Android document pack' })).toBe('documents');
     expect(workflow).toContain('ANDROID_SMOKE_APK_VARIANT: release');
     expect(androidSmoke).toContain('ANDROID_UNIVERSAL_ABIS');
     expect(androidBuildProvenance).toContain('libpocket_anydoc.so');
@@ -109,11 +97,10 @@ describe('Android catalog QA CI configuration', () => {
   });
 
   it('defaults Android QA to runtime and delegates build reuse to the provenance-aware launcher', () => {
-    const selection = extractAndroidQaPackSelection(workflow);
     const hostedJob = extractWorkflowJob(workflow, 'android-qa');
     const scenarioStep = workflow.match(/- name: Run Android scenarios[\s\S]+?script: ([^\n]+)/)?.[0] || '';
 
-    expect(selection).toContain('pack="runtime"');
+    expect(selectQaPack({ labels: [{ name: 'run-android-checks' }] })).toBe('runtime');
     expect(scenarioStep).toContain('--fail-on-skip');
     expect(scenarioStep).not.toContain('--skip-build');
     expect(hostedJob).not.toContain('npx expo prebuild');
@@ -146,7 +133,7 @@ describe('Android catalog QA CI configuration', () => {
     const hostedDiagnostics = extractWorkflowStep(hostedJob, 'Upload Android QA diagnostics');
     const hostedApk = extractWorkflowStep(hostedJob, 'Upload Android QA APK');
 
-    expect(hostedDiagnostics).toContain('if: always()');
+    expect(hostedDiagnostics).toContain("if: failure() || cancelled() || needs.request.outputs.diagnostics == 'true'");
     expect(hostedDiagnostics).toContain('retention-days: 1');
     expect(hostedDiagnostics).toContain('artifacts/android-scenarios/**');
     expect(hostedDiagnostics).toContain('artifacts/bootstrap-logcat.txt');
@@ -166,7 +153,6 @@ describe('Android catalog QA CI configuration', () => {
   });
 
   it('keeps CI pack label priority documented in the same order', () => {
-    const selection = extractAndroidQaPackSelection(workflow);
     const documentedPriority = packLabelPriority.join('`, `').replace('`, `android-pack-extended', '`, then `android-pack-extended');
     for (const label of packLabelPriority) {
       expect(prTemplate).toContain(label);
@@ -178,9 +164,10 @@ describe('Android catalog QA CI configuration', () => {
     expect(normalizeWhitespace(releaseChecklist)).toContain(documentedPriority);
     expect(normalizeWhitespace(prTemplate)).toContain(documentedPriority);
 
-    const workflowIndexes = packLabelPriority.map((label) => selection.indexOf(`'${label}'`));
-    expect(workflowIndexes.every((index) => index >= 0)).toBe(true);
-    expect(workflowIndexes).toEqual([...workflowIndexes].sort((a, b) => a - b));
+    packLabelPriority.forEach((label, index) => {
+      const labels = packLabelPriority.slice(index).map((name) => ({ name }));
+      expect(selectQaPack({ labels })).toBe(label.replace('android-pack-', ''));
+    });
   });
 
   it('requires release-sensitive PRs to exercise Android 32-35 and production iOS native projects', () => {

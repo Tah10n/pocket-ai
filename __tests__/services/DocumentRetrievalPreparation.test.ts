@@ -1,5 +1,5 @@
 import { prepareDocumentRetrieval, cancelDocumentRetrievalPreparation, getDocumentRetrievalPreparationDocuments } from '../../src/services/DocumentRetrievalPreparation';
-import { getDocumentRetrievalStatus, clearDocumentRetrievalStatus } from '../../src/services/DocumentRetrievalStatus';
+import { getDocumentRetrievalStatus, clearDocumentRetrievalStatus, updateDocumentRetrievalStatus } from '../../src/services/DocumentRetrievalStatus';
 import { VERIFIED_RETRIEVAL_PROFILES } from '../../src/services/DocumentRetrievalProfiles';
 import type { ChatThread } from '../../src/types/chat';
 import type { ChatAttachment } from '../../src/types/attachments';
@@ -10,6 +10,9 @@ const mockRetrieve = jest.fn();
 const mockLoad = jest.fn();
 const mockRelease = jest.fn();
 const mockFinish = jest.fn();
+const mockBeginWork = jest.fn();
+const mockOnCancel = jest.fn();
+const mockUnsubscribeCancellation = jest.fn();
 const mockInspect = jest.fn();
 const mockReconcile = jest.fn();
 const mockGetVersion = jest.fn();
@@ -32,9 +35,7 @@ jest.mock('../../src/services/DocumentIndexStore', () => ({ documentIndexStore: 
 } }));
 jest.mock('../../src/services/AuxiliaryModelService', () => ({ getAuxiliarySelection: () => mockSelection }));
 jest.mock('../../src/services/DocumentRetrievalRuntime', () => ({ getDocumentRetrievalRuntimeIdentity: () => 'runtime-current' }));
-jest.mock('../../src/services/ChatGenerationService', () => ({ beginChatGenerationWork: () => ({
-  assertCurrent: jest.fn(), finish: () => mockFinish(), onCancel: () => jest.fn(),
-}) }));
+jest.mock('../../src/services/ChatGenerationService', () => ({ beginChatGenerationWork: (...args: unknown[]) => mockBeginWork(...args) }));
 
 const attachment: Extract<ChatAttachment, { kind: 'document' }> = {
   id: 'doc', kind: 'document', state: 'ready', threadId: 'thread', messageId: 'message',
@@ -87,6 +88,11 @@ describe('explicit document preparation ownership', () => {
     mockState = { activeThreadId: 'thread', inferenceRevision: 1, thread: {
       id: 'thread', modelId: 'chat-A', status: 'idle', messages: [{ id: 'message', role: 'user', state: 'complete', content: '', createdAt: 1, attachments: [attachment] }],
     } as ChatThread };
+    mockBeginWork.mockReset().mockImplementation(() => ({
+      assertCurrent: jest.fn(), finish: () => mockFinish(), onCancel: (...args: unknown[]) => mockOnCancel(...args),
+    }));
+    mockOnCancel.mockReset().mockReturnValue(mockUnsubscribeCancellation);
+    mockReconcile.mockReset();
     mockInspect.mockReturnValue(null);
     mockLoad.mockResolvedValue({ entries: [], truncated: false, release: () => mockRelease() });
     mockRelease.mockResolvedValue(undefined);
@@ -104,6 +110,89 @@ describe('explicit document preparation ownership', () => {
     expect(mockFinish).toHaveBeenCalledTimes(1); expect(mockRelease).toHaveBeenCalledTimes(1);
   });
 
+  it('returns a rejected promise for synchronous admission failure and allows a later explicit retry', async () => {
+    const error = new Error('work admission denied');
+    mockBeginWork.mockImplementationOnce(() => { throw error; });
+    updateDocumentRetrievalStatus('thread', { preparation: { phase: 'ready', processed: 8, total: 8 } });
+    let operation!: Promise<void>;
+    expect(() => { operation = prepareDocumentRetrieval('thread', ['doc']); }).not.toThrow();
+    await expect(operation).rejects.toBe(error);
+    expect(getDocumentRetrievalPreparationDocuments('thread')[0]).toMatchObject({
+      status: 'error', issue: 'native_failed', processed: 0, total: 0,
+    });
+    expect(getDocumentRetrievalStatus('thread').preparation?.attachmentId).toBe('doc');
+    expect(mockReconcile).not.toHaveBeenCalled();
+    expect(mockLoad).not.toHaveBeenCalled();
+    expect(mockRetrieve).not.toHaveBeenCalled();
+    expect(mockFinish).not.toHaveBeenCalled();
+    await prepareDocumentRetrieval('thread', ['doc']);
+    expect(getDocumentRetrievalStatus('thread').preparation?.phase).toBe('ready');
+    expect(mockFinish).toHaveBeenCalledTimes(1);
+  });
+
+  it('finishes admitted work exactly once if cancellation registration rejects synchronously', async () => {
+    const error = new Error('cancellation registration denied');
+    mockOnCancel.mockImplementationOnce(() => { throw error; });
+    await expect(prepareDocumentRetrieval('thread', ['doc'])).rejects.toBe(error);
+    expect(getDocumentRetrievalPreparationDocuments('thread')[0]).toMatchObject({ status: 'error', processed: 0, total: 0 });
+    expect(mockFinish).toHaveBeenCalledTimes(1);
+    expect(mockLoad).not.toHaveBeenCalled();
+    expect(mockUnsubscribeCancellation).not.toHaveBeenCalled();
+    await prepareDocumentRetrieval('thread', ['doc']);
+    expect(mockFinish).toHaveBeenCalledTimes(2);
+    expect(mockUnsubscribeCancellation).toHaveBeenCalledTimes(1);
+  });
+
+  it('attaches initial ownership failure to the requested document without starting source or native work', async () => {
+    const operation = prepareDocumentRetrieval('thread', ['doc']);
+    mockState.activeThreadId = 'other-thread';
+    await expect(operation).rejects.toMatchObject({ code: 'ownership_changed' });
+    expect(getDocumentRetrievalPreparationDocuments('thread')[0]).toMatchObject({
+      status: 'error', issue: 'ownership_changed', processed: 0, total: 0,
+    });
+    expect(mockReconcile).not.toHaveBeenCalled();
+    expect(mockLoad).not.toHaveBeenCalled();
+    expect(mockRetrieve).not.toHaveBeenCalled();
+    expect(mockFinish).toHaveBeenCalledTimes(1);
+    expect(mockUnsubscribeCancellation).toHaveBeenCalledTimes(1);
+    expect(mockListeners.size).toBe(0);
+    mockState.activeThreadId = 'thread';
+    await prepareDocumentRetrieval('thread', ['doc']);
+    expect(mockFinish).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports reconciliation failure with zero progress and releases admission for a later retry', async () => {
+    const error = new Error('index reconciliation denied');
+    mockReconcile.mockImplementationOnce(() => { throw error; });
+    updateDocumentRetrievalStatus('thread', { preparation: {
+      phase: 'cancelled', attachmentId: 'older-document', processed: 9, total: 12,
+    } });
+    await expect(prepareDocumentRetrieval('thread', ['doc'])).rejects.toBe(error);
+    expect(getDocumentRetrievalPreparationDocuments('thread')[0]).toMatchObject({
+      status: 'error', issue: 'native_failed', processed: 0, total: 0,
+    });
+    expect(getDocumentRetrievalStatus('thread').preparation?.attachmentId).toBe('doc');
+    expect(mockLoad).not.toHaveBeenCalled();
+    expect(mockRetrieve).not.toHaveBeenCalled();
+    expect(mockFinish).toHaveBeenCalledTimes(1);
+    expect(mockListeners.size).toBe(0);
+    await prepareDocumentRetrieval('thread', ['doc']);
+    expect(mockFinish).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['removed', 'private_reset'] as const)('does not recreate status after initial %s ownership loss', async loss => {
+    const operation = prepareDocumentRetrieval('thread', ['doc']);
+    if (loss === 'removed') mockState.thread = undefined;
+    else mockWritable = false;
+    clearDocumentRetrievalStatus('thread');
+    await expect(operation).rejects.toMatchObject({ code: 'ownership_changed' });
+    expect(getDocumentRetrievalStatus('thread')).toEqual({});
+    expect(mockLoad).not.toHaveBeenCalled();
+    expect(mockRetrieve).not.toHaveBeenCalled();
+    expect(mockFinish).toHaveBeenCalledTimes(1);
+    expect(mockListeners.size).toBe(0);
+  });
+
   it('holds admission through cancellation until native settlement and retained-source release', async () => {
     const native = deferred<object>(); const release = deferred<void>(); const started = deferred<void>();
     mockRetrieve.mockImplementation(async () => { started.resolve(); return native.promise; });
@@ -114,6 +203,7 @@ describe('explicit document preparation ownership', () => {
     cancelDocumentRetrievalPreparation('thread');
     expect(getDocumentRetrievalStatus('thread').preparation?.phase).toBe('cancelling');
     await expect(prepareDocumentRetrieval('thread', ['doc'])).rejects.toMatchObject({ code: 'native_failed' });
+    expect(getDocumentRetrievalStatus('thread').preparation?.phase).toBe('cancelling');
     expect(mockFinish).not.toHaveBeenCalled();
     native.resolve({ candidates: [], preparedIndexes: new Map(), actualMode: 'lexical' });
     for (let step = 0; step < 12 && !mockRelease.mock.calls.length; step++) await Promise.resolve();

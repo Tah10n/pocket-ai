@@ -9,7 +9,7 @@ import { documentIndexStore } from './DocumentIndexStore';
 import { getAuxiliarySelection } from './AuxiliaryModelService';
 import { getVerifiedRetrievalProfile } from './DocumentRetrievalProfiles';
 import { getDocumentRetrievalRuntimeIdentity } from './DocumentRetrievalRuntime';
-import { getDocumentRetrievalStatus, updateDocumentRetrievalStatus } from './DocumentRetrievalStatus';
+import { getDocumentRetrievalStatus, updateDocumentRetrievalStatus, type DocumentRetrievalStatus } from './DocumentRetrievalStatus';
 import { isPrivateStorageWritable } from './storage';
 import { beginChatGenerationWork } from './ChatGenerationService';
 import { DOCUMENT_TEXT_PROCESSOR_ID, DOCUMENT_TEXT_PROCESSOR_VERSION,
@@ -132,14 +132,45 @@ export async function stopDocumentRetrievalPreparation(): Promise<void> {
   try { await owned.promise; } catch { /* Terminal cancellation/error is already recorded. */ }
 }
 
-export function prepareDocumentRetrieval(threadId: string, attachmentIds?: readonly string[]): Promise<void> {
-  if (active) return Promise.reject(new DocumentRetrievalError('native_failed'));
+function recordPreparationFailure(
+  threadId: string, attachmentId: string | undefined, error: unknown,
+  previous?: DocumentRetrievalStatus['preparation'],
+): void {
+  const reason = error instanceof DocumentRetrievalError ? error.code : 'native_failed';
+  try {
+    // A removed chat or reset must not regain a late UI record.
+    if (isPrivateStorageWritable() && useChatStore.getState().getThread(threadId)) {
+      updateDocumentRetrievalStatus(threadId, { preparation: {
+        ...previous, attachmentId: previous?.attachmentId ?? attachmentId,
+        phase: reason === 'cancelled' ? 'cancelled' : 'error', reason,
+        processed: previous?.processed ?? 0, total: previous?.total ?? 0,
+      } });
+    }
+  } catch { /* Reporting cannot replace the original admission/operation failure. */ }
+}
+
+export async function prepareDocumentRetrieval(threadId: string, attachmentIds?: readonly string[]): Promise<void> {
+  // A second request must not overwrite the active owner's progress or cancellation.
+  if (active) throw new DocumentRetrievalError('native_failed');
   const initial = useChatStore.getState();
   const initialThread = initial.getThread(threadId);
   const modelId = initialThread ? getThreadActiveModelId(initialThread) : undefined;
   const controller = new AbortController();
-  const work = beginChatGenerationWork('document_retrieval_preparation');
-  const unsubscribeCancellation = work.onCancel(() => controller.abort());
+  let work: ReturnType<typeof beginChatGenerationWork>;
+  try {
+    work = beginChatGenerationWork('document_retrieval_preparation');
+  } catch (error) {
+    recordPreparationFailure(threadId, attachmentIds?.[0], error);
+    throw error;
+  }
+  let unsubscribeCancellation: () => void;
+  try {
+    unsubscribeCancellation = work.onCancel(() => controller.abort());
+  } catch (error) {
+    work.finish();
+    recordPreparationFailure(threadId, attachmentIds?.[0], error);
+    throw error;
+  }
   const checkSelection = () => {
     const state = useChatStore.getState();
     const thread = state.getThread(threadId);
@@ -154,11 +185,14 @@ export function prepareDocumentRetrieval(threadId: string, attachmentIds?: reado
   };
   const operation = async () => {
     let loaded: Awaited<ReturnType<typeof loadOwnedRetrievalDocuments>> | undefined;
-    const unsubscribe = useChatStore.subscribe(() => { try { check(); } catch { controller.abort(); } });
+    let unsubscribe: () => void = () => undefined;
+    let hasRecordedPreparation = false;
     try {
+      unsubscribe = useChatStore.subscribe(() => { try { check(); } catch { controller.abort(); } });
       check();
       documentIndexStore.reconcile();
       updateDocumentRetrievalStatus(threadId, { preparation: { phase: 'preparing', attachmentId: attachmentIds?.[0], processed: 0, total: 0 } });
+      hasRecordedPreparation = true;
       loaded = await loadOwnedRetrievalDocuments(threadId, attachmentIds, {
         query: '', signal: controller.signal, assertCurrent: check,
         maxFileBytes: MAX_CHAT_ANYDOC_DOCUMENT_ATTACHMENT_BYTES, maxChars: 16000, maxChunks: 64,
@@ -176,12 +210,8 @@ export function prepareDocumentRetrieval(threadId: string, attachmentIds?: reado
       const previous = getDocumentRetrievalStatus(threadId).preparation;
       updateDocumentRetrievalStatus(threadId, { preparation: { phase: 'ready', processed: previous?.processed ?? 0, total: previous?.total ?? 0 } });
     } catch (error) {
-      const reason = error instanceof DocumentRetrievalError ? error.code : 'native_failed';
-      const previous = getDocumentRetrievalStatus(threadId).preparation;
-      // A removed chat or reset must not regain a late UI record.
-      if (isPrivateStorageWritable() && useChatStore.getState().getThread(threadId)) updateDocumentRetrievalStatus(threadId, { preparation: {
-        ...previous, phase: reason === 'cancelled' ? 'cancelled' : 'error', reason, processed: previous?.processed ?? 0, total: previous?.total ?? 0,
-      } });
+      recordPreparationFailure(threadId, attachmentIds?.[0], error,
+        hasRecordedPreparation ? getDocumentRetrievalStatus(threadId).preparation : undefined);
       throw error;
     } finally {
       unsubscribe();

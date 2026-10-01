@@ -1256,6 +1256,33 @@ describe('ChatScreen', () => {
     }
   });
 
+  it('releases the screen preparation owner after admission rejection so another explicit attempt can start', async () => {
+    const preparation = jest.requireActual('../../src/services/DocumentRetrievalPreparation');
+    const auxiliary = jest.requireActual('../../src/services/AuxiliaryModelService');
+    const status = jest.requireActual('../../src/services/DocumentRetrievalStatus');
+    const documents = jest.spyOn(preparation, 'getDocumentRetrievalPreparationDocuments').mockReturnValue([
+      { attachmentId: 'doc-1', displayName: 'Report', status: 'not_ready' },
+    ]);
+    const selected = jest.spyOn(auxiliary, 'getAuxiliarySelection').mockImplementation(() => ({ name: 'Embedding B' }));
+    const prepare = jest.spyOn(preparation, 'prepareDocumentRetrieval')
+      .mockRejectedValueOnce(new Error('work admission denied')).mockResolvedValue(undefined);
+    const view = render(React.createElement(ChatScreen));
+    try {
+      fireEvent.press(view.getByTestId('chat-retrieval-expand'));
+      await act(async () => { fireEvent.press(view.getByTestId('chat-retrieval-mode-hybrid')); view.rerender(React.createElement(ChatScreen)); });
+      await act(async () => { fireEvent.press(view.getByTestId('document-preparation-start-doc-1')); });
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(lastChatInputBarProps.disabled).toBe(false);
+      expect(view.getByTestId('document-preparation-start-doc-1').props.accessibilityState.disabled).toBe(false);
+      await act(async () => { fireEvent.press(view.getByTestId('document-preparation-start-doc-1')); });
+      expect(prepare).toHaveBeenCalledTimes(2);
+      expect(lastChatInputBarProps.disabled).toBe(false);
+    } finally {
+      view.unmount(); status.clearDocumentRetrievalStatus();
+      documents.mockRestore(); selected.mockRestore(); prepare.mockRestore();
+    }
+  });
+
   it('edits advanced generation settings without contaminating another chat snapshot or history', async () => {
     const first = useChatStore.getState().threads['thread-1'];
     const second = { ...first, id: 'thread-2', paramsSnapshot: { ...first.paramsSnapshot, temperature: 0.2 } };

@@ -5708,6 +5708,51 @@ async function runTtsAcceptanceScenario(ctx, flow) {
   } catch (error) { forceStopScenarioApp(adbPath, ctx.serial); throw error; }
 }
 
+async function scrollTtsPublicControlsIntoView(ctx, options = {}) {
+  const adbPath = options.adbPath ?? resolveAdbPath();
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const now = options.now ?? Date.now;
+  const deadline = now() + 20000;
+  const swipe = options.swipe ?? (async gesture => {
+    runChecked(adbPath, ['-s', ctx.serial, 'shell', 'input', 'swipe',
+      `${gesture.startX}`, `${gesture.startY}`, `${gesture.endX}`, `${gesture.endY}`, '250']);
+    await delay(900);
+  });
+  const contains = (outer, inner) => outer && inner && outer.left >= 0 && outer.top >= 0
+    && outer.right > outer.left && outer.bottom > outer.top
+    && ['left', 'top', 'right', 'bottom'].every(key => Number.isSafeInteger(outer[key]) && Number.isSafeInteger(inner[key]))
+    && inner.left >= outer.left && inner.top >= outer.top
+    && inner.right <= outer.right && inner.bottom <= outer.bottom
+    && inner.right > inner.left && inner.bottom > inner.top;
+  for (let attempt = 0; attempt <= 4 && now() < deadline; attempt += 1) {
+    const snapshot = await createSnapshot(adbPath, ctx.serial);
+    const marker = findResourceIdInSnapshot(snapshot, 'chat-qa-tts-playback-state');
+    let state; try { state = JSON.parse(marker?.contentDesc || marker?.text); } catch { state = null; }
+    if (!['paused', 'stopped'].includes(state?.phase) || state.errorCode
+      || !Number.isSafeInteger(state.sampleCount) || state.sampleCount < 1 || state.sampleCount > 768000) {
+      throw new Error('TTS controls scrolling requires a static generated clip.');
+    }
+    const sheet = findResourceIdInSnapshot(snapshot, 'tts-preview-sheet', { visibleOnly: true });
+    if (!contains(snapshot.viewportBounds, sheet?.bounds)) throw new Error('TTS Modal viewport is missing or clipped.');
+    const views = snapshot.nodes.filter(node => /ScrollView$/u.test(node.className)
+      && node.enabled && contains(sheet.bounds, node.bounds));
+    if (views.length !== 1 || !contains(snapshot.viewportBounds, views[0].bounds)
+      || views[0].bounds.right - views[0].bounds.left < 100
+      || views[0].bounds.bottom - views[0].bounds.top < 200) {
+      throw new Error('TTS Modal scroll viewport is missing, ambiguous, or clipped.');
+    }
+    const b = views[0].bounds;
+    const controls = ['tts-play', 'tts-replay', 'tts-stop'].map(id => findResourceIdInSnapshot(snapshot, id));
+    if (controls.every(node => node?.enabled && node.clickable && contains(b, node.bounds))) return snapshot;
+    if (attempt === 4) break;
+    const inset = Math.floor((b.bottom - b.top) / 4);
+    const centerX = Math.floor((b.left + b.right) / 2);
+    await swipe({ startX: centerX, endX: centerX,
+      startY: b.bottom - inset, endY: b.top + inset });
+  }
+  throw new Error('TTS controls remain outside the observed Modal scroll viewport.');
+}
+
 async function runTtsPublicControlsAndColdRestart(ctx) {
   const adbPath = resolveAdbPath();
   await tapVisibleResource(ctx, 'chat-qa-open-tts-preview', { timeoutMs: 30000 });
@@ -5722,9 +5767,7 @@ async function runTtsPublicControlsAndColdRestart(ctx) {
         ['tts-play', 'tts-pause', 'tts-replay', 'tts-stop'].map(id => [id,
           findResourceIdInSnapshot(snapshot, id, { visibleOnly: true })])) };
     },
-    bringControlsIntoView: () => scrollToResourceId(ctx, 'tts-stop', {
-      timeoutMs: 20000, maxSwipesDown: 0, maxSwipesUp: 4,
-    }),
+    bringControlsIntoView: () => scrollTtsPublicControlsIntoView(ctx),
   });
   const publicControls = await runTtsPublicControls({
     readSnapshot, delay,
@@ -11427,6 +11470,7 @@ module.exports = {
   resolveSelectedBottomTabDestination,
   pickClosestNodePair,
   selectScenarios,
+  scrollTtsPublicControlsIntoView,
   scrollToResourceId,
   parseCliOptions,
   readAndroidProcessRssBytes,

@@ -1,4 +1,6 @@
 const { createTtsPublicSnapshotReader, getTtsControlTap, runTtsPublicControls } = require('../../scripts/lib/tts-public-controls');
+const { parseUiSnapshot, findResourceIdInSnapshot, findResourceIdClearOfOverlays,
+  scrollTtsPublicControlsIntoView } = require('../../scripts/android-scenarios');
 
 function createNativeUi({ nonIdle = false, initialPhase = 'playing', initialPosition = 0.4,
   pauseFails = false, progressFails = false, resumeFails = false, stopFails = false, screenshotFails = false,
@@ -237,5 +239,122 @@ describe('ordinary TTS native control observation', () => {
     expect(getTtsControlTap({ enabled: true, clickable: true,
       bounds: { left: 40, top: 70, right: 240, bottom: 130 } },
     { left: 0, top: 0, right: 1080, bottom: 1920 })).toEqual({ x: 52, y: 82 });
+  });
+});
+
+function modalSnapshot(state, { visible = true, sheet = '[0,450][1080,1100]',
+  scroll = '[0,500][1080,1000]', extraScroll = '', controlTop = 600 } = {}) {
+  const marker = JSON.stringify(state).replace(/"/gu, '&quot;');
+  const top = visible ? controlTop : 2600;
+  const firstControl = state.phase === 'playing' ? 'tts-pause' : 'tts-play';
+  return parseUiSnapshot(`<hierarchy><node bounds="[0,0][1080,2400]" />
+    <node resource-id="tts-preview-sheet" bounds="${sheet}" />
+    <node resource-id="chat-qa-tts-playback-state" content-desc="${marker}" bounds="[0,451][1,452]" />
+    <node class="android.widget.ScrollView" bounds="${scroll}" />${extraScroll}
+    <node resource-id="${firstControl}" bounds="[20,${top}][120,${top + 60}]" clickable="true" />
+    <node resource-id="tts-replay" bounds="[128,${top}][278,${top + 60}]" clickable="true" />
+    <node resource-id="tts-stop" bounds="[286,${top}][386,${top + 60}]" clickable="true" />
+  </hierarchy>`);
+}
+
+const staticClip = { phase: 'stopped', position: 8, duration: 8, sampleRate: 24000, sampleCount: 192000 };
+
+describe('public TTS observer with actual Modal scroll integration', () => {
+  it('recovers missed EOF through observed Modal gestures, then verifies native Pause/Play/Stop/Replay using fresh controls', async () => {
+    let visible = false;
+    const ui = createNativeUi({ mutateSnapshot: snapshot => {
+      if (!visible) Object.values(snapshot.controls).forEach(node => {
+        node.bounds.top += 2000; node.bounds.bottom += 2000;
+      });
+      return snapshot;
+    } });
+    const rawRead = ui.options.readSnapshot;
+    const createSnapshot = jest.fn(async () => {
+      const raw = await rawRead();
+      return modalSnapshot(raw.state, { visible });
+    });
+    const swipe = jest.fn(async gesture => {
+      expect(ui.phase()).toBe('stopped');
+      // The old full-screen gesture starts at 1700, outside this actual ScrollView.
+      expect(gesture.startY).toBeGreaterThan(500);
+      expect(gesture.startY).toBeLessThan(1000);
+      expect(gesture.endY).toBeGreaterThan(500);
+      expect(gesture.endY).toBeLessThan(gesture.startY);
+      expect(gesture.startX).toBeGreaterThan(0);
+      expect(gesture.startX).toBeLessThan(1080);
+      ui.events.push(['modal-swipe', ui.phase()]);
+      visible = true;
+    });
+    const readSnapshot = async () => {
+      const snapshot = await createSnapshot();
+      const state = JSON.parse(findResourceIdInSnapshot(snapshot, 'chat-qa-tts-playback-state').contentDesc);
+      return { state, viewport: snapshot.viewportBounds, controls: Object.fromEntries(
+        ['tts-play', 'tts-pause', 'tts-replay', 'tts-stop'].map(id => [id, findResourceIdInSnapshot(snapshot, id)])) };
+    };
+    ui.options.readSnapshot = createTtsPublicSnapshotReader({ readSnapshot,
+      bringControlsIntoView: () => scrollTtsPublicControlsIntoView({ serial: 'observed-device' }, {
+        adbPath: 'unused-adb', createSnapshot, swipe, now: ui.options.now,
+      }) });
+    const result = await runTtsPublicControls(ui.options);
+    expect(result).toMatchObject({ status: 'passed', firstObservation: 'natural_eof', pause: 'passed',
+      playback: 'passed', stop: 'passed', replay: 'passed' });
+    expect(swipe).toHaveBeenCalledTimes(1);
+    const firstSwipe = ui.events.findIndex(event => event[0] === 'modal-swipe');
+    const firstTap = ui.events.findIndex(event => event[0] === 'tap');
+    expect(firstTap).toBeGreaterThan(firstSwipe);
+    expect(ui.events[firstTap][3].y).toBeLessThan(660);
+    expect(ui.events.slice(firstTap).filter(event => event[0] === 'snapshot')
+      .every(event => event[1] !== 'playing')).toBe(true);
+  });
+
+  it('accepts controls wholly inside the observed Modal viewport without applying the screen bottom-tab overlay', async () => {
+    const snapshot = modalSnapshot(staticClip, { sheet: '[0,1800][1080,2400]',
+      scroll: '[0,1900][1080,2340]', controlTop: 2240 });
+    expect(findResourceIdClearOfOverlays(snapshot, 'tts-stop')).toBeNull();
+    const createSnapshot = jest.fn(() => snapshot);
+    const swipe = jest.fn();
+    expect(await scrollTtsPublicControlsIntoView({ serial: 'device' }, { adbPath: 'unused', createSnapshot, swipe }))
+      .toBe(snapshot);
+    expect(swipe).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing', { scroll: '[0,0][0,0]' }],
+    ['ambiguous', { extraScroll: '<node class="android.widget.ScrollView" bounds="[0,500][1080,1000]" />' }],
+    ['clipped scroll', { scroll: '[0,500][1080,1200]' }],
+    ['clipped sheet', { sheet: '[0,450][1080,2500]' }],
+  ])('rejects %s viewport instead of sending a fallback gesture', async (_label, geometry) => {
+    const createSnapshot = jest.fn(() => modalSnapshot(staticClip, { ...geometry, visible: false }));
+    const swipe = jest.fn();
+    await expect(scrollTtsPublicControlsIntoView({ serial: 'device' }, { adbPath: 'unused', createSnapshot, swipe }))
+      .rejects.toThrow(/viewport/);
+    expect(swipe).not.toHaveBeenCalled();
+  });
+
+  it.each(['playing', 'loading', null])('rejects motion/incomplete state %s before scrolling', async phase => {
+    const createSnapshot = jest.fn(() => modalSnapshot({ ...staticClip, phase }, { visible: false }));
+    const swipe = jest.fn();
+    await expect(scrollTtsPublicControlsIntoView({ serial: 'device' }, { adbPath: 'unused', createSnapshot, swipe }))
+      .rejects.toThrow(/static generated clip/);
+    expect(swipe).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the static state after a gesture and refuses another swipe when playback changed', async () => {
+    const createSnapshot = jest.fn()
+      .mockReturnValueOnce(modalSnapshot(staticClip, { visible: false }))
+      .mockReturnValue(modalSnapshot({ ...staticClip, phase: 'playing' }, { visible: false }));
+    const swipe = jest.fn();
+    await expect(scrollTtsPublicControlsIntoView({ serial: 'device' }, { adbPath: 'unused', createSnapshot, swipe }))
+      .rejects.toThrow(/static generated clip/);
+    expect(swipe).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed after four observed gestures when controls remain clipped', async () => {
+    const createSnapshot = jest.fn(() => modalSnapshot(staticClip, { visible: false }));
+    const swipe = jest.fn();
+    await expect(scrollTtsPublicControlsIntoView({ serial: 'device' }, { adbPath: 'unused', createSnapshot, swipe }))
+      .rejects.toThrow(/controls remain outside/);
+    expect(swipe).toHaveBeenCalledTimes(4);
+    expect(createSnapshot).toHaveBeenCalledTimes(5);
   });
 });

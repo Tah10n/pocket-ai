@@ -88,6 +88,11 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
 }));
 
 const mockStopPrivateRuntimeWorkForStorageBlocked = jest.fn();
+const mockCleanupColdTtsClips = jest.fn();
+
+jest.mock('../../src/services/TtsService', () => ({
+  ttsService: { cleanupCold: (...args: unknown[]) => mockCleanupColdTtsClips(...args) },
+}));
 
 jest.mock('../../src/services/PrivateStorageRecovery', () => ({
   stopPrivateRuntimeWorkForStorageBlocked: (...args: unknown[]) => mockStopPrivateRuntimeWorkForStorageBlocked(...args),
@@ -190,6 +195,7 @@ describe('AppBootstrap', () => {
     (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(readyStorageHealth);
     (initializePrivateStorageEncryption as jest.Mock).mockResolvedValue(readyStorageHealth);
     mockStopPrivateRuntimeWorkForStorageBlocked.mockResolvedValue(undefined);
+    mockCleanupColdTtsClips.mockReset().mockResolvedValue(undefined);
     mockRefreshHuggingFaceTokenState.mockResolvedValue({
       hasToken: false,
       updatedAt: 1_700_000_000_000,
@@ -328,6 +334,37 @@ describe('AppBootstrap', () => {
     expect(result).toEqual({ outcome: 'success' });
     expect(mockRefreshHuggingFaceTokenState).not.toHaveBeenCalled();
     expect(getSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('awaits cold speech clip cleanup before opening private storage', async () => {
+    let finishCleanup!: () => void;
+    const cleanup = new Promise<void>(resolve => { finishCleanup = resolve; });
+    mockCleanupColdTtsClips.mockReturnValueOnce(cleanup);
+    (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(buildPrivateStorageHealth({
+      status: 'blocked', reason: 'secure_key_unavailable', retryable: true,
+    }));
+    const work = bootstrapAppCritical();
+    try {
+      expect(mockCleanupColdTtsClips).toHaveBeenCalledTimes(1);
+      expect(getPrivateStorageHealthSnapshot).not.toHaveBeenCalled();
+      expect(initializePrivateStorageEncryption).not.toHaveBeenCalled();
+      finishCleanup();
+      await expect(work).resolves.toMatchObject({ outcome: 'storage_blocked' });
+      expect(mockCleanupColdTtsClips.mock.invocationCallOrder[0]).toBeLessThan(
+        (getPrivateStorageHealthSnapshot as jest.Mock).mock.invocationCallOrder[0],
+      );
+    } finally { finishCleanup(); await work; }
+  });
+
+  it('keeps text chat bootstrap available after sanitized cold speech cleanup failure', async () => {
+    mockCleanupColdTtsClips.mockRejectedValueOnce(new Error('file:///private/tts-clips/clip.wav'));
+    (getSettings as jest.Mock).mockReturnValue({ language: 'en', activePresetId: null,
+      activeModelId: null, temperature: 0.7, topP: 0.9, maxTokens: 2048,
+      theme: 'system', chatRetentionDays: null });
+    await expect(bootstrapAppCritical()).resolves.toEqual({ outcome: 'success' });
+    expect(initializePrivateStorageEncryption).toHaveBeenCalledTimes(1);
+    expect(useChatStore.persist.rehydrate).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.load).not.toHaveBeenCalled();
   });
 
   it('does not run background bootstrap work when private storage is blocked during full bootstrap', async () => {

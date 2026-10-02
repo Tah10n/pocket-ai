@@ -27,6 +27,7 @@ import { llmEngineService } from './LLMEngineService';
 import { documentIndexStore } from './DocumentIndexStore';
 import { stopDocumentRetrievalPreparation } from './DocumentRetrievalPreparation';
 import { clearDocumentRetrievalStatus } from './DocumentRetrievalStatus';
+import { ttsService } from './TtsService';
 
 export function invalidatePrivateStorageRuntimeHandles(): void {
   documentIndexStore.invalidate();
@@ -51,6 +52,7 @@ export async function stopPrivateRuntimeWorkForStorageBlocked(): Promise<void> {
   documentIndexStore.invalidate();
   llmEngineService.invalidateAuxiliaryContextOperation();
   await Promise.all([
+    ttsService.cancelAndClear(),
     stopDocumentRetrievalPreparation(),
     stopModelDownloadManagerForPrivateStorageBlocked(),
     stopActiveChatGenerationForPrivateStorageBlocked(),
@@ -62,6 +64,7 @@ export async function resetPrivateAppStorageAndRuntimeStateAfterConfirmation(): 
   documentIndexStore.invalidate();
   llmEngineService.invalidateAuxiliaryContextOperation();
   await Promise.all([
+    ttsService.cancelAndClear(),
     stopDocumentRetrievalPreparation(),
     resetModelDownloadManagerForPrivateStorageReset(),
     stopActiveChatGenerationForPrivateStorageBlocked(),

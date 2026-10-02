@@ -28,6 +28,7 @@ import {
 } from './storage';
 import { toAppError } from './AppError';
 import { stopPrivateRuntimeWorkForStorageBlocked } from './PrivateStorageRecovery';
+import { ttsService } from './TtsService';
 import { EngineStatus } from '../types/models';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
 import { safeJoinModelPath } from '../utils/safeFilePath';
@@ -514,6 +515,9 @@ export async function bootstrapAppCritical(): Promise<BootstrapCriticalResult> {
   let outcome: BootstrapOutcome = 'success';
 
   try {
+    // A cold process never reconstructs a previous audio player or clip. A failed cleanup
+    // keeps speech unavailable, while the existing text chat can still initialize.
+    try { await ttsService.cleanupCold(); } catch { /* Sanitized failure remains in TTS state. */ }
     const encryptionSpan = performanceMonitor.startSpan('bootstrap.initializePrivateStorageEncryption');
     try {
       const currentStorageHealth = getPrivateStorageHealthSnapshot();

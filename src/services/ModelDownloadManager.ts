@@ -57,6 +57,14 @@ import {
 import { projectorArtifactService } from './ProjectorArtifactService';
 import { llmEngineService } from './LLMEngineService';
 
+/** A concrete file lease blocked this mutation; ordinary download failures remain distinct. */
+export class ModelFileLeaseBusyError extends AppError {
+  constructor() {
+    super('action_failed', 'Model files are in use by another operation. Retry after it finishes.');
+    this.name = 'ModelFileLeaseBusyError';
+  }
+}
+
 function ignorePrivateStorageUnavailableDuringDownloadStop(error: unknown, scope: string): boolean {
   if (isPrivateStorageUnavailableError(error)) {
     console.warn(`[ModelDownloadManager] Skipped persisting ${scope} while private storage is blocked`, summarizeErrorForLog(error));
@@ -208,6 +216,8 @@ type ActiveDownloadJob = {
   /** Native file reads/hashing cannot be cancelled by dropping queue state. */
   verificationCount?: number;
   verificationSettled?: Promise<void>;
+  /** Actual job callback settlement, including deferred cancel cleanup. */
+  settled?: Promise<void>;
   deferredCancelCleanupFileNames?: string[];
 };
 
@@ -460,7 +470,8 @@ export class ModelDownloadManager {
 
   public static async runWithIdleModelDownloads<T>(operation: () => Promise<T>): Promise<T> {
     const instance = ModelDownloadManager.instance;
-    if (ModelDownloadManager.modelFileMutationCount > 0 || instance?.activeJob || instance?.isProcessing
+    if (ModelDownloadManager.modelFileMutationCount > 0) throw new ModelFileLeaseBusyError();
+    if (instance?.activeJob || instance?.isProcessing
       || (instance?.queueProcessingHoldCount ?? 0) > 0) {
       throw new AppError('action_failed', 'Model files are in use by another operation. Retry after it finishes.');
     }
@@ -1196,7 +1207,9 @@ export class ModelDownloadManager {
     }
 
     const jobToken = ++this.nextJobToken;
-    this.activeJob = { modelId: next.id, jobToken, resumable: null, stopReason: null };
+    let settleJob!: () => void;
+    const settled = new Promise<void>(resolve => { settleJob = resolve; });
+    this.activeJob = { modelId: next.id, jobToken, resumable: null, stopReason: null, settled };
 
     this.isProcessing = true;
     try {
@@ -1205,13 +1218,15 @@ export class ModelDownloadManager {
       });
       if (!didPersistActiveDownload) {
         this.clearFailedQueueStart(next.id, jobToken);
+        settleJob();
         return;
       }
     } catch (error) {
       this.clearFailedQueueStart(next.id, jobToken);
+      settleJob();
       throw error;
     }
-    void this.runDownloadJob(next, jobToken, downloadOptionsByModelId[next.id]);
+    void this.runDownloadJob(next, jobToken, downloadOptionsByModelId[next.id]).finally(settleJob);
   }
 
   private isCurrentJob(modelId: string, jobToken: number): boolean {
@@ -3203,7 +3218,7 @@ export class ModelDownloadManager {
     }
   }
 
-  public async cancelDownload(modelId: string) {
+  public async cancelDownload(modelId: string, options: { waitForDrain?: boolean } = {}) {
     const { queue, removeFromQueue, activeDownloadId, setActiveDownload } = useDownloadStore.getState();
     const queuedModel = queue.find((model) => model.id === modelId);
     const companionArtifactId = useDownloadStore.getState().downloadOptionsByModelId[modelId]?.companionArtifactId;
@@ -3307,6 +3322,7 @@ export class ModelDownloadManager {
         if (shouldProcessAfterCleanup || (shouldWaitForActiveJobToSettle && !activeCancelJobStillCurrent)) {
           void this.processQueue();
         }
+        if (options.waitForDrain) await cancelJob?.settled;
       }
     }
   }

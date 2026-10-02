@@ -193,7 +193,7 @@ if (pocketAiQaPrivateFileAccessEnabled && (
 )) {
     throw new GradleException("QA private-file access requires the isolated .qa package, EXPO_PUBLIC_ANDROID_QA=1 and local debug-fallback release signing; shipping builds are forbidden.")
 }
-if (pocketAiQaPrivateFileAccessEnabled && react.debuggableVariants.get().any { it.equalsIgnoreCase("release") }) {
+if (pocketAiQaPrivateFileAccessEnabled && project.extensions.getByType(com.facebook.react.ReactExtension).debuggableVariants.get().any { it.equalsIgnoreCase("release") }) {
     throw new GradleException("QA private-file access must retain the embedded Release JavaScript bundle.")
 }
 android.buildTypes.getByName("release").debuggable = pocketAiQaPrivateFileAccessEnabled

@@ -42,7 +42,7 @@ describe('isolated QA release private-file access plugin', () => {
     expect(guarded).toContain('System.getenv("POCKET_AI_SHIPPING_BUILD")');
     expect(guarded).toContain('android.buildTypes.getByName("release").debuggable = pocketAiQaPrivateFileAccessEnabled');
     expect(guarded).toContain('android.buildTypes.getByName("release").debuggable != pocketAiQaPrivateFileAccessEnabled');
-    expect(guarded).toContain('react.debuggableVariants.get().any { it.equalsIgnoreCase("release") }');
+    expect(guarded).toContain('project.extensions.getByType(com.facebook.react.ReactExtension).debuggableVariants.get().any { it.equalsIgnoreCase("release") }');
     expect(guarded).toContain('must retain the embedded Release JavaScript bundle');
     expect(start).toBeGreaterThan(first.indexOf('dependencies {'));
     expect(first).not.toMatch(/debuggable\s+true|debuggableVariants\s*=/u);
@@ -50,6 +50,15 @@ describe('isolated QA release private-file access plugin', () => {
     expect(first).toContain('applicationId appApplicationId');
   });
 
+  it('reads the typed RN extension when the legacy ext.react compatibility map shadows the project property', () => {
+    const generated = applyBuildGradleReleaseConfig(`project.ext.react = [:]\n${source}`, defaults);
+    const guarded = generated.slice(generated.indexOf('// @generated begin pocket-ai-qa-private-file-access'));
+    expect(generated).toContain('project.ext.react = [:]');
+    expect(guarded).toContain('project.extensions.getByType(com.facebook.react.ReactExtension).debuggableVariants.get()');
+    expect(guarded).not.toMatch(/\breact\.debuggableVariants/u);
+    expect(guarded).not.toContain('findByType');
+    expect(guarded).toContain('must retain the embedded Release JavaScript bundle');
+  });
   it('replaces an old generated gate and checks final release state after earlier custom debuggable settings', () => {
     const old = source.replace('release {\n', 'release {\n      debuggable true\n')
       + '\n// @generated begin pocket-ai-qa-private-file-access - old\nandroid.buildTypes.release.debuggable = true\n// @generated end pocket-ai-qa-private-file-access\n';

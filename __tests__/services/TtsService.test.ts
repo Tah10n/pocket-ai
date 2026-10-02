@@ -465,6 +465,66 @@ it('classifies frozen primary plus unconfirmed native release as recovery requir
   expect(playback.setClip).not.toHaveBeenCalled();
 });
 
+it.each(['release_failed', 'storage_failed'] as const)(
+  'retains asynchronous player %s through stopped events and Stop until confirmed clear', async errorCode => {
+    choose();
+    await service.start({ text: 'Hello.', language: 'en' });
+    const status = playback.subscribe.mock.calls[0][0];
+    const failure = { phase: 'error' as const, errorCode, position: 0, duration: 0 };
+    const stopped = { phase: 'stopped' as const, position: 0, duration: 0 };
+    const nativeEvent = deferred<void>();
+    const delivered = nativeEvent.promise.then(() => {
+      playback.getState.mockReturnValue(failure);
+      status(failure);
+    });
+    expect(service.getState().phase).toBe('playing');
+    nativeEvent.resolve();
+    await delivered;
+    expect(service.getState()).toMatchObject({ phase: 'error', errorCode });
+
+    const publishStopped = () => { playback.getState.mockReturnValue(stopped); status(stopped); };
+    publishStopped();
+    playback.stop.mockImplementation(async () => publishStopped());
+    await service.stop();
+    publishStopped();
+    expect(service.getState()).toMatchObject({ phase: 'error', errorCode });
+
+    const release = deferred<void>();
+    playback.clear.mockReturnValueOnce(release.promise);
+    const clear = service.cancelAndClear();
+    let clearSettled = false;
+    void clear.then(() => { clearSettled = true; });
+    await until(() => playback.clear.mock.calls.length === 2);
+    publishStopped();
+    expect(clearSettled).toBe(false);
+    expect(service.getState()).toMatchObject({ phase: 'error', errorCode });
+    await expect(service.start({ text: 'Another clip.', language: 'en' })).rejects.toMatchObject({ code: 'busy' });
+    await expect(service.checkFiles()).rejects.toMatchObject({ code: 'busy' });
+    expect(synthesize).toHaveBeenCalledTimes(1);
+
+    release.resolve();
+    await clear;
+    expect(service.getState()).toEqual({ phase: null });
+    publishStopped();
+    expect(service.getState()).toMatchObject({ phase: 'stopped', position: 0, duration: 0 });
+    expect(service.getState().errorCode).toBeUndefined();
+  },
+);
+
+it('keeps an ordinary native playback error generic without latching cleanup failure', async () => {
+  choose();
+  await service.start({ text: 'Hello.', language: 'en' });
+  const status = playback.subscribe.mock.calls[0][0];
+  const failed = { phase: 'error' as const, errorCode: 'playback_failed' as const, position: 0, duration: 0 };
+  playback.getState.mockReturnValue(failed);
+  status(failed);
+  expect(service.getState()).toMatchObject({ phase: 'error', errorCode: 'playback_failed' });
+  const stopped = { phase: 'stopped' as const, position: 0, duration: 0 };
+  playback.getState.mockReturnValue(stopped);
+  status(stopped);
+  expect(service.getState().phase).toBe('stopped');
+});
+
 it('keeps a player cleanup rejection visible across Stop and failed private-reset cleanup', async () => {
   choose();
   synthesize.mockRejectedValueOnce(new TtsError('native_failed'));

@@ -147,8 +147,10 @@ export class TtsService {
       if (this.drain || this.controlDrain || (this.state.phase === 'error'
         && ['storage_failed', 'release_failed', 'restore_failed'].includes(this.state.errorCode ?? ''))) return;
       const next = this.playback.getState();
+      const errorCode = next.errorCode === 'release_failed' || next.errorCode === 'storage_failed'
+        ? next.errorCode : next.errorCode ? 'playback_failed' : undefined;
       this.publish({ ...this.state, phase: next.phase, position: next.position, duration: next.duration,
-        ...(next.errorCode ? { errorCode: 'playback_failed' } : {}) });
+        ...(errorCode ? { errorCode } : {}) });
     });
   }
   getState = (): TtsServiceState => this.state;

@@ -4,6 +4,7 @@ const { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, sanitizeLocalT
 const { sanitizeDocumentRetrievalEvidence, waitForDocumentRetrievalEvidence } = require("./lib/document-retrieval-evidence");
 const { sanitizeDocumentIndexPublicationEvidence, waitForDocumentIndexPublicationEvidence } = require("./lib/document-index-publication-evidence");
 const { sanitizeTtsEvidence, validateTtsEvidence } = require("./lib/tts-evidence");
+const { createTtsPublicSnapshotReader, runTtsPublicControls } = require("./lib/tts-public-controls");
 const { resolveExternalTtsDirectory, exportLocalTtsClip, assertTtsPrivateFileAccess } = require("./lib/tts-local-export");
 
 const fs = require("fs");
@@ -5712,29 +5713,46 @@ async function runTtsPublicControlsAndColdRestart(ctx) {
   await tapVisibleResource(ctx, 'chat-qa-open-tts-preview', { timeoutMs: 30000 });
   await waitForResourceId(adbPath, ctx.serial, 'tts-exact-preview', { timeoutMs: 30000, visibleOnly: true });
   await tapVisibleResource(ctx, 'tts-synthesize', { timeoutMs: 30000, allowScroll: true });
-  const waitForState = async (predicate, timeoutMs = 30000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  const readSnapshot = createTtsPublicSnapshotReader({
+    readSnapshot: () => {
       const snapshot = createUiSnapshot(adbPath, ctx.serial);
       const marker = findResourceIdInSnapshot(snapshot, 'chat-qa-tts-playback-state');
       let state; try { state = marker ? JSON.parse(marker.contentDesc || marker.text) : null; } catch { state = null; }
+      return { state, viewport: snapshot.viewportBounds, controls: Object.fromEntries(
+        ['tts-play', 'tts-pause', 'tts-replay', 'tts-stop'].map(id => [id,
+          findResourceIdInSnapshot(snapshot, id, { visibleOnly: true })])) };
+    },
+    bringControlsIntoView: () => scrollToResourceId(ctx, 'tts-stop', {
+      timeoutMs: 20000, maxSwipesDown: 0, maxSwipesUp: 4,
+    }),
+  });
+  const publicControls = await runTtsPublicControls({
+    readSnapshot, delay,
+    isTransientObservationError: error => /^Failed to dump Android UI hierarchy /u.test(error?.message ?? ''),
+    tap: point => runChecked(adbPath, ['-s', ctx.serial, 'shell', 'input', 'tap', `${point.x}`, `${point.y}`], {
+      stdio: 'ignore',
+    }),
+    captureScreenshot: name => {
+      // No hierarchy/idle wait or remote-file retries may consume this short playing window.
+      const result = spawnSync(adbPath, ['-s', ctx.serial, 'exec-out', 'screencap', '-p'], {
+        timeout: 1000, maxBuffer: 20 * 1024 * 1024,
+      });
+      if (result.error || result.status !== 0 || !isCompletePngBuffer(result.stdout)) {
+        throw new Error('Direct TTS playback screenshot failed.');
+      }
+      fs.writeFileSync(path.join(artifactsRoot, name), result.stdout);
+    },
+  });
+  const waitForState = async (predicate, timeoutMs = 30000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const { state } = await readSnapshot();
       if (state?.errorCode) throw new Error(`Public TTS controls failed: ${state.errorCode}.`);
       if (state && predicate(state)) return state;
       await delay(250);
     }
     throw new Error('Public TTS player did not settle in the requested state.');
   };
-  const playing = await waitForState(state => state.phase === 'playing' && state.position > 0, 600000);
-  await tapVisibleResource(ctx, 'tts-pause', { timeoutMs: 30000, allowScroll: true });
-  await waitForState(state => state.phase === 'paused');
-  await tapVisibleResource(ctx, 'tts-play', { timeoutMs: 30000, allowScroll: true });
-  await waitForState(state => state.phase === 'playing' && state.position > 0);
-  await tapVisibleResource(ctx, 'tts-stop', { timeoutMs: 30000, allowScroll: true });
-  await waitForState(state => state.phase === 'stopped');
-  await tapVisibleResource(ctx, 'tts-replay', { timeoutMs: 30000, allowScroll: true });
-  await waitForState(state => state.phase === 'playing' && state.position > 0);
-  await tapVisibleResource(ctx, 'tts-stop', { timeoutMs: 30000, allowScroll: true });
-  await waitForState(state => state.phase === 'stopped');
   ctx.captureScreenshot('tts-public-controls.png');
   if (!appPrivatePathExists(adbPath, ctx.serial, 'cache/tts-clips/clip.wav')) {
     throw new Error('Cold restart did not begin with the real retained clip.');
@@ -5748,9 +5766,7 @@ async function runTtsPublicControlsAndColdRestart(ctx) {
   if (appPrivatePathExists(adbPath, ctx.serial, 'cache/tts-clips/clip.wav')) throw new Error('Cold launch retained the plaintext clip.');
   await waitForState(state => state.phase === null && !state.sampleCount && !state.position);
   ctx.captureScreenshot('tts-cold-launch.png');
-  return { status: 'passed', synthesis: 'passed', playback: 'passed', pause: 'passed', stop: 'passed', replay: 'passed',
-    coldRestart: 'passed', coldAutoplay: false, coldClipRemoved: true,
-    sampleRate: playing.sampleRate, sampleCount: playing.sampleCount, contentVerification: 'not_run' };
+  return { ...publicControls, coldRestart: 'passed', coldAutoplay: false, coldClipRemoved: true };
 }
 
 function sanitizeInferenceSmokeEvidence(evidence) {

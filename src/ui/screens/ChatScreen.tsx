@@ -19,6 +19,7 @@ import type { LoraProfileAdapter } from '@/utils/advancedLoadProfile';
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
     Alert,
+    AppState,
     BackHandler,
     Dimensions,
     Keyboard,
@@ -40,6 +41,12 @@ import { Text } from '@/components/ui/text';
 import { ChatHeader } from '@/components/ui/ChatHeader';
 import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
+import { TtsPreviewSheet, getTtsQaPlaybackMarker } from '@/components/ui/TtsPreviewSheet';
+import { ttsService } from '@/services/TtsService';
+import { getAndroidQaTtsEvidence, subscribeAndroidQaTts, runAndroidQaTts, continueAndroidQaTts } from '@/services/AndroidQaTts';
+import { prepareSpeechText, type PreparedSpeechText } from '@/utils/ttsText';
+import type { TtsErrorCode, TtsFlow } from '@/types/tts';
+import ttsQaFixtures from '../../../docs/validation/llama-rn-stage6/tts-fixtures.json';
 import { ChatSystemEventRow } from '@/components/ui/ChatSystemEventRow';
 import { ChatModelSelectorSheet } from '@/components/ui/ChatModelSelectorSheet';
 import {
@@ -745,11 +752,15 @@ function AndroidQaGenerationEvidenceSurface({
     topInset,
     getHookActions,
     isDocumentPreparationActive,
+    onOpenTtsPreview,
+    isTtsPreviewOpen,
 }: {
     documentDraftCount: number;
     topInset: number;
     getHookActions: () => AndroidQaLocalToolsHookActions & AndroidQaDocumentIndexHookActions;
     isDocumentPreparationActive?: boolean;
+    onOpenTtsPreview: (flow: TtsFlow) => void;
+    isTtsPreviewOpen: boolean;
 }) {
     if (!isAndroidQaGenerationEvidenceEnabled()) {
         return null;
@@ -760,6 +771,8 @@ function AndroidQaGenerationEvidenceSurface({
             topInset={topInset}
             getHookActions={getHookActions}
             isDocumentPreparationActive={isDocumentPreparationActive}
+            onOpenTtsPreview={onOpenTtsPreview}
+            isTtsPreviewOpen={isTtsPreviewOpen}
         />
     );
 }
@@ -769,11 +782,15 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     topInset,
     getHookActions,
     isDocumentPreparationActive = false,
+    onOpenTtsPreview,
+    isTtsPreviewOpen,
 }: {
     documentDraftCount: number;
     topInset: number;
     getHookActions: () => AndroidQaLocalToolsHookActions & AndroidQaDocumentIndexHookActions;
     isDocumentPreparationActive?: boolean;
+    onOpenTtsPreview: (flow: TtsFlow) => void;
+    isTtsPreviewOpen: boolean;
 }) {
     const { t } = useTranslation();
     const inferenceEvidence = useSyncExternalStore(
@@ -792,10 +809,13 @@ function EnabledAndroidQaGenerationEvidenceSurface({
         getAndroidQaDocumentRetrievalEvidence, getAndroidQaDocumentRetrievalEvidence);
     const documentIndexPublicationQaEvidence = useSyncExternalStore(subscribeAndroidQaDocumentIndexPublication,
         getAndroidQaDocumentIndexPublicationEvidence, getAndroidQaDocumentIndexPublicationEvidence);
+    const ttsQaEvidence = useSyncExternalStore(subscribeAndroidQaTts, getAndroidQaTtsEvidence, getAndroidQaTtsEvidence);
+    const ttsPlaybackState = useSyncExternalStore(ttsService.subscribe, ttsService.getState, ttsService.getState);
     const isRetrievalQaBusy = documentRetrievalQaEvidence.status === 'running'
         || documentIndexPublicationQaEvidence.status === 'running' || isDocumentPreparationActive;
     const isAnyNativeQaBusy = isRetrievalQaBusy || recoveryEvidence.status === 'running' || localToolsEvidence.status === 'running'
-        || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running';
+        || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'
+        || ttsQaEvidence.status === 'running' || ttsQaEvidence.requiresForceStop;
     const [backgroundTaskState, setBackgroundTaskState] = useState<
         'idle' | 'starting' | ForegroundServiceStartStatus
     >('idle');
@@ -858,6 +878,8 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                 testID={`chat-qa-document-draft-count-${documentDraftCount}`}
                 style={styles.androidQaEvidenceMarker}
             />
+            {!isTtsPreviewOpen ? <View accessible collapsable={false} testID="chat-qa-tts-playback-state"
+                accessibilityLabel={getTtsQaPlaybackMarker(ttsPlaybackState)} style={styles.androidQaEvidenceMarker} /> : null}
             <View style={styles.androidQaEvidenceActions}>
                 {isAndroidQaDocumentModelBootstrapEnabled() ? (
                     <>
@@ -865,7 +887,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                             size="xs"
                             action="secondary"
                             testID="chat-qa-run-inference-smoke"
-                            disabled={isRetrievalQaBusy || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            disabled={isAnyNativeQaBusy || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaInferenceSmoke()}
                         >
                             <ButtonText>QA inference</ButtonText>
@@ -878,32 +900,52 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                             style={styles.androidQaEvidenceMarker}
                         />
                         <Button size="xs" action="secondary" testID="chat-qa-run-model-resources"
-                            disabled={isRetrievalQaBusy || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            disabled={isAnyNativeQaBusy || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaModelResources()}>
                             <ButtonText>{t('resources.qaCheck')}</ButtonText>
                         </Button>
                         <View accessible collapsable={false} testID="chat-qa-model-resources-evidence"
                             accessibilityLabel={JSON.stringify(resourceEvidence)} style={styles.androidQaEvidenceMarker} />
                         <Button size="xs" action="secondary" testID="chat-qa-run-stage3"
-                            disabled={isRetrievalQaBusy || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            disabled={isAnyNativeQaBusy || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaStage3()}><ButtonText>QA Stage 3</ButtonText></Button>
                         <Button size="xs" action="secondary" testID="chat-qa-run-local-tools"
-                            disabled={isRetrievalQaBusy || localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            disabled={isAnyNativeQaBusy || localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaLocalTools()}><ButtonText>QA Local Tools</ButtonText></Button>
                         <View accessible collapsable={false} testID="chat-qa-local-tools-history"
                             accessibilityLabel={localToolsHistoryMarker} style={styles.androidQaEvidenceMarker} />
                         <View accessible collapsable={false} testID="chat-qa-local-tools-evidence"
                             accessibilityLabel={JSON.stringify(localToolsEvidence)} style={styles.androidQaEvidenceMarker} />
                         <Button size="xs" action="secondary" testID="chat-qa-run-local-tools-recovery"
-                            disabled={isRetrievalQaBusy || recoveryEvidence.status !== 'idle' || localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            disabled={isAnyNativeQaBusy || recoveryEvidence.status !== 'idle' || localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaLocalToolsRecovery(getHookActions)}><ButtonText>QA tool recovery</ButtonText></Button>
                         <Button size="xs" action="secondary" testID="chat-qa-check-local-tools-cold-recovery"
-                            disabled={isRetrievalQaBusy || recoveryEvidence.status !== 'idle'}
+                            disabled={isAnyNativeQaBusy || recoveryEvidence.status !== 'idle'}
                             onPress={() => void checkAndroidQaLocalToolsRecoveryAfterColdReopen()}><ButtonText>QA cold recovery</ButtonText></Button>
                         <View accessible collapsable={false} testID="chat-qa-local-tools-recovery-evidence"
                             accessibilityLabel={JSON.stringify(recoveryEvidence)} style={styles.androidQaEvidenceMarker} />
                         <View accessible collapsable={false} testID="chat-qa-stage3-evidence"
                             accessibilityLabel={JSON.stringify(stage3Evidence)} style={styles.androidQaEvidenceMarker} />
+                        <Button size="xs" action="secondary" testID="chat-qa-run-tts-tokens"
+                            disabled={isAnyNativeQaBusy || ttsQaEvidence.requiresForceStop
+                                || !['idle', 'native_passed', 'failed'].includes(ttsQaEvidence.status)}
+                            onPress={() => void runAndroidQaTts('tokens')}><ButtonText>QA TTS tokens</ButtonText></Button>
+                        <Button size="xs" action="secondary" testID="chat-qa-run-tts-continuous"
+                            disabled={isAnyNativeQaBusy || ttsQaEvidence.requiresForceStop
+                                || !['idle', 'native_passed', 'failed'].includes(ttsQaEvidence.status)}
+                            onPress={() => void runAndroidQaTts('continuous_embd')}><ButtonText>QA TTS continuous</ButtonText></Button>
+                        <Button size="xs" action="secondary" testID="chat-qa-continue-tts-clip"
+                            disabled={ttsQaEvidence.status !== 'running' || ttsQaEvidence.phase !== 'awaiting_clip_copy'}
+                            onPress={continueAndroidQaTts}><ButtonText>QA continue clip copy</ButtonText></Button>
+                        <View accessible collapsable={false} testID="chat-qa-tts-evidence"
+                            accessibilityLabel={JSON.stringify(ttsQaEvidence)} style={styles.androidQaEvidenceMarker} />
+                        {ttsQaEvidence.status === 'native_passed' && ttsQaEvidence.flow ? (
+                            <Button size="xs" action="secondary" testID="chat-qa-open-tts-preview"
+                                disabled={isAnyNativeQaBusy || ttsQaEvidence.requiresForceStop}
+                                onPress={() => onOpenTtsPreview(ttsQaEvidence.flow!)}>
+                                <ButtonText>QA ordinary speech preview</ButtonText>
+                            </Button>
+                        ) : null}
                         <Button size="xs" action="secondary" testID="chat-qa-run-document-retrieval"
                             disabled={documentRetrievalQaEvidence.status !== 'idle' || isAnyNativeQaBusy}
                             onPress={() => void runAndroidQaDocumentRetrieval()}><ButtonText>QA Document Search</ButtonText></Button>
@@ -1049,6 +1091,12 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     );
 }
 
+function isAndroidQaTtsBlockingPublicSpeech(): boolean {
+    if (!isAndroidQaGenerationEvidenceEnabled()) return false;
+    const evidence = getAndroidQaTtsEvidence();
+    return evidence.status === 'running' || evidence.phase === 'awaiting_clip_copy' || evidence.requiresForceStop;
+}
+
 const ChatScreenContent = () => {
     const {
         activeThread,
@@ -1090,6 +1138,112 @@ const ChatScreenContent = () => {
     const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
     const tabBarHeight = useBottomTabBarHeight();
     const isScreenFocused = useIsFocused();
+    const isTtsQaBusy = useSyncExternalStore(subscribeAndroidQaTts,
+        isAndroidQaTtsBlockingPublicSpeech, isAndroidQaTtsBlockingPublicSpeech);
+    const [speechPreview, setSpeechPreview] = useState<{
+        id: number; text: string; reason?: PreparedSpeechText['reason'];
+        source?: { threadId: string; messageId: string }; originalContent?: string;
+    } | null>(null);
+    const [speechCleanupPending, setSpeechCleanupPending] = useState(false);
+    const [speechUiError, setSpeechUiError] = useState<TtsErrorCode | 'unsafe_content'>();
+    const speechVersion = useRef(0);
+    const speechMounted = useRef(true);
+    const speechCleanupFailed = useRef(false);
+    const speechFocused = useRef(isScreenFocused);
+    speechFocused.current = isScreenFocused;
+    const onSpeechCleanupFailure = useCallback(() => {
+        speechCleanupFailed.current = true;
+        if (speechMounted.current) setSpeechUiError('storage_failed');
+    }, []);
+    const cancelSpeech = useCallback(() => {
+        ++speechVersion.current;
+        if (speechMounted.current) {
+            setSpeechPreview(null);
+            setSpeechCleanupPending(true);
+        }
+        const work = ttsService.cancelAndClear();
+        void work.then(() => {
+            if (speechMounted.current && !speechCleanupFailed.current) setSpeechCleanupPending(false);
+        }, onSpeechCleanupFailure);
+        return work;
+    }, [onSpeechCleanupFailure]);
+    useEffect(() => {
+        speechMounted.current = true;
+        const listener = AppState.addEventListener('change', next => {
+            if (next !== 'active') void cancelSpeech().catch(() => undefined);
+        });
+        return () => {
+            speechMounted.current = false;
+            listener.remove();
+            void cancelSpeech().catch(() => undefined);
+        };
+    }, [cancelSpeech]);
+    useFocusEffect(useCallback(() => () => {
+        // Invalidate first; cleanup rejection remains visible and blocks further starts.
+        void cancelSpeech().catch(() => undefined);
+    }, [cancelSpeech]));
+    useEffect(() => {
+        const threadId = activeThread?.id ?? null;
+        return () => {
+            if ((useChatStore.getState().activeThreadId ?? null) !== threadId) {
+                void cancelSpeech().catch(() => undefined);
+            }
+        };
+    }, [activeThread?.id, cancelSpeech]);
+    useEffect(() => {
+        if (!speechPreview?.source) return;
+        const message = messages.find(item => item.id === speechPreview.source?.messageId);
+        if (activeThread?.id !== speechPreview.source.threadId || message?.state !== 'complete'
+            || message.role !== 'assistant' || message.content !== speechPreview.originalContent) {
+            void cancelSpeech().catch(() => undefined);
+        }
+    }, [activeThread?.id, cancelSpeech, messages, speechPreview]);
+    const openSpeechPreview = useCallback((messageId?: string, qaFlow?: TtsFlow) => {
+        if (isGenerationBusy || isAndroidQaTtsBlockingPublicSpeech()
+            || speechCleanupFailed.current || !speechFocused.current) return;
+        const qaSeedCurrent = () => !qaFlow || (isAndroidQaGenerationEvidenceEnabled()
+            && getAndroidQaTtsEvidence().status === 'native_passed' && getAndroidQaTtsEvidence().flow === qaFlow);
+        if (!qaSeedCurrent()) return;
+        const qaTexts = qaFlow ? ttsQaFixtures.fixtures.find(fixture => fixture.flow === qaFlow)?.acceptanceTexts : undefined;
+        const qaSeed = qaTexts?.filter(item => item.text.length <= 240)
+            .reduce<string | undefined>((longest, item) => !longest || item.text.length > longest.length ? item.text : longest, undefined);
+        if (qaFlow && !qaSeed) return;
+        const chat = useChatStore.getState();
+        const thread = chat.activeThreadId ? chat.threads[chat.activeThreadId] : undefined;
+        const message = messageId ? thread?.messages.find(item => item.id === messageId) : undefined;
+        if (messageId && (!message || message.role !== 'assistant' || message.state !== 'complete')) return;
+        let prepared: PreparedSpeechText;
+        try {
+            prepared = prepareSpeechText(qaSeed ?? message?.content ?? '', {
+                structured: Boolean(message?.structuredOutput && ['json_object', 'json_schema', 'gbnf'].includes(message.structuredOutput.mode)),
+            });
+        } catch {
+            setSpeechUiError('unsafe_content');
+            return;
+        }
+        const work = cancelSpeech();
+        const captured = speechVersion.current;
+        const threadId = chat.activeThreadId;
+        setSpeechUiError(undefined);
+        void work.then(() => {
+            if (!speechMounted.current || captured !== speechVersion.current || !speechFocused.current
+                || isAndroidQaTtsBlockingPublicSpeech() || speechCleanupFailed.current
+                || !qaSeedCurrent() || useChatStore.getState().activeThreadId !== threadId) return;
+            if (message && threadId) {
+                const live = useChatStore.getState().threads[threadId]?.messages.find(item => item.id === message.id);
+                if (live?.state !== 'complete' || live.content !== message.content) return;
+            }
+            setSpeechPreview({ id: captured, text: prepared.text, reason: prepared.requiresReview ? prepared.reason : undefined,
+                ...(message && threadId ? { source: { threadId, messageId: message.id }, originalContent: message.content } : {}) });
+        }, onSpeechCleanupFailure);
+    }, [cancelSpeech, isGenerationBusy, onSpeechCleanupFailure]);
+    const openQaSpeechPreview = useCallback((flow: TtsFlow) => openSpeechPreview(undefined, flow), [openSpeechPreview]);
+    const closeSpeechPreview = useCallback(() => {
+        ++speechVersion.current;
+        setSpeechPreview(null);
+    }, []);
+    const isSpeechPreviewCurrent = useCallback(() => speechFocused.current && speechPreview?.id === speechVersion.current,
+        [speechPreview?.id]);
     const [hardwareStatus, setHardwareStatus] = useState(() => hardwareListenerService.getCurrentStatus());
     const [composerDraft, setComposerDraft] = useState('');
     const [diagnosticBusy, setDiagnosticBusy] = useState(false);
@@ -3250,6 +3404,9 @@ const ChatScreenContent = () => {
                     && !isGenerationBusy
                     && !isInputDisabled
                 }
+                canSpeak={msg.role === 'assistant' && msg.state === 'complete' && !isGenerationBusy
+                    && !speechCleanupPending && !isTtsQaBusy}
+                onSpeak={openSpeechPreview}
                 onDelete={handleDeleteMessage}
                 onRegenerate={handleBeginRegenerateFromMessage}
                 onLayout={index === messages.length - 1 ? handleLastMessageLayout : undefined}
@@ -3261,7 +3418,10 @@ const ChatScreenContent = () => {
         handleLastMessageLayout,
         isGenerationBusy,
         isInputDisabled,
+        isTtsQaBusy,
         messages.length,
+        openSpeechPreview,
+        speechCleanupPending,
     ]);
 
     return (
@@ -3301,6 +3461,14 @@ const ChatScreenContent = () => {
             />
 
             <Box testID="chat-document-controls-region" style={{ paddingTop: headerInset }}>
+                <Box className="px-4 py-2 gap-2">
+                    <Button size="sm" action="secondary" testID="chat-speech-preview"
+                        disabled={isGenerationBusy || isTtsQaBusy || speechCleanupPending || Boolean(speechUiError === 'storage_failed')}
+                        onPress={() => openSpeechPreview()}>
+                        <ButtonText>{t('tts.title')}</ButtonText>
+                    </Button>
+                    {speechUiError ? <Text colorRole="danger" accessibilityLiveRegion="polite">{t('tts.errors.' + speechUiError)}</Text> : null}
+                </Box>
                 <ChatToolsControl settings={toolSettings}
                     disabled={isModelSelectionPending || isPreparingRetrieval || (isGenerationBusy && !toolSettings.enabled)}
                     onChange={(next) => {
@@ -3425,6 +3593,8 @@ const ChatScreenContent = () => {
                     <AndroidQaGenerationEvidenceSurface
                         documentDraftCount={documentAttachmentDrafts.drafts.length}
                         topInset={0}
+                        onOpenTtsPreview={openQaSpeechPreview}
+                        isTtsPreviewOpen={Boolean(speechPreview)}
                         getHookActions={getQaHookActions}
                         isDocumentPreparationActive={isPreparingDocuments || isPreparingRetrieval}
                     />
@@ -3732,6 +3902,14 @@ const ChatScreenContent = () => {
                 onCancelDiagnostics={() => diagnosticAbortRef.current?.abort()}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
             />
+            {speechPreview ? <TtsPreviewSheet key={speechPreview.id}
+                initialText={speechPreview.text} reviewReason={speechPreview.reason} source={speechPreview.source}
+                isPreviewCurrent={isSpeechPreviewCurrent} onClose={closeSpeechPreview}
+                onCleanupFailure={onSpeechCleanupFailure}
+                onOpenModels={() => {
+                    closeSpeechPreview();
+                    router.navigate('/(tabs)/models');
+                }} /> : null}
             <ErrorReportSheet
                 {...errorReportSheetProps}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}

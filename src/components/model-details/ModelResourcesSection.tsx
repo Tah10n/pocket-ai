@@ -16,6 +16,8 @@ import { getModelDownloadManager } from '../../services/ModelDownloadManager';
 import { getSettings, subscribeSettings, type AuxiliaryModelRole } from '../../services/SettingsStore';
 import { AuxiliaryModelError, checkAuxiliaryModel, selectAuxiliaryModel, resolveModelForResourceEdit } from '../../services/AuxiliaryModelService';
 import { useDownloadStore } from '../../store/downloadStore';
+import { ttsService } from '../../services/TtsService';
+import { TtsError } from '../../types/tts';
 
 export function ModelResourcesSection({ model }: { model: ModelMetadata }) {
   const { t } = useTranslation();
@@ -23,7 +25,9 @@ export function ModelResourcesSection({ model }: { model: ModelMetadata }) {
   const [message, setMessage] = useState<string>();
   const [checkingAuxiliary, setChecking] = useState(false);
   const [loraBusy, setLoraBusy] = useState(false);
-  const checking = checkingAuxiliary || loraBusy;
+  const [checkingTtsFiles, setCheckingTtsFiles] = useState(false);
+  const ttsFileCheck = useRef(false);
+  const checking = checkingAuxiliary || loraBusy || checkingTtsFiles;
   const [url, setUrl] = useState('');
   const [sha256, setSha256] = useState('');
   const [size, setSize] = useState('');
@@ -55,6 +59,17 @@ export function ModelResourcesSection({ model }: { model: ModelMetadata }) {
       setMessage(t(`resources.errors.${error instanceof AuxiliaryModelError ? error.code : 'native_failed'}`));
     } finally { abort.current = null; setChecking(false); }
   };
+  const checkTtsFiles = async () => {
+    ttsFileCheck.current = true;
+    setCheckingTtsFiles(true);
+    setMessage(t('tts.phases.checking'));
+    try { await ttsService.checkFiles(); setMessage(t('tts.filesChecked')); }
+    catch (error) { setMessage(t('tts.errors.' + (error instanceof TtsError ? error.code : 'integrity_failed'))); }
+    finally { ttsFileCheck.current = false; setCheckingTtsFiles(false); }
+  };
+  useEffect(() => () => {
+    if (ttsFileCheck.current) void ttsService.cancelAndClear().catch(() => undefined); // Service persists cleanup errors.
+  }, []);
   const bind = (kind: 'tts_codec' | 'lora_adapter') => runAction(() => {
     if (!size || !Number.isFinite(Number(size)) || Number(size) <= 0) throw new Error('invalid_size');
     const latest = resolveModelForResourceEdit(model);
@@ -92,10 +107,13 @@ export function ModelResourcesSection({ model }: { model: ModelMetadata }) {
             <Button size="sm" disabled={!selected || !baseReady || checking || Boolean(queued)} onPress={() => void check(role)} testID={`resource-check-${role}`}>
               <ButtonText>{t('resources.checkLoad')}</ButtonText>
             </Button>
+            {role === 'tts' ? <Button size="sm" action="secondary" disabled={!selected || !profileReady || checking || Boolean(queued)}
+              testID="resource-check-tts-files" onPress={() => void checkTtsFiles()}><ButtonText>{t('tts.checkFiles')}</ButtonText></Button> : null}
           </Box>
         </Box>;
       })}
       {checkingAuxiliary ? <Button action="secondary" onPress={() => abort.current?.abort()}><ButtonText>{t('resources.cancelCheck')}</ButtonText></Button> : null}
+      {checkingTtsFiles ? <Button action="secondary" onPress={() => void ttsService.cancelAndClear().catch(() => setMessage(t('tts.errors.storage_failed')))}><ButtonText>{t('tts.stop')}</ButtonText></Button> : null}
       {message ? <Text accessibilityLiveRegion="polite">{message}</Text> : null}
       <Text colorRole="secondary">{t('resources.futureFunctions')}</Text>
       <ModelLoraControls key={getCompanionBindingIdentity(model)} model={model}

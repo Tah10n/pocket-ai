@@ -1,0 +1,313 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-02",
+  "runtime": {
+    "package": "llama.rn",
+    "version": "0.13.0-rc.3",
+    "sourceTag": "https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/src/index.ts"
+  },
+  "evidenceScope": "Remote Hub LFS identities, bounded GGUF metadata prefixes and exact tagged native sources; no full-file download or device synthesis receipt.",
+  "localFileHashVerification": "not_run",
+  "deviceSynthesis": "not_run",
+  "deviceDecode": "not_run",
+  "devicePlayback": "not_run",
+  "independentContentVerification": "not_run",
+  "fixtures": [
+    {
+      "id": "outetts-1.0-0.6b-q4_k_m-dac-speech-f16",
+      "flow": "tokens",
+      "family": "outetts",
+      "promptKind": "outetts_v1_0",
+      "backbone": {
+        "repository": "OuteAI/OuteTTS-1.0-0.6B-GGUF",
+        "revision": "7e8de3b4d95e100812fd7e6f4372510d0830a798",
+        "filename": "OuteTTS-1.0-0.6B-Q4_K_M.gguf",
+        "bytes": 401741952,
+        "sha256": "a0e2afa131b8a5029de0c653d55b71aab99744226234fcf1d80c55dade21020b",
+        "url": "https://huggingface.co/OuteAI/OuteTTS-1.0-0.6B-GGUF/resolve/7e8de3b4d95e100812fd7e6f4372510d0830a798/OuteTTS-1.0-0.6B-Q4_K_M.gguf",
+        "quantization": "Q4_K_M",
+        "declaredLicense": "apache-2.0",
+        "metadata": {
+          "general.architecture": "qwen3",
+          "qwen3.embedding_length": 1024,
+          "qwen3.block_count": 28,
+          "qwen3.context_length": 40960,
+          "qwen3.attention.head_count": 16,
+          "qwen3.attention.head_count_kv": 8
+        }
+      },
+      "codec": {
+        "repository": "BricksDisplay/codec.cpp-gguf",
+        "revision": "4cd6ecf17367ebc03bba4b2ce8186268a6ce7436",
+        "filename": "ibm-research--DAC.speech.gguf",
+        "bytes": 147786400,
+        "sha256": "f58e57eabef8d574f4d08828f0116d93341bd91a26413390b780c6f1e8491337",
+        "url": "https://huggingface.co/BricksDisplay/codec.cpp-gguf/resolve/4cd6ecf17367ebc03bba4b2ce8186268a6ce7436/ibm-research--DAC.speech.gguf",
+        "quantization": "F16",
+        "upstreamWeightsLicense": "cdla-permissive-2.0",
+        "metadata": {
+          "general.architecture": "dac",
+          "codec.sample_rate": 24000,
+          "codec.hop_size": 320,
+          "codec.n_q": 2,
+          "codec.codebook_size": 1024,
+          "codec.latent_dim": 1024,
+          "codec.codebook_dim": 8,
+          "codec.has_decoder": true,
+          "codec.has_encoder": true
+        }
+      },
+      "requirements": {
+        "embeddingInit": true,
+        "phonemizer": false,
+        "speaker": "omit",
+        "referenceAudio": false,
+        "extraFiles": [],
+        "codecGpu": false
+      },
+      "declaredLanguages": [
+        "en",
+        "zh",
+        "nl",
+        "fr",
+        "ka",
+        "de",
+        "hu",
+        "it",
+        "ja",
+        "ko",
+        "lv",
+        "pl",
+        "ru",
+        "es"
+      ],
+      "acceptanceLanguages": [
+        "en"
+      ],
+      "confirmedLanguages": [],
+      "mapping": {
+        "layout": "frame-major codes, 2 codebooks per frame",
+        "codeValueMin": 0,
+        "codeValueMax": 1023,
+        "codesPerFrame": 2,
+        "samplesPerFrame": 320,
+        "sampleRate": 24000,
+        "channels": 1,
+        "decodedPcm": "Float32 mono, tanh output; JS number[]",
+        "maxFramesPolicy": 1200,
+        "maxAudioCodeElementsPolicy": 2400,
+        "predecodeMaxSamplesPolicy": 384000,
+        "maxClipSecondsPolicy": 16,
+        "generationStepsPolicy": 2304,
+        "note": "n_predict also counts grammar/text tokens; it is not an audio-frame count."
+      },
+      "sampling": {
+        "temperature": 0.4,
+        "top_k": 40,
+        "top_p": 0.9,
+        "min_p": 0.05,
+        "penalty_repeat": 1.1,
+        "penalty_last_n": 64
+      },
+      "memory": {
+        "uniqueWeightFileBytes": 549528352,
+        "backbonePlusTwoCodecFileBytes": 697314752,
+        "peakResidentBytes": null,
+        "status": "unmeasured",
+        "note": "rc.3 creates codec_model and audio_lm_model from the same codec file. File bytes are not peak memory; reserve graphs, hidden/KV, bridge arrays, PCM/WAV and player buffers."
+      },
+      "acceptanceTexts": [
+        {
+          "id": "en-1",
+          "language": "en",
+          "text": "The blue door is open."
+        },
+        {
+          "id": "en-2",
+          "language": "en",
+          "text": "Please read this sentence clearly, then stop."
+        },
+        {
+          "id": "en-3",
+          "language": "en",
+          "text": "Tomorrow morning we will visit the quiet library."
+        }
+      ],
+      "sources": [
+        "https://huggingface.co/OuteAI/OuteTTS-1.0-0.6B-GGUF/blob/7e8de3b4d95e100812fd7e6f4372510d0830a798/README.md",
+        "https://huggingface.co/OuteAI/OuteTTS-1.0-0.6B/blob/e7bcd87b0ca47fd8c46317c8f745a5e4e19c7b5c/README.md",
+        "https://huggingface.co/ibm-research/DAC.speech.v1.0/blob/1ea7f64cd0678415e2d8c32d67b190722cb9b149/README.md",
+        "https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/cpp/rn-tts.cpp",
+        "https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/cpp/codec/src/models/dac.cpp"
+      ]
+    },
+    {
+      "id": "bluemagpie-barbet-1b-q4_k_m-audiovae-q8_0",
+      "flow": "continuous_embd",
+      "family": "bluemagpie",
+      "promptKind": "bluemagpie",
+      "backbone": {
+        "repository": "BricksDisplay/BlueMagpie-TTS-GGUF",
+        "revision": "1f195f06506314c1de4a4d35cad2e77b28cfe7db",
+        "filename": "BlueMagpie-Barbet-1B-q4_k_m.gguf",
+        "bytes": 693008608,
+        "sha256": "5bfa46f44936cad36eaf670da4b7a162c5d5ab44cf75827d1c09e78a03d82bde",
+        "url": "https://huggingface.co/BricksDisplay/BlueMagpie-TTS-GGUF/resolve/1f195f06506314c1de4a4d35cad2e77b28cfe7db/BlueMagpie-Barbet-1B-q4_k_m.gguf",
+        "quantization": "Q4_K_M",
+        "metadata": {
+          "general.architecture": "barbet",
+          "barbet.embedding_length": 1536,
+          "barbet.block_count": 28,
+          "barbet.context_length": 262144,
+          "barbet.vocab_size": 114944,
+          "barbet.attention.head_count": 16,
+          "barbet.attention.head_count_kv": [
+            2,
+            2,
+            2,
+            0,
+            2,
+            2,
+            2,
+            0,
+            2,
+            2,
+            2,
+            0,
+            2,
+            2,
+            2,
+            0,
+            2,
+            2,
+            2,
+            0,
+            2,
+            2,
+            2,
+            0,
+            2,
+            2,
+            2,
+            0
+          ],
+          "tokenizer.ggml.model": "gpt2",
+          "tokenizer.ggml.bos_token_id": 114689,
+          "tokenizer.ggml.eos_token_id": 114690
+        }
+      },
+      "codec": {
+        "repository": "BricksDisplay/BlueMagpie-TTS-GGUF",
+        "revision": "1f195f06506314c1de4a4d35cad2e77b28cfe7db",
+        "filename": "BlueMagpie-AudioVAE-q8_0.gguf",
+        "bytes": 1089523904,
+        "sha256": "7b4c9ac08723984616e5d132ebcf99f57fec2d8aff181c24bb351a72943930f1",
+        "url": "https://huggingface.co/BricksDisplay/BlueMagpie-TTS-GGUF/resolve/1f195f06506314c1de4a4d35cad2e77b28cfe7db/BlueMagpie-AudioVAE-q8_0.gguf",
+        "quantization": "Q8_0",
+        "metadata": {
+          "general.architecture": "bluemagpie_audiovae",
+          "codec.sample_rate": 48000,
+          "codec.decode_hop_size": 1920,
+          "codec.encode_sample_rate": 16000,
+          "codec.hop_size": 640,
+          "codec.latent_dim": 64,
+          "codec.n_q": 0,
+          "codec.continuous_latent": true,
+          "codec.lm.kind": "continuous_latent_cfm",
+          "codec.lm.hidden_dim": 1536,
+          "codec.lm.host_arch": "barbet",
+          "codec.lm.latent_dim": 64,
+          "codec.lm.patch_size": 4,
+          "codec.lm.h_vox": 2048,
+          "codec.lm.h_enc": 1024,
+          "codec.lm.h_dit": 1024,
+          "codec.lm.n_locenc": 12,
+          "codec.lm.n_locdit": 12,
+          "codec.lm.n_ralm": 8,
+          "codec.speaker_dim": 192,
+          "codec.has_adaptor": true
+        }
+      },
+      "license": {
+        "conversionCardLabel": "apache-2.0",
+        "baseCardLabel": "other",
+        "effectiveUsagePolicy": "Local research/evaluation only. Do not redistribute checkpoint or generated speech without cleared rights and consent; conversion label does not settle upstream conflict.",
+        "source": "https://huggingface.co/OpenFormosa/BlueMagpie-TTS/blob/4c2c5bcb7e87041a8eaba9df5821ec7a3e1d0c6c/README.md",
+        "publicAudioEvidenceAllowed": false
+      },
+      "requirements": {
+        "embeddingInit": true,
+        "phonemizer": false,
+        "speaker": "omit",
+        "referenceAudio": false,
+        "extraFiles": [],
+        "codecGpu": false,
+        "note": "Tokenizer is baked into backbone; AudioVAE GGUF includes adaptor/FSQ/RALM/LocEnc/LocDiT/CFM/projections/stop head."
+      },
+      "declaredLanguages": [
+        "zh",
+        "en"
+      ],
+      "defaultLanguage": "zh-tw",
+      "acceptanceLanguages": [
+        "zh-tw"
+      ],
+      "confirmedLanguages": [],
+      "mapping": {
+        "layout": "frame-major [frames,64] embeddings; native decoder transposes internally",
+        "embeddingDim": 64,
+        "latentFramesPerGenerationStep": 4,
+        "elementsPerGenerationStep": 256,
+        "samplesPerFrame": 1920,
+        "samplesPerGenerationStep": 7680,
+        "secondsPerGenerationStep": 0.16,
+        "sampleRate": 48000,
+        "channels": 1,
+        "decodedPcm": "Float32 mono, tanh output; JS number[]",
+        "generationStepsPolicy": 100,
+        "maxFramesPolicy": 400,
+        "maxLatentElementsPolicy": 25600,
+        "predecodeMaxSamplesPolicy": 768000,
+        "maxClipSecondsPolicy": 16,
+        "note": "codec.hop_size=640 is for the 16 kHz encoder; output uses codec.decode_hop_size=1920."
+      },
+      "nativeCfm": {
+        "cfg": 2.8,
+        "inferenceTimesteps": 9,
+        "note": "Fixed in tagged rn-tts.cpp; not controlled by JS top_k/top_p/temperature."
+      },
+      "memory": {
+        "uniqueWeightFileBytes": 1782532512,
+        "backbonePlusTwoCodecFileBytes": 2872056416,
+        "peakResidentBytes": null,
+        "status": "unmeasured",
+        "note": "Q8 graph matrices may materialize F32 weights; double codec load plus full-clip graph is substantial. Unknown graphs are not zero bytes."
+      },
+      "acceptanceTexts": [
+        {
+          "id": "zh-tw-1",
+          "language": "zh-tw",
+          "text": "今天的天空很藍，我們一起去公園散步。"
+        },
+        {
+          "id": "zh-tw-2",
+          "language": "zh-tw",
+          "text": "請把這段文字清楚地念出來，然後停止播放。"
+        },
+        {
+          "id": "zh-tw-3",
+          "language": "zh-tw",
+          "text": "明天早上八點，我會帶著一本書去圖書館。"
+        }
+      ],
+      "sources": [
+        "https://huggingface.co/BricksDisplay/BlueMagpie-TTS-GGUF/blob/1f195f06506314c1de4a4d35cad2e77b28cfe7db/README.md",
+        "https://huggingface.co/OpenFormosa/BlueMagpie-TTS/blob/4c2c5bcb7e87041a8eaba9df5821ec7a3e1d0c6c/README.md",
+        "https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/cpp/rn-tts.cpp",
+        "https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/cpp/codec/src/models/bluemagpie_audiovae.cpp",
+        "https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/cpp/codec/src/lm/bluemagpie_cfm.cpp",
+        "https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/cpp/codec/src/runtime/tensor_utils.cpp"
+      ]
+    }
+  ]
+}

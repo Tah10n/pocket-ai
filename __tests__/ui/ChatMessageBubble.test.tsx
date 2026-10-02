@@ -102,6 +102,24 @@ jest.mock('@/components/ui/pressable', () => {
 });
 
 describe('ChatMessageBubble', () => {
+  it('offers speech only for completed assistant content and refreshes the memoized action', () => {
+    const first = jest.fn(), second = jest.fn();
+    const view = render(<ChatMessageBubble id="speech" isUser={false} content="Visible answer."
+      messageState="complete" canSpeak onSpeak={first} />);
+    fireEvent.press(view.getByTestId('speak-message-speech'));
+    expect(first).toHaveBeenCalledWith('speech');
+    view.rerender(<ChatMessageBubble id="speech" isUser={false} content="Visible answer."
+      messageState="complete" canSpeak onSpeak={second} />);
+    fireEvent.press(view.getByTestId('speak-message-speech'));
+    expect(second).toHaveBeenCalledWith('speech');
+    view.rerender(<ChatMessageBubble id="speech" isUser={false} content="Visible answer."
+      messageState="stopped" canSpeak onSpeak={second} />);
+    expect(view.queryByTestId('speak-message-speech')).toBeNull();
+    view.rerender(<ChatMessageBubble id="speech" isUser content="Visible answer."
+      messageState="complete" canSpeak onSpeak={second} />);
+    expect(view.queryByTestId('speak-message-speech')).toBeNull();
+  });
+
   it.each(['<think>\n\n</think>\n\n', '<think>private reasoning</think>Visible plan', '<|im_start|>assistant\nVisible plan'])(
     'hides intermediate tool-round text while preserving canonical content %s', content => {
       const toolRun = { id: 'r', threadId: 't', settings: { enabled: true, allowedTools: ['calculate' as const] },

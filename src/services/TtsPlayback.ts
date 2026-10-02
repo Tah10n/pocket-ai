@@ -292,7 +292,9 @@ export class TtsPlaybackController {
         this.desiredPlaying = true;
         if (this.owned) { this.owned.paused = false; this.owned.observedPlaying = false; }
         player.play();
-        if (player.playing) this.onStatus(this.owned!, player.currentStatus);
+        // Native getters are live, but status snapshots cross the JS queue.
+        // Only ordered events can arm interruption detection: a getter here
+        // can overtake an older paused/seek snapshot and stop a new Play.
       } catch (error) {
         this.desiredPlaying = false;
         try { await this.disposePlayer(); } catch (cleanup) { throw this.report(cleanup, generation); }

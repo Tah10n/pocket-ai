@@ -619,6 +619,17 @@ android {
 });
 
 describe('android-scenarios smoke bootstrap args', () => {
+  it('enables app-private clip verification only for explicitly isolated TTS acceptance', () => {
+    const env = {};
+    configureScenarioBuildEnvironment({ pack: 'tts', apkVariant: 'release', isolatedQaInstall: true }, true, env);
+    expect(env).toMatchObject({ POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1', EXPO_PUBLIC_ANDROID_QA: '1',
+      EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1', POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: 'true' });
+    expect(() => configureScenarioBuildEnvironment({ pack: 'tts', apkVariant: 'release' }, true, {}))
+      .toThrow(ScenarioPreconditionFailureError);
+    const nativeEnv = {};
+    configureScenarioBuildEnvironment({ pack: 'native', apkVariant: 'release', isolatedQaInstall: true }, true, nativeEnv);
+    expect(nativeEnv.POCKET_AI_QA_PRIVATE_FILE_ACCESS).toBeUndefined();
+  });
   it('configures release and the QA seam before current-head launch, and rejects debug', () => {
     const releaseEnv = {};
     expect(configureScenarioBuildEnvironment({ apkVariant: 'release' }, true, releaseEnv)).toEqual({

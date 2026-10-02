@@ -1,7 +1,33 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { resolveExternalTtsDirectory, exportLocalTtsClip } = require('../../scripts/lib/tts-local-export');
+const { resolveExternalTtsDirectory, exportLocalTtsClip, assertTtsPrivateFileAccess } = require('../../scripts/lib/tts-local-export');
+
+describe('isolated speech private-file access', () => {
+  const packageName = 'com.github.tah10n.pocketai.qa';
+  it('requires affirmative access to the exact QA data directory', () => {
+    for (const stdout of [`/data/user/0/${packageName}\n`, `/data/data/${packageName}\n`]) {
+      const capture = jest.fn(() => ({ status: 0, stdout, stderr: '' }));
+      expect(() => assertTtsPrivateFileAccess('adb', 'owned-emulator', packageName, capture)).not.toThrow();
+      expect(capture.mock.calls[0][1]).toEqual(['-s', 'owned-emulator', 'exec-out', 'run-as', packageName, 'pwd']);
+    }
+  });
+  it.each([
+    { status: 0, stdout: `run-as: package not debuggable: ${packageName}\n`, stderr: '' },
+    { status: 0, stdout: '/data/user/0/com.github.tah10n.pocketai\n', stderr: '' },
+    { status: 0, stdout: '', stderr: '' },
+    { status: 1, stdout: `/data/user/0/${packageName}`, stderr: '' },
+    { status: 0, stdout: `/data/user/0/${packageName}`, stderr: 'permission denied' },
+    { error: new Error('timeout'), status: null, stdout: '', stderr: '' },
+  ])('rejects unavailable access before accepting speech or cleanup proof: %#', result => {
+    expect(() => assertTtsPrivateFileAccess('adb', 'owned-emulator', packageName, () => result)).toThrow(/no verified/);
+  });
+  it('never probes the production package', () => {
+    const capture = jest.fn();
+    expect(() => assertTtsPrivateFileAccess('adb', 'owned-emulator', 'com.github.tah10n.pocketai', capture)).toThrow(/isolated/);
+    expect(capture).not.toHaveBeenCalled();
+  });
+});
 
 describe('local speech export ownership', () => {
   let temporary;

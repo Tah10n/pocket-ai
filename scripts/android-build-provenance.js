@@ -288,6 +288,10 @@ function createAndroidShippingBuildEnvironment(projectRoot, env = {}, options = 
     ...resolveExpoEnvironment(projectRoot, shippingEnvironment),
     ...shippingEnvironment,
   };
+  if (effectiveExpoEnvironment.POCKET_AI_QA_PRIVATE_FILE_ACCESS != null
+    && effectiveExpoEnvironment.POCKET_AI_QA_PRIVATE_FILE_ACCESS !== "0") {
+    throw new Error("Android shipping builds reject POCKET_AI_QA_PRIVATE_FILE_ACCESS; release private-file access is local isolated QA only.");
+  }
   if (effectiveExpoEnvironment.EXPO_PUBLIC_ANDROID_QA === "1") {
     throw new Error(
       "Android shipping builds reject EXPO_PUBLIC_ANDROID_QA=1 because QA generation controls must never be embedded in a distributable artifact."
@@ -1182,6 +1186,10 @@ function assertAndroidBuildOverrideContract(projectRoot, options = {}) {
       `Android ${variant} builds reject ${overrideType} overrides from ${injectedBuildOverride.source}; configure the repository-owned build contract instead.`
     );
   }
+  if ((options.env || process.env).POCKET_AI_QA_PRIVATE_FILE_ACCESS != null) {
+    // Resolve actual Gradle application/signing precedence before accepting this QA-only mode.
+    collectAndroidEffectiveBuildContext(projectRoot, { ...options, variant });
+  }
 }
 
 function readAndroidAppVersionDefaults(projectRoot) {
@@ -1390,12 +1398,23 @@ function collectAndroidEffectiveBuildContext(projectRoot, options = {}) {
   const hasReleaseSigning = variant === "release"
     && storeFileExists
     && Object.values(signingValues).every((entry) => Boolean(entry.value));
+  const qaPrivateFileAccessValue = env.POCKET_AI_QA_PRIVATE_FILE_ACCESS;
+  if (qaPrivateFileAccessValue != null && !["0", "1"].includes(qaPrivateFileAccessValue)) {
+    throw new Error("POCKET_AI_QA_PRIVATE_FILE_ACCESS must be exactly 0 or 1.");
+  }
+  const qaPrivateFileAccess = qaPrivateFileAccessValue === "1";
+  if (qaPrivateFileAccess && (variant !== "release"
+    || applicationId.value !== `${defaults.applicationId}.qa` || env.EXPO_PUBLIC_ANDROID_QA !== "1"
+    || !allowDebugReleaseSigning || hasReleaseSigning || parseBooleanBuildValue(env.POCKET_AI_SHIPPING_BUILD))) {
+    throw new Error("QA private-file access requires the isolated .qa package, EXPO_PUBLIC_ANDROID_QA=1 and local debug-fallback release signing; shipping builds are forbidden.");
+  }
   const publicEnvironmentKeys = Object.keys(env)
     .filter((key) => key.startsWith("EXPO_PUBLIC_"))
     .sort((left, right) => left.localeCompare(right));
 
   return {
     schemaVersion: 1,
+    qaPrivateFileAccess,
     applicationId: {
       value: applicationId.value,
       source: applicationId.source,
@@ -1996,6 +2015,7 @@ function collectBuildProvenance(projectRoot, options = {}) {
   });
   const buildContext = {
     ...(options.buildContext || {}),
+    qaPrivateFileAccess: (options.env || process.env).POCKET_AI_QA_PRIVATE_FILE_ACCESS === "1",
     privateInputHmac: collectAndroidPrivateBuildReuseDigest(projectRoot, options),
   };
   const hexagonManifestExists = fs.existsSync(path.join(projectRoot, "scripts", "llama-hexagon-sdk-manifest.json"));

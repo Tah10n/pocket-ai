@@ -172,6 +172,46 @@ describe('TtsPlaybackController', () => {
     expect(player.play).toHaveBeenCalledTimes(2); expect(player.disposeAsync).not.toHaveBeenCalled();
   });
 
+  it.each(['play', 'replay'] as const)('drains older paused seek events before observing native %s, then stops on a real interruption', async command => {
+    await controller.setClip(wav(), metadata, () => true);
+    if (command === 'replay') {
+      await controller.play(); player.emit({ playing: true, currentTime: 0.4 });
+      await controller.pause();
+    }
+    const deliverNative = player.addListener.mock.calls[0][1];
+    const seek = deferred<void>();
+    let pausedSeekSnapshot: AudioStatus | undefined;
+    player.seekTo.mockImplementationOnce(position => {
+      // Android captures currentStatus on MAIN during seek, then JNIUtils.invokeAsync
+      // queues that snapshot for later JS delivery. The getter may already be newer.
+      pausedSeekSnapshot = { ...player.currentStatus, currentTime: position, playing: false,
+        timeControlStatus: 'paused', didJustFinish: false };
+      return seek.promise;
+    });
+    player.play.mockImplementationOnce(() => {
+      player.playing = true;
+      player.currentStatus = { ...player.currentStatus, playing: true, timeControlStatus: 'playing' };
+      // Real playing=true event is queued behind the prior seek event, not synchronous.
+    });
+    const play = command === 'replay' ? controller.replay() : controller.play();
+    await flush(); expect(pausedSeekSnapshot).toBeDefined();
+    seek.resolve(); await play;
+    expect(player.playing).toBe(true);
+    const playCalls = player.play.mock.calls.length;
+    deliverNative(pausedSeekSnapshot!); await flush();
+    expect(player.disposeAsync).not.toHaveBeenCalled();
+    expect(player.release).not.toHaveBeenCalled();
+    expect(player.play).toHaveBeenCalledTimes(playCalls);
+    deliverNative({ ...player.currentStatus, currentTime: 0.2 });
+    expect(controller.getState()).toMatchObject({ phase: 'playing', position: 0.2 });
+    player.playing = false;
+    player.currentStatus = { ...player.currentStatus, playing: false, timeControlStatus: 'paused' };
+    deliverNative(player.currentStatus); await flush();
+    expect(player.disposeAsync).toHaveBeenCalledTimes(1);
+    expect(player.release).toHaveBeenCalledTimes(1);
+    expect(controller.getState().phase).toBe('stopped');
+  });
+
   it('drains a pending seek before cleanup and never calls Play after Stop', async () => {
     await controller.setClip(wav(), metadata, () => true);
     const seek = deferred<void>(); player.seekTo.mockImplementationOnce(() => seek.promise);

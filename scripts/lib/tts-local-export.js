@@ -1,11 +1,27 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { validateTtsWav } = require('./tts-evidence');
 
 const within = (parent, child) => {
   const relative = path.relative(parent, child);
   return !relative || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 };
+
+/** Prove access before synthesis; run-as can return an error with exit code zero. */
+function assertTtsPrivateFileAccess(adb, serial, packageName, capture = spawnSync) {
+  if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\.qa$/u.test(packageName)) {
+    throw new Error('Speech export requires the isolated QA package.');
+  }
+  const result = capture(adb, ['-s', serial, 'exec-out', 'run-as', packageName, 'pwd'], {
+    encoding: 'utf8', timeout: 15000, maxBuffer: 4096, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const actual = typeof result.stdout === 'string' ? result.stdout.trim() : '';
+  if (result.error || result.status !== 0 || (result.stderr || '').trim()
+    || ![`/data/user/0/${packageName}`, `/data/data/${packageName}`].includes(actual)) {
+    throw new Error('Isolated speech QA has no verified app-private file access. Rebuild the explicit TTS QA configuration.');
+  }
+}
 
 /** Resolve existing ancestors before creating anything, including Windows junctions. */
 function resolveExternalTtsDirectory(value, publicRoot) {
@@ -59,4 +75,4 @@ function exportLocalTtsClip(directory, id, bytes, step) {
   }
 }
 
-module.exports = { resolveExternalTtsDirectory, exportLocalTtsClip };
+module.exports = { resolveExternalTtsDirectory, exportLocalTtsClip, assertTtsPrivateFileAccess };

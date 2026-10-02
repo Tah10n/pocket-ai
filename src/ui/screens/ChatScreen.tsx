@@ -1205,9 +1205,10 @@ const ChatScreenContent = () => {
             && getAndroidQaTtsEvidence().status === 'native_passed' && getAndroidQaTtsEvidence().flow === qaFlow);
         if (!qaSeedCurrent()) return;
         const qaTexts = qaFlow ? ttsQaFixtures.fixtures.find(fixture => fixture.flow === qaFlow)?.acceptanceTexts : undefined;
-        const qaSeed = qaTexts?.filter(item => item.text.length <= 240)
-            .reduce<string | undefined>((longest, item) => !longest || item.text.length > longest.length ? item.text : longest, undefined);
-        if (qaFlow && !qaSeed) return;
+        // UI hierarchy reads take time. A short paragraph leaves time to tap
+        // Pause before EOF while keeping the same reviewed synthetic inputs.
+        const qaSeed = qaTexts?.slice(0, qaFlow === 'tokens' ? 3 : 2).map(item => item.text).join(' ');
+        if (qaFlow && (!qaSeed || qaSeed.length > 240)) return;
         const chat = useChatStore.getState();
         const thread = chat.activeThreadId ? chat.threads[chat.activeThreadId] : undefined;
         const message = messageId ? thread?.messages.find(item => item.id === messageId) : undefined;

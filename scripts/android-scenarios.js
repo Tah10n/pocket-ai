@@ -4,7 +4,7 @@ const { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, sanitizeLocalT
 const { sanitizeDocumentRetrievalEvidence, waitForDocumentRetrievalEvidence } = require("./lib/document-retrieval-evidence");
 const { sanitizeDocumentIndexPublicationEvidence, waitForDocumentIndexPublicationEvidence } = require("./lib/document-index-publication-evidence");
 const { sanitizeTtsEvidence, validateTtsEvidence } = require("./lib/tts-evidence");
-const { resolveExternalTtsDirectory, exportLocalTtsClip } = require("./lib/tts-local-export");
+const { resolveExternalTtsDirectory, exportLocalTtsClip, assertTtsPrivateFileAccess } = require("./lib/tts-local-export");
 
 const fs = require("fs");
 const path = require("path");
@@ -5658,6 +5658,7 @@ async function runTtsAcceptanceScenario(ctx, flow) {
   }
   const targetDirectory = resolveExternalTtsDirectory(audioOutput, projectRoot);
   const adbPath = resolveAdbPath();
+  assertTtsPrivateFileAccess(adbPath, ctx.serial, appPackageName);
   const evidencePath = path.join(artifactsRoot, `tts-${flow}-evidence.json`);
   const exports = [];
   const copied = new Set();
@@ -5844,6 +5845,10 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
     }
     env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
       env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING || "true";
+    if (options.pack === "tts" || ["runtime-local-tts-tokens", "runtime-local-tts-continuous"].includes(options.scenario)) {
+      if (!options.isolatedQaInstall) throw new ScenarioPreconditionFailureError("Private speech verification requires --isolated-qa-install.");
+      env.POCKET_AI_QA_PRIVATE_FILE_ACCESS = "1";
+    }
   }
   return {
     androidQaEvidence: env.EXPO_PUBLIC_ANDROID_QA === "1",

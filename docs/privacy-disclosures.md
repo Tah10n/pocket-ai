@@ -27,6 +27,8 @@ This document summarizes the current behavior of the app as configured in this r
 
 Auxiliary role selections, explicit companion source bindings, and local compatibility-check results stay in encrypted app storage. A selected role or installed companion does not establish native compatibility. Embedding/reranker load checks temporarily use the on-device runtime and restore a previously loaded chat model when one exists and its selection is still current; compatibility checks themselves do not upload chat content or enable a chat search mode or speech playback. Document search separately defaults to Keywords, with explicit Hybrid and optional independent local reranking. Hybrid prepares selected owned documents through Prepare or an ordinary document request; local reranking can run on Keywords without an embedding index.
 
+Experimental [local speech](local-tts.md) requires an explicit editable-text preview or completed-assistant action. Synthesis and playback stay on-device and do not add audio or latent arrays to chat history. Playback stores one unencrypted app-private temporary WAV, at most 1,536,044 bytes, and requires confirmed player disposal before deletion. Editing/changing the source, closing/leaving Chat, backgrounding or private-data reset invalidates speech and clears that clip after native drain; foregrounding does not resume it. This flow requests no microphone, recording or background-playback capability. Native and speech-content acceptance are recorded separately.
+
 ## Chat attachments
 
 When a user adds an attachment to a chat:

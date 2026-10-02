@@ -11,8 +11,10 @@ This folder contains the public maintainer-facing documentation for Pocket AI.
 - [`new-architecture.md`](./new-architecture.md): notes about React Native New Architecture, native-module expectations, and troubleshooting direction
 - [`ui-architecture.md`](./ui-architecture.md): conventions for UI structure, imports, layout, styling, and localization
 - [`local-tools.md`](./local-tools.md): per-chat local functions, permissions, bounded execution, history, output formats and current verification limits
+- [`local-tts.md`](./local-tts.md): experimental local speech preview/player, exact English/Mandarin profiles, native lifecycle, memory bounds and local-only content verification
 - [`model-parameters.md`](./model-parameters.md): how generation/load parameters are stored, snapshotted, and mapped to runtime engine settings
 - [`llama-rn-capabilities.md`](./llama-rn-capabilities.md): pinned runtime API inventory, application integration boundaries, compatibility exceptions, and staged verification criteria
+- [`Stage 6 speech acceptance`](./validation/llama-rn-stage6/acceptance.md): separate exact-build native, playback, lifecycle, ordinary UI and independent local content outcomes; currently pending
 - [`llama-rn-013-stage5-acceptance.md`](./llama-rn-013-stage5-acceptance.md): exact-source Android CPU corpus, hybrid/rerank, LoRA/tool, Stop and cold reuse/deletion proof; ordinary UI verification is recorded separately
 - [`llama-rn-013-stage5-index-publication-fix.md`](./llama-rn-013-stage5-index-publication-fix.md): explicit unsaved-index outcomes after accepted document turns, real four-index quota regression, fresh CPU APK and cold-retention evidence
 - [`llama-rn-013-stage4-acceptance.md`](./llama-rn-013-stage4-acceptance.md): Android CPU local-tool execution, document search, structured final output, Stop and cold-reopen evidence

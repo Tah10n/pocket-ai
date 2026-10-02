@@ -46,6 +46,7 @@ const EMBEDDED_BUNDLE_INPUTS = [
   "docs/validation/llama-rn-stage4/tool-fixture.json",
   // Imported by AndroidQaDocumentRetrieval.ts; fixed corpus/profile changes invalidate the tested bundle.
   "docs/validation/llama-rn-stage5/retrieval-fixtures.json",
+  "docs/validation/llama-rn-stage6/tts-fixtures.json",
   "app",
   "src",
   "components",

@@ -4648,6 +4648,8 @@ describe('android-scenarios pack selection', () => {
         'runtime-local-tools',
         'runtime-document-retrieval',
         'runtime-document-index-publication',
+        'runtime-local-tts-tokens',
+        'runtime-local-tts-continuous',
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));
@@ -4665,6 +4667,19 @@ describe('android-scenarios pack selection', () => {
     expect(selectedIds).not.toContain('native-glass-theme-matrix');
     expect(selectedIds).not.toContain('foreground-service-notification-states');
     expect(selectedIds).not.toEqual(expect.arrayContaining(BRANCH_REGENERATION_SCENARIOS));
+  });
+
+  it('keeps real TTS downloads and private ASR exports in the explicit isolated local pack', () => {
+    const selected = selectScenarios(scenarios, parseCliOptions(['--pack', 'tts', '--apk-variant', 'release', '--isolated-qa-install']));
+    expect(selected.map(item => item.id)).toEqual([
+      'runtime-inference-lifecycle', 'runtime-model-resources', 'runtime-stage3', 'runtime-local-tools',
+      'runtime-document-index-publication', 'runtime-local-tts-tokens', 'runtime-local-tts-continuous',
+    ]);
+    expect(selected.every(item => item.requiresCurrentHeadProvenance && item.requiresIsolatedQaInstall)).toBe(true);
+    for (const pack of ['all', 'native', 'runtime']) {
+      expect(selectScenarios(scenarios, parseCliOptions(['--pack', pack])).map(item => item.id))
+        .not.toEqual(expect.arrayContaining(['runtime-local-tts-tokens', 'runtime-local-tts-continuous']));
+    }
   });
 });
 

@@ -1,6 +1,6 @@
 # Experimental local speech
 
-Pocket AI has an explicit local speech preview for editable text and completed assistant replies. The Stage 6 implementation covers both llama.rn token and continuous-embedding synthesis. These are implemented pipelines; the selected English and Mandarin model pairs still require app-specific device and speech-content acceptance. See the [acceptance worksheet](validation/llama-rn-stage6/acceptance.md). Upstream examples, file checks and application tests do not establish intelligible speech on this app.
+Pocket AI has an explicit local speech preview for editable text and completed assistant replies. Stage 6 covers both llama.rn token and continuous-embedding synthesis. The exact English and Mandarin CPU pairs passed fresh Android synthesis, decode, playback, lifecycle and independent local ASR content checks. The [acceptance report](validation/llama-rn-stage6/acceptance.md) binds each result to its source, APK, files and inputs, and separates current-source verification from earlier observations. Upstream examples, file checks and application tests do not establish intelligible speech on this app; actual listening, Russian speech and iOS/GPU/NPU execution remain unverified.
 
 ## Using the preview
 
@@ -9,7 +9,7 @@ Pocket AI has an explicit local speech preview for editable text and completed a
 3. Review or edit the text and choose the admitted profile's language. The preview displays the exact text sent to synthesis. Ordinary prose has supported display markup removed. Structured output, code, tables and uncertain markup require explicit review and can be edited before synthesis.
 4. Select **Synthesize**, then **Play**, **Pause**, **Stop** or **Replay**. Replay uses the existing clip and does not run inference again. Stop releases the player and retains that clip until it is cleared.
 
-Input is limited to 240 characters and the formatted native prompt to 512 tokens. Pasting longer text preserves the whole draft and disables synthesis; the app does not silently shorten it. Speech is bounded to 16 seconds. A completion that reaches a generation limit, is interrupted, or lacks natural end-of-sequence is rejected instead of playing partial speech.
+Input is limited to 240 characters and the formatted native prompt to 512 tokens. Entering longer text preserves the whole draft and disables synthesis; the app does not silently shorten it. Speech is bounded to 16 seconds. A completion that reaches a generation limit, is interrupted, or lacks natural end-of-sequence is rejected instead of playing partial speech.
 
 Changing text, language, message, chat or model selection invalidates the request and clears its clip after native drain. Closing the preview, leaving Chat, backgrounding the app or resetting private data also stops and clears speech. Returning to the foreground does not resume playback. A cleanup failure remains visible and blocks unsafe reuse.
 
@@ -67,4 +67,4 @@ The pack retains baseline scenarios and adds `runtime-local-tts-tokens` and `run
 
 Native receipts and local clip exports are separate from content acceptance. The runner copies synthetic clips locally for independent ASR; it does not upload speech or establish transcript correctness. Use actual listening or a local independent ASR transcript to compare each clip with the exact synthetic input, recording omissions, substitutions and early stopping. No cloud ASR or reference recording is needed. Delete owned clips when that local evaluation finishes; publish only compact sanitized receipts, never weights or BlueMagpie audio.
 
-The [Stage 6 worksheet](validation/llama-rn-stage6/acceptance.md) records native, playback, lifecycle, ordinary UI and content results independently. Builds, API availability, nonempty PCM and upstream observations are separate evidence categories.
+The [Stage 6 acceptance report](validation/llama-rn-stage6/acceptance.md) records fresh native/content, no-loaded-chat synthesis and background clear/no-autoplay separately. Completed-answer Speak, EN/RU structured review and 241-character device entry retain their earlier APK scope. The separate clip synthesized without a loaded chat model has no content acceptance. Builds, nonempty PCM and player motion remain separate from intelligibility.

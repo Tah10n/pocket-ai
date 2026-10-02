@@ -16,6 +16,11 @@
     "node": ">=20.19.4"
   },
   "expo": {
+    "autolinking": {
+      "buildFromSource": [
+        "expo-audio"
+      ]
+    },
     "doctor": {
       "reactNativeDirectoryCheck": {
         "exclude": [
@@ -119,6 +124,7 @@
     "@shopify/flash-list": "2.3.1",
     "base64-js": "^1.5.1",
     "expo": "~55.0.31",
+    "expo-asset": "55.0.20",
     "expo-audio": "55.0.18",
     "expo-blur": "~55.0.18",
     "expo-build-properties": "~55.0.18",

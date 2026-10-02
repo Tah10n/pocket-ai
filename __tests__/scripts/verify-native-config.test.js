@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { createAutolinkingOptionsLoader } = require('expo-modules-autolinking/build/commands/autolinkingOptions');
 
 const { run, assertExpoAudioNativePatch } = require('../../scripts/verify-native-config');
 const { copyLlamaPatchSources } = require('../fixtures/llama-native-patch');
@@ -123,6 +124,8 @@ function addGuardedAudio(root) {
   const packageFile = path.join(root, 'package.json');
   const packageConfig = JSON.parse(fs.readFileSync(packageFile, 'utf8'));
   packageConfig.dependencies['expo-audio'] = audioVersion;
+  packageConfig.dependencies['expo-asset'] = '55.0.20';
+  packageConfig.expo = { autolinking: { buildFromSource: ['expo-audio'] } };
   writeJson(packageFile, packageConfig);
   const configFile = path.join(root, 'app.json');
   const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
@@ -133,6 +136,9 @@ function addGuardedAudio(root) {
   const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
   lock.packages[''].dependencies['expo-audio'] = audioVersion;
   lock.packages['node_modules/expo-audio'] = { version: audioVersion };
+  lock.packages[''].dependencies['expo-asset'] = '55.0.20';
+  lock.packages['node_modules/expo-asset'] = { version: '55.0.20' };
+  writeJson(path.join(root, 'node_modules/expo-asset/package.json'), { name: 'expo-asset', version: '55.0.20' });
   writeJson(lockFile, lock);
   const packageRoot = path.join(root, 'node_modules/expo-audio');
   writeJson(path.join(packageRoot, 'package.json'), { version: audioVersion });
@@ -147,6 +153,84 @@ function addGuardedAudio(root) {
 }
 
 describe('native configuration contract', () => {
+  it.each([
+    ['global source list', { buildFromSource: ['expo-audio', 'expo-file-system'] }],
+    ['platform source lists', { android: { buildFromSource: ['expo-audio', 'expo-file-system'] },
+      ios: { buildFromSource: ['expo-audio'] } }],
+    ['Apple object takes precedence over ios', { buildFromSource: ['expo-audio'],
+      android: { exclude: ['expo-camera'] }, apple: { exclude: ['expo-camera'] }, ios: { buildFromSource: [] } }],
+  ])('accepts %s using the installed SDK resolver and preserves other source configuration', async (_label, autolinking) => {
+    const root = createProject();
+    try {
+      addGuardedAudio(root);
+      const file = path.join(root, 'package.json');
+      const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+      config.expo.autolinking = autolinking;
+      writeJson(file, config);
+      const before = fs.readFileSync(file, 'utf8');
+      const loader = createAutolinkingOptionsLoader({ projectRoot: root });
+      for (const platform of ['android', 'apple']) {
+        const options = await loader.getPlatformOptions(platform);
+        expect(options.buildFromSource).toContain('expo-audio');
+        expect(options.exclude).not.toContain('expo-audio');
+      }
+      expect(() => run(['--require-ios', '--require-android'], root)).not.toThrow();
+      expect(fs.readFileSync(file, 'utf8')).toBe(before);
+      expect(fs.readFileSync(path.join(root, 'android', 'gradle.properties'), 'utf8')).toContain('rnllamaBuildFromSource=true');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    ['missing admission', {}, 'android', undefined],
+    ['misnested Android admission', { android: { autolinking: { buildFromSource: ['expo-audio'] } } }, 'android', undefined],
+    ['Android override removes audio', { buildFromSource: ['expo-audio'], android: { buildFromSource: [] } }, 'android', []],
+    ['Android string is ignored', { buildFromSource: ['expo-audio'], android: { buildFromSource: 'expo-audio' } }, 'android', undefined],
+    ['broad regex only', { buildFromSource: ['expo-.*'] }, 'android', ['expo-.*']],
+    ['wrong literal package', { buildFromSource: ['expo-audio-other'] }, 'android', ['expo-audio-other']],
+    ['Apple override removes audio', { buildFromSource: ['expo-audio'], apple: { buildFromSource: ['expo-file-system'] } }, 'apple', ['expo-file-system']],
+    ['ios fallback removes audio', { buildFromSource: ['expo-audio'], ios: { buildFromSource: [] } }, 'apple', []],
+    ['Apple object prevents ios fallback', { apple: {}, ios: { buildFromSource: ['expo-audio'] }, android: { buildFromSource: ['expo-audio'] } }, 'apple', undefined],
+    ['malformed source list', { buildFromSource: ['expo-audio', 123] }, 'android', ['expo-audio']],
+  ])('rejects %s despite exact patched sources and version receipts', async (_label, autolinking, platform, resolved) => {
+    const root = createProject();
+    try {
+      addGuardedAudio(root);
+      const file = path.join(root, 'package.json');
+      const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+      config.expo.autolinking = autolinking;
+      writeJson(file, config);
+      const options = await createAutolinkingOptionsLoader({ projectRoot: root }).getPlatformOptions(platform);
+      expect(options.buildFromSource).toEqual(resolved);
+      expect(() => assertExpoAudioNativePatch(root)).toThrow(/expo-audio.*autolinked from source/);
+      expect(() => run([], root)).toThrow(/expo-audio.*autolinked from source/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each(['android', 'apple', 'ios'])('rejects %s exclusion even when patched audio is admitted from source', async platform => {
+    const root = createProject();
+    try {
+      addGuardedAudio(root);
+      const file = path.join(root, 'package.json');
+      const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+      config.expo.autolinking[platform] = { exclude: ['expo-audio'] };
+      writeJson(file, config);
+      const effectivePlatform = platform === 'ios' ? 'apple' : platform;
+      const options = await createAutolinkingOptionsLoader({ projectRoot: root }).getPlatformOptions(effectivePlatform);
+      expect(options.buildFromSource).toContain('expo-audio');
+      expect(options.exclude).toContain('expo-audio');
+      expect(() => run([], root)).toThrow(/expo-audio.*autolinked from source/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('still rejects prebuilt llama core with correctly source-admitted patched audio', () => {
+    const root = createProject();
+    try {
+      addGuardedAudio(root);
+      fs.writeFileSync(path.join(root, 'android', 'gradle.properties'),
+        'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=1024m\nrnllamaBuildFromSource=false\n');
+      expect(() => run(['--require-android'], root)).toThrow(/corrected llama.rn core from source/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
   it('verifies guarded audio types and both native implementations without mutating any installed source', () => {
     const root = createProject();
     try {
@@ -155,6 +239,51 @@ describe('native configuration contract', () => {
       const before = files.map(file => fs.readFileSync(file, 'utf8'));
       expect(() => run(['--require-ios', '--require-android'], root)).not.toThrow();
       expect(files.map(file => fs.readFileSync(file, 'utf8'))).toEqual(before);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    ['manifest', '57.0.18'], ['manifest', '^55.0.20'], ['manifest', undefined],
+    ['lock-root', '57.0.18'], ['lock-root', undefined],
+    ['lock-package', '57.0.18'], ['lock-package', undefined],
+    ['installed', '57.0.18'], ['installed', undefined],
+  ])('rejects incompatible or missing %s expo-asset %s despite a compatible nested Expo package', (identity, version) => {
+    const root = createProject();
+    try {
+      const audioRoot = addGuardedAudio(root);
+      const assetFile = path.join(root, 'node_modules/expo-asset/package.json');
+      writeJson(path.join(root, 'node_modules/expo/node_modules/expo-asset/package.json'),
+        { name: 'expo-asset', version: '55.0.20' });
+      const lockFile = path.join(root, 'package-lock.json');
+      const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+      lock.packages['node_modules/expo/node_modules/expo-asset'] = { version: '55.0.20' };
+      if (identity === 'lock-root') {
+        if (version === undefined) delete lock.packages[''].dependencies['expo-asset'];
+        else lock.packages[''].dependencies['expo-asset'] = version;
+      }
+      if (identity === 'lock-package') {
+        if (version === undefined) delete lock.packages['node_modules/expo-asset'];
+        else lock.packages['node_modules/expo-asset'].version = version;
+      }
+      writeJson(lockFile, lock);
+      if (identity === 'manifest') {
+        const file = path.join(root, 'package.json');
+        const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (version === undefined) delete manifest.dependencies['expo-asset'];
+        else manifest.dependencies['expo-asset'] = version;
+        writeJson(file, manifest);
+      }
+      if (identity === 'installed') {
+        if (version === undefined) fs.unlinkSync(assetFile);
+        else writeJson(assetFile, { name: 'expo-asset', version });
+      }
+      const audioBefore = audioPatches.map(patch => fs.readFileSync(path.join(audioRoot, patch.file), 'utf8'));
+      expect(() => assertExpoAudioNativePatch(root)).toThrow(/expo-asset.*(?:compatible exact version|missing)/);
+      expect(() => run(['--require-ios', '--require-android'], root)).toThrow(/expo-asset.*(?:compatible exact version|missing)/);
+      expect(audioPatches.map(patch => fs.readFileSync(path.join(audioRoot, patch.file), 'utf8'))).toEqual(audioBefore);
+      if (identity === 'installed' && version !== undefined) {
+        expect(JSON.parse(fs.readFileSync(assetFile, 'utf8')).version).toBe(version);
+      }
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 

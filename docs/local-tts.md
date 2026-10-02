@@ -52,6 +52,10 @@ The playback-only Expo configuration disables microphone/recording permissions a
 
 The app pins llama.rn `0.13.0-rc.3` and expo-audio `55.0.18`. Postinstall applies guarded source patches in `patches/llama-rn-0.13.0-rc.3.js` and `patches/expo-audio-55.0.18.js`. The first adds decode bounds and removes sensitive native text/path logging; the second adds confirmed asynchronous player disposal and an opt-in guard against automatic resume. A fresh native APK or iOS build is required. A JS update against an older binary cannot supply these native contracts.
 
+Expo autolinking explicitly builds `expo-audio` from its installed source on both platforms. SDK 55 can otherwise substitute an unpatched prebuilt module. Keep this source-build admission when editing autolinking options; installed source hashes alone do not prove that a binary contains the player patch. Android acceptance must include the `expo-audio` source compilation tasks, and iOS acceptance must compile the patched Swift sources.
+
+The audio package's `expo-asset` peer is explicitly pinned to the installed SDK 55 version, `55.0.20`. Leaving its wildcard peer unresolved can install a newer incompatible native AssetModule at the top level even while Expo retains a compatible nested copy. Native configuration verification checks the top-level manifest, lockfile and installed peer.
+
 Run the explicit Android TTS pack only with a disposable isolated QA install and an absolute local audio-output directory outside this checkout and any published artifact directory:
 
 ```powershell

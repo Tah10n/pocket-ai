@@ -39,6 +39,25 @@ function findAppCodegenSpecs(root, jsSrcsDir) {
   return specs;
 }
 
+/** Source admission is preflight configuration proof; a built binary still needs native verification. */
+function assertExpoAudioSourceBuild(packageConfig) {
+  // SDK 55 merges global options with one platform object. Platform arrays replace the global
+  // array, and Apple falls back to ios only when no apple object is present.
+  const isObject = value => value != null && typeof value === 'object';
+  const autolinking = isObject(packageConfig.expo?.autolinking) ? packageConfig.expo.autolinking : {};
+  for (const platform of ['android', 'apple']) {
+    const platformOptions = isObject(autolinking[platform]) ? autolinking[platform]
+      : platform === 'apple' && isObject(autolinking.ios) ? autolinking.ios : {};
+    const effective = { ...autolinking, ...platformOptions };
+    if (!Array.isArray(effective.buildFromSource)
+      || !effective.buildFromSource.every(pattern => typeof pattern === 'string')
+      || !effective.buildFromSource.includes('expo-audio')
+      || (Array.isArray(effective.exclude) && effective.exclude.includes('expo-audio'))) {
+      throw new Error(`Patched expo-audio must remain autolinked from source: effective ${platform} buildFromSource must include the exact expo-audio entry without excluding it.`);
+    }
+  }
+}
+
 function assertSourceConfig(root = projectRoot) {
   const appConfig = JSON.parse(readText(path.join(root, 'app.json'), 'Expo app config'));
   const easConfig = JSON.parse(readText(path.join(root, 'eas.json'), 'EAS config'));
@@ -54,6 +73,7 @@ function assertSourceConfig(root = projectRoot) {
       || backgroundModes.includes('audio')) {
       throw new Error('Local speech requires the pinned playback-only audio plugin without recording/background audio.');
     }
+    assertExpoAudioSourceBuild(packageConfig);
   }
 
   if (backgroundModes.includes('processing')) {
@@ -151,6 +171,16 @@ function assertExpoAudioNativePatch(root = projectRoot) {
     || lock.packages?.['node_modules/expo-audio']?.version !== audioVersion || installed.version !== audioVersion) {
     throw new Error('expo-audio manifest, lockfile and installed package must match the guarded exact version; run npm ci.');
   }
+  // expo-audio's wildcard asset peer must not pull a newer native module into Expo 55.
+  // Check the hoisted package that autolinking sees; a compatible nested Expo copy is insufficient.
+  const assetVersion = '55.0.20';
+  const asset = JSON.parse(readText(path.join(root, 'node_modules', 'expo-asset', 'package.json'), 'Top-level installed expo-asset package'));
+  if (manifest.dependencies['expo-asset'] !== assetVersion
+    || lock.packages?.['']?.dependencies?.['expo-asset'] !== assetVersion
+    || lock.packages?.['node_modules/expo-asset']?.version !== assetVersion || asset.version !== assetVersion) {
+    throw new Error('expo-asset manifest, lockfile and top-level installed package must match the Expo 55 compatible exact version 55.0.20; run npm ci.');
+  }
+  assertExpoAudioSourceBuild(manifest);
   for (const patch of audioPatches) {
     const source = readText(path.join(packageRoot, patch.file), `Patched expo-audio ${patch.file}`).replace(/\r\n/gu, '\n');
     if (crypto.createHash('sha256').update(source).digest('hex') !== patch.after) {

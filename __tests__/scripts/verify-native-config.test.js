@@ -1,9 +1,11 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
-const { run } = require('../../scripts/verify-native-config');
+const { run, assertExpoAudioNativePatch } = require('../../scripts/verify-native-config');
 const { copyLlamaPatchSources } = require('../fixtures/llama-native-patch');
+const { patches: audioPatches, VERSION: audioVersion } = require('../../patches/expo-audio-55.0.18');
 
 const { PODFILE_PREFIX, HEXAGON_GUARD } = require('../../plugins/withLlamaSourceBuild')._internal;
 
@@ -117,7 +119,73 @@ function createProject() {
   return root;
 }
 
+function addGuardedAudio(root) {
+  const packageFile = path.join(root, 'package.json');
+  const packageConfig = JSON.parse(fs.readFileSync(packageFile, 'utf8'));
+  packageConfig.dependencies['expo-audio'] = audioVersion;
+  writeJson(packageFile, packageConfig);
+  const configFile = path.join(root, 'app.json');
+  const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  config.expo.plugins.push(['expo-audio', { microphonePermission: false, recordAudioAndroid: false,
+    enableBackgroundRecording: false, enableBackgroundPlayback: false }]);
+  writeJson(configFile, config);
+  const lockFile = path.join(root, 'package-lock.json');
+  const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+  lock.packages[''].dependencies['expo-audio'] = audioVersion;
+  lock.packages['node_modules/expo-audio'] = { version: audioVersion };
+  writeJson(lockFile, lock);
+  const packageRoot = path.join(root, 'node_modules/expo-audio');
+  writeJson(path.join(packageRoot, 'package.json'), { version: audioVersion });
+  for (const patch of audioPatches) {
+    const source = fs.readFileSync(path.resolve(__dirname, '../../node_modules/expo-audio', patch.file), 'utf8');
+    const hash = crypto.createHash('sha256').update(source.replace(/\r\n/gu, '\n')).digest('hex');
+    if (hash !== patch.after) throw new Error(`Unknown installed audio fixture: ${patch.file}`);
+    const target = path.join(packageRoot, patch.file);
+    fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, source);
+  }
+  return packageRoot;
+}
+
 describe('native configuration contract', () => {
+  it('verifies guarded audio types and both native implementations without mutating any installed source', () => {
+    const root = createProject();
+    try {
+      const audioRoot = addGuardedAudio(root);
+      const files = audioPatches.map(patch => path.join(audioRoot, patch.file));
+      const before = files.map(file => fs.readFileSync(file, 'utf8'));
+      expect(() => run(['--require-ios', '--require-android'], root)).not.toThrow();
+      expect(files.map(file => fs.readFileSync(file, 'utf8'))).toEqual(before);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('rejects native audio source drift even when versions and playback-only permissions are correct', () => {
+    const root = createProject();
+    try {
+      const audioRoot = addGuardedAudio(root);
+      const target = path.join(audioRoot, audioPatches[audioPatches.length - 1].file);
+      fs.appendFileSync(target, '\n// changed native implementation\n');
+      const before = fs.readFileSync(target, 'utf8');
+      expect(() => run([], root)).toThrow(/expo-audio.*patch is missing or changed/);
+      expect(fs.readFileSync(target, 'utf8')).toBe(before);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each(['manifest', 'lock-root', 'lock-package', 'installed'])('rejects mismatched guarded expo-audio %s identity', identity => {
+    const root = createProject();
+    try {
+      addGuardedAudio(root);
+      const file = path.join(root, identity === 'manifest' ? 'package.json'
+        : identity === 'installed' ? 'node_modules/expo-audio/package.json' : 'package-lock.json');
+      const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (identity === 'manifest') value.dependencies['expo-audio'] = '^55.0.18';
+      if (identity === 'installed') value.version = '55.0.19';
+      if (identity === 'lock-root') value.packages[''].dependencies['expo-audio'] = '55.0.19';
+      if (identity === 'lock-package') value.packages['node_modules/expo-audio'].version = '55.0.19';
+      writeJson(file, value);
+      expect(() => assertExpoAudioNativePatch(root)).toThrow(/expo-audio.*match the guarded exact version/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('rejects an unpatched installed wrapper even when vendor artifact receipts match', () => {
     const root = createProject();
     try {

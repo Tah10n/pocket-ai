@@ -1,6 +1,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { patchLlamaBridge } = require('../patches/llama-rn-0.13.0-rc.3');
+const { patches: audioPatches, VERSION: audioVersion } = require('../patches/expo-audio-55.0.18');
 
 const { HEXAGON_GUARD, assertPodfileSourceBuild } = require('../plugins/withLlamaSourceBuild')._internal;
 const projectRoot = path.resolve(__dirname, '..');
@@ -42,6 +44,17 @@ function assertSourceConfig(root = projectRoot) {
   const easConfig = JSON.parse(readText(path.join(root, 'eas.json'), 'EAS config'));
   const packageConfig = JSON.parse(readText(path.join(root, 'package.json'), 'Package config'));
   const backgroundModes = appConfig.expo?.ios?.infoPlist?.UIBackgroundModes ?? [];
+
+  if (packageConfig.dependencies?.['expo-audio']) {
+    const plugin = appConfig.expo?.plugins?.find(entry => Array.isArray(entry) && entry[0] === 'expo-audio');
+    const options = plugin?.[1];
+    if (packageConfig.dependencies['expo-audio'] !== '55.0.18' || !options
+      || options.microphonePermission !== false || options.recordAudioAndroid !== false
+      || options.enableBackgroundRecording !== false || options.enableBackgroundPlayback !== false
+      || backgroundModes.includes('audio')) {
+      throw new Error('Local speech requires the pinned playback-only audio plugin without recording/background audio.');
+    }
+  }
 
   if (backgroundModes.includes('processing')) {
     throw new Error('UIBackgroundModes=processing requires a real BGTaskScheduler implementation and is forbidden.');
@@ -126,6 +139,26 @@ function assertLlamaNativeArtifacts(root = projectRoot) {
   }
 }
 
+/** Read-only proof that the installed playback sources include the guarded disposal/resume patch. */
+function assertExpoAudioNativePatch(root = projectRoot) {
+  const manifest = JSON.parse(readText(path.join(root, 'package.json'), 'Package config'));
+  if (!manifest.dependencies?.['expo-audio']) return;
+  const lock = JSON.parse(readText(path.join(root, 'package-lock.json'), 'Package lock'));
+  const packageRoot = path.join(root, 'node_modules', 'expo-audio');
+  const installed = JSON.parse(readText(path.join(packageRoot, 'package.json'), 'Installed expo-audio package'));
+  if (manifest.dependencies['expo-audio'] !== audioVersion
+    || lock.packages?.['']?.dependencies?.['expo-audio'] !== audioVersion
+    || lock.packages?.['node_modules/expo-audio']?.version !== audioVersion || installed.version !== audioVersion) {
+    throw new Error('expo-audio manifest, lockfile and installed package must match the guarded exact version; run npm ci.');
+  }
+  for (const patch of audioPatches) {
+    const source = readText(path.join(packageRoot, patch.file), `Patched expo-audio ${patch.file}`).replace(/\r\n/gu, '\n');
+    if (crypto.createHash('sha256').update(source).digest('hex') !== patch.after) {
+      throw new Error(`expo-audio speech disposal/resume patch is missing or changed: ${patch.file}; run npm ci with postinstall enabled.`);
+    }
+  }
+}
+
 function assertIosGeneratedConfig(root = projectRoot) {
   const podfile = readText(path.join(root, 'ios', 'Podfile'), 'Generated iOS Podfile').replace(/\r\n/gu, '\n');
   assertPodfileSourceBuild(podfile);
@@ -145,6 +178,10 @@ function assertIosGeneratedConfig(root = projectRoot) {
 
   if (/UIBackgroundModes[\s\S]{0,500}<string>processing<\/string>/u.test(plist)) {
     throw new Error('Generated Info.plist still declares unsupported background processing.');
+  }
+  if (/<key>NSMicrophoneUsageDescription<\/key>/u.test(plist)
+    || /<key>UIBackgroundModes<\/key>\s*<array>[\s\S]*?<string>audio<\/string>[\s\S]*?<\/array>/u.test(plist)) {
+    throw new Error('Generated playback-only Info.plist must not request microphone/background audio.');
   }
   if (!/<key>CFBundleIdentifier<\/key>/u.test(plist)) {
     throw new Error('Generated Info.plist is missing CFBundleIdentifier.');
@@ -192,6 +229,12 @@ function assertAndroidGeneratedConfig(root = projectRoot) {
     path.join(root, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'),
     'Generated Android manifest',
   );
+  const grantedPermissions = [...manifest.matchAll(/<uses-permission\b[^>]*>/gu)]
+    .filter(match => !/tools:node="remove"/u.test(match[0])).map(match => match[0]);
+  if (grantedPermissions.some(permission => /android\.permission\.(?:RECORD_AUDIO|FOREGROUND_SERVICE_MEDIA_PLAYBACK|FOREGROUND_SERVICE_MICROPHONE)/u.test(permission))
+    || /<service\b[^>]*expo\.modules\.audio\.service\.AudioForegroundService/u.test(manifest)) {
+    throw new Error('Generated playback-only Android manifest must not grant recording/background audio services.');
+  }
 
   for (const permission of [
     'android.permission.FOREGROUND_SERVICE',
@@ -224,6 +267,7 @@ function run(argv = process.argv.slice(2), root = projectRoot) {
   assertSourceConfig(root);
   assertLlamaNativeArtifacts(root);
   patchLlamaBridge(root, { check: true });
+  assertExpoAudioNativePatch(root);
 
   if (requireIos || fs.existsSync(path.join(root, 'ios'))) {
     assertIosGeneratedConfig(root);
@@ -242,6 +286,7 @@ module.exports = {
   assertAndroidGeneratedConfig,
   assertIosGeneratedConfig,
   assertLlamaNativeArtifacts,
+  assertExpoAudioNativePatch,
   assertSourceConfig,
   run,
 };

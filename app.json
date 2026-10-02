@@ -57,6 +57,15 @@
         }
       ],
       "expo-font",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false,
+          "enableBackgroundRecording": false,
+          "enableBackgroundPlayback": false
+        }
+      ],
       "expo-notifications",
       [
         "expo-build-properties",

@@ -128,7 +128,7 @@ const CLOCK_PRIVACY_REPLACEMENTS = [
 ];
 const COMPLETION_SOURCE = 'cpp/rn-completion.cpp';
 const COMPLETION_BEFORE_SHA256 = '4563b4a65e98e7022d4ae38014f12acd2241a0911fc2201f5da465679df82087';
-const COMPLETION_AFTER_SHA256 = '014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc';
+const COMPLETION_AFTER_SHA256 = 'b65be79e6cd665a482e82c4a4b27eb2f067a35907ca485d3aa68435f76625d12';
 const COMPLETION_REPLACEMENTS = [
   [
     `    if (ctx_sampling != nullptr) {
@@ -250,7 +250,14 @@ const PROMPT_TOKEN_PRIVACY_REPLACEMENTS = [
     "        LOG_INFO(\"prompt token count: %zu\", num_prompt_tokens);"
   ]
 ];
+const CHATTERBOX_PRIVACY_REPLACEMENTS = [
+  [
+    "        LOG_INFO(\"Chatterbox prefill: entering block, n_past=%d text='%s'\",\n                 n_past,\n                 parent_ctx->tts_wrapper->chatterbox_text.substr(0,40).c_str());",
+    "        LOG_INFO(\"Chatterbox prefill: entering block, n_past=%d\", n_past);"
+  ]
+];
 const COMPLETION_PRIVACY_REPLACEMENTS = [
+  ...CHATTERBOX_PRIVACY_REPLACEMENTS,
   ...PROMPT_TOKEN_PRIVACY_REPLACEMENTS,
   [
     "        LOG_VERBOSE(\"prompt ingested, n_past: %d, cached: %s, to_eval: %s\",\n            n_past,\n            tokens_to_str(parent_ctx->ctx, embd.cbegin(), embd.cbegin() + n_past).c_str(),\n            tokens_to_str(parent_ctx->ctx, embd.cbegin() + n_past, embd.cend()).c_str()\n        );",
@@ -275,11 +282,158 @@ const SAMPLING_PRIVACY_REPLACEMENTS = [
     "            LOG_DBG(\"%s: Backend sampler selected a token; skipping CPU samplers\\n\", __func__);"
   ]
 ];
+const TTS_SOURCE = 'cpp/rn-tts.cpp';
+const TTS_BEFORE_SHA256 = '2e02fd6d1acaeac7a7f321baeb6ea99dac4503ba78b70439ee2c9de8effe488c';
+const TTS_PRIVACY_SHA256 = '30c41e9ee214171f20ab11191317954c7f13d3bc3c8508d4f14901d27f05abe0';
+const TTS_AFTER_SHA256 = 'ac3acbe44c5a84b60144f79105cbd6902af0e3548a5f3ac53c4a9e1ce2546ad3';
+const TTS_PRIVACY_REPLACEMENTS = [[
+  "          LOG_WARNING(\"audio_lm_init failed (non-fatal): %s\",\n                      alm_err.empty() ? \"(no error)\" : alm_err.c_str());",
+  "          LOG_WARNING(\"audio_lm_init failed (non-fatal)\");"
+]];
+const TTS_BOUNDS_REPLACEMENTS = [
+  [
+    'static int codec_decode_n_q_for_profile(const tts_model_profile &profile, ::codec_model *codec_model) {',
+    `// Product bounds apply before codec graphs, latent transpose and output copies.
+static constexpr size_t RN_TTS_MAX_PCM_SAMPLES = 768000;
+static constexpr size_t RN_TTS_MAX_AUDIO_ELEMENTS = 768000;
+
+static size_t rn_tts_pcm_sample_limit(::codec_model *model) {
+    const int32_t sample_rate = codec_model_sample_rate(model);
+    if (sample_rate < 8000 || sample_rate > 192000) {
+        throw std::runtime_error("Invalid TTS codec sample rate");
+    }
+    return std::min(RN_TTS_MAX_PCM_SAMPLES, static_cast<size_t>(sample_rate) * 16);
+}
+
+static void rn_tts_validate_decode_frames(::codec_model *model, size_t n_frames) {
+    const int32_t hop = codec_model_hop_size(model);
+    const size_t sample_limit = rn_tts_pcm_sample_limit(model);
+    // Division precedes multiplication, including for untrusted frame counts.
+    if (hop <= 0 || n_frames == 0 || n_frames > sample_limit / static_cast<size_t>(hop)
+        || n_frames > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::runtime_error("TTS decode exceeds bounded clip duration");
+    }
+}
+
+static void rn_tts_validate_token_shape(::codec_model *model, size_t n_tokens, int n_codebooks) {
+    if (n_codebooks <= 0 || n_tokens == 0 || n_tokens > RN_TTS_MAX_AUDIO_ELEMENTS
+        || n_tokens % static_cast<size_t>(n_codebooks) != 0) {
+        throw std::runtime_error("Invalid bounded TTS audio token shape");
+    }
+    rn_tts_validate_decode_frames(model, n_tokens / static_cast<size_t>(n_codebooks));
+}
+
+static void rn_tts_validate_pcm(::codec_model *model, const float *data, size_t n_samples,
+                                int32_t sample_rate, int32_t n_channels) {
+    if (data == nullptr || n_samples == 0 || n_samples > rn_tts_pcm_sample_limit(model)
+        || sample_rate != codec_model_sample_rate(model) || n_channels != 1) {
+        throw std::runtime_error("Invalid bounded mono TTS PCM");
+    }
+    if (std::any_of(data, data + n_samples, [](float value) { return !std::isfinite(value); })) {
+        throw std::runtime_error("Nonfinite TTS PCM");
+    }
+}
+
+static std::vector<float> rn_tts_take_pcm(::codec_model *model, codec_pcm_buffer &pcm) {
+    struct pcm_release_guard {
+        codec_pcm_buffer &pcm;
+        ~pcm_release_guard() { codec_pcm_buffer_free(&pcm); }
+    } guard { pcm };
+    rn_tts_validate_pcm(model, pcm.data, static_cast<size_t>(pcm.n_samples), pcm.sample_rate, pcm.n_channels);
+    return std::vector<float>(pcm.data, pcm.data + pcm.n_samples);
+}
+
+static int codec_decode_n_q_for_profile(const tts_model_profile &profile, ::codec_model *codec_model) {`
+  ],
+  [
+    `        return decodeAudioEmbeddings(main_ctx, main_ctx->completion->embeddings, main_ctx->completion->embedding_dim);
+    }
+    if (profile.decode_kind == tts_decode_kind::UNSUPPORTED) {`,
+    `        return decodeAudioEmbeddings(main_ctx, main_ctx->completion->embeddings, main_ctx->completion->embedding_dim);
+    }
+    const int bounded_codebooks = profile.audio.n_codebook > 0 ? profile.audio.n_codebook : 1;
+    rn_tts_validate_token_shape(codec_model, tokens.size(), bounded_codebooks);
+    if (profile.decode_kind == tts_decode_kind::UNSUPPORTED) {`
+  ],
+  [
+    `            return pcm_out.pcm;
+        }
+        LOG_ERROR("This TTS model's codec is not supported by codec.cpp yet");`,
+    `            rn_tts_validate_pcm(codec_model, pcm_out.pcm.data(), pcm_out.pcm.size(), pcm_out.sample_rate, pcm_out.n_channels);
+            return pcm_out.pcm;
+        }
+        LOG_ERROR("This TTS model's codec is not supported by codec.cpp yet");`
+  ],
+  [
+    `        if (used_alm_path) {
+            codec_common::audio_lm_audio_output pcm_out;`,
+    `        if (used_alm_path) {
+            // The decoder reads its own accumulator, not the caller's token array.
+            rn_tts_validate_token_shape(codec_model, audio_tokens.size(), bounded_codebooks);
+            codec_common::audio_lm_audio_output pcm_out;`
+  ],
+  [
+    '            if (!pcm_out.pcm.empty()) return pcm_out.pcm;',
+    `            if (!pcm_out.pcm.empty()) {
+                rn_tts_validate_pcm(codec_model, pcm_out.pcm.data(), pcm_out.pcm.size(), pcm_out.sample_rate, pcm_out.n_channels);
+                return pcm_out.pcm;
+            }`
+  ],
+  [
+    `        LOG_ERROR("codec_decode() failed: %s", err != nullptr ? err : "unknown error");
+        return std::vector<float>();
+    }
+
+    std::vector<float> audio(pcm.data, pcm.data + pcm.n_samples);
+    codec_pcm_buffer_free(&pcm);
+    return audio;`,
+    `        LOG_ERROR("codec_decode() failed: %s", err != nullptr ? err : "unknown error");
+        codec_pcm_buffer_free(&pcm);
+        return std::vector<float>();
+    }
+
+    return rn_tts_take_pcm(codec_model, pcm);`
+  ],
+  [
+    `    if (embeddings.empty() || embedding_dim <= 0 || embeddings.size() % (size_t) embedding_dim != 0) {
+        LOG_ERROR("Invalid audio embedding shape: %zu values, dim=%d", embeddings.size(), embedding_dim);
+        return std::vector<float>();
+    }
+
+    struct codec_decode_params decode_params = codec_decode_default_params();`,
+    `    if (embeddings.empty() || embeddings.size() > RN_TTS_MAX_AUDIO_ELEMENTS || embedding_dim <= 0
+        || embedding_dim != codec_model_latent_dim(codec_model)
+        || embeddings.size() % static_cast<size_t>(embedding_dim) != 0) {
+        throw std::runtime_error("Invalid bounded TTS audio embedding shape");
+    }
+    rn_tts_validate_decode_frames(codec_model, embeddings.size() / static_cast<size_t>(embedding_dim));
+    if (std::any_of(embeddings.begin(), embeddings.end(), [](float value) { return !std::isfinite(value); })) {
+        throw std::runtime_error("Nonfinite TTS audio embeddings");
+    }
+
+    struct codec_decode_params decode_params = codec_decode_default_params();`
+  ],
+  [
+    `        LOG_ERROR("codec_decode_quantized_representation() failed: %s", err != nullptr ? err : "unknown error");
+        return std::vector<float>();
+    }
+
+    std::vector<float> audio(pcm.data, pcm.data + pcm.n_samples);
+    codec_pcm_buffer_free(&pcm);
+    return audio;`,
+    `        LOG_ERROR("codec_decode_quantized_representation() failed: %s", err != nullptr ? err : "unknown error");
+        codec_pcm_buffer_free(&pcm);
+        return std::vector<float>();
+    }
+
+    return rn_tts_take_pcm(codec_model, pcm);`
+  ],
+];
 const SOURCE_PATCHES = [
   { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256, replacements: [[BEFORE, AFTER]] },
   { source: PARAMS_SOURCE, beforeSha256: PARAMS_BEFORE_SHA256, afterSha256: PARAMS_AFTER_SHA256, replacements: PARAMS_REPLACEMENTS },
   { source: CLOCK_SOURCE, beforeSha256: CLOCK_BEFORE_SHA256, afterSha256: CLOCK_AFTER_SHA256, replacements: [[CLOCK_BEFORE, CLOCK_AFTER], ...CLOCK_PRIVACY_REPLACEMENTS], intermediates: [{ sha256: CLOCK_PREVIOUS_SHA256, replacements: CLOCK_PRIVACY_REPLACEMENTS }] },
-  { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, intermediates: [{ sha256: 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d', replacements: COMPLETION_PRIVACY_REPLACEMENTS }, { sha256: 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058', replacements: PROMPT_TOKEN_PRIVACY_REPLACEMENTS }], replacements: [...COMPLETION_REPLACEMENTS, ...COMPLETION_PRIVACY_REPLACEMENTS] },
+  { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, intermediates: [{ sha256: '014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc', replacements: CHATTERBOX_PRIVACY_REPLACEMENTS }, { sha256: 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d', replacements: COMPLETION_PRIVACY_REPLACEMENTS }, { sha256: 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058', replacements: [...PROMPT_TOKEN_PRIVACY_REPLACEMENTS, ...CHATTERBOX_PRIVACY_REPLACEMENTS] }], replacements: [...COMPLETION_REPLACEMENTS, ...COMPLETION_PRIVACY_REPLACEMENTS] },
   { source: SAMPLING_SOURCE, beforeSha256: SAMPLING_BEFORE_SHA256, afterSha256: SAMPLING_AFTER_SHA256, intermediates: [{ sha256: SAMPLING_PREVIOUS_SHA256, replacements: [...LLGUIDANCE_REPLACEMENTS, ...SAMPLING_PRIVACY_REPLACEMENTS] }, { sha256: 'd68916d80be1f3e3b1dd8ec238ab77cc23b8056394f3db49991eb2739fd0a1c2', replacements: SAMPLING_PRIVACY_REPLACEMENTS }], replacements: [...SAMPLING_REPLACEMENTS, ...SAMPLING_PRIVACY_REPLACEMENTS] },
   { source: GRAMMAR_SOURCE, beforeSha256: GRAMMAR_BEFORE_SHA256, afterSha256: GRAMMAR_AFTER_SHA256, replacements: GRAMMAR_REPLACEMENTS },
   {"source": "cpp/llama-batch.cpp", "beforeSha256": "88f7b462c41fda25c1767880c0d0a70550bfd816a1477663de06de8d5f5ca2fe", "afterSha256": "941ede2131208b75ce936979e9822934c88bc34f4d8760df736fb0c4eb0d2e96", "replacements": [["                    LLAMA_LOG_DEBUG(\"%s:  %4d: id = %6d (%16s), pos = %4d, n_seq_id = %2d, seq_id = [%s], output = %d\\n\",\n                            __func__, i, ubatch.token[i], vocab->token_to_piece(ubatch.token[i]).c_str(),\n                            ubatch.pos[i], ubatch.n_seq_id[i], ss.str().c_str(), ubatch.output[i]);", "                    LLAMA_LOG_DEBUG(\"%s:  %4d: [token], pos = %4d, n_seq_id = %2d, seq_id = [%s], output = %d\\n\",\n                            __func__, i, ubatch.pos[i], ubatch.n_seq_id[i], ss.str().c_str(), ubatch.output[i]);"]]},
@@ -304,11 +458,17 @@ const SOURCE_PATCHES = [
   {"source": "cpp/rn-llama.h", "beforeSha256": "2ede73fed4a0a28a697001133ed67ad51525a8059f23582867138ba6c6971105", "afterSha256": "2094b3bc9350c7138dbd7d2152b44580700293ab0146496d081a9bafe8ee392d", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
   {"source": "cpp/rn-slot-manager.h", "beforeSha256": "76b457c59ae574134094e203c38d411f1dc7243b6616c4fd13d32d3c80b88dce", "afterSha256": "882150b9bb69c8b4cb4da71b1433b42adf161caa256e6c7c4dc058731ead2c3e", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
   {"source": "cpp/rn-slot.h", "beforeSha256": "6c44d5d937212addb9e31ec629953937e77be26ba0427047190992e2bf2794d2", "afterSha256": "cd89f60afb06a0c819fac99f8f8a036c83826484e2a03276d7b151848151c7a0", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
-  {"source": "cpp/rn-tts.cpp", "beforeSha256": "2e02fd6d1acaeac7a7f321baeb6ea99dac4503ba78b70439ee2c9de8effe488c", "afterSha256": "147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
+  { source: TTS_SOURCE, beforeSha256: TTS_BEFORE_SHA256, afterSha256: TTS_AFTER_SHA256,
+    replacements: [["#include \"common.h\"", "#include \"common/common.h\""], ...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS],
+    intermediates: [
+      { sha256: '147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f', replacements: [...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS] },
+      { sha256: TTS_PRIVACY_SHA256, replacements: TTS_BOUNDS_REPLACEMENTS },
+    ] },
   {"source": "cpp/ggml-cpu/arch/arm/quants.c", "beforeSha256": "edb15b62111d41fa68e8f4c069eb50a8ce1c2de8a9525a3cd02b1cd5aca7391b", "afterSha256": "bce5e39eaffbde886d74f822115b1f925ab5b40c6877aee8a3a3b90269fc2be6", "replacements": [["#define LM_GGML_COMMON_IMPL_C", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM) || defined(_M_ARM64))\n#define LM_GGML_COMMON_IMPL_C"], [");\n    }\n\n    *s = sumf;\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n\n", ");\n    }\n\n    *s = sumf;\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n\n\n#endif // compile-target CPU architecture\n"]]},
   {"source": "cpp/ggml-cpu/arch/arm/repack.cpp", "beforeSha256": "f36e53ebde15b39147eb77d444ebf5c494af7aefed096444256fdf2836722e98", "afterSha256": "c12d2f0ab327a04341868205b5b7d83ee08c55d6b38aa61bdb768e128004e6bf", "replacements": [["#define LM_GGML_COMMON_IMPL_CPP", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM) || defined(_M_ARM64))\n#define LM_GGML_COMMON_IMPL_CPP"], ["endif  // defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_MATMUL_INT8)\n    lm_ggml_gemm_q8_0_4x8_q8_0_generic(n, s, bs, vx, vy, nr, nc);\n}\n", "endif  // defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_MATMUL_INT8)\n    lm_ggml_gemm_q8_0_4x8_q8_0_generic(n, s, bs, vx, vy, nr, nc);\n}\n\n#endif // compile-target CPU architecture\n"]]},
   {"source": "cpp/ggml-cpu/arch/x86/quants.c", "beforeSha256": "0b0942f1030384ae3a907350d69b0ad29f5a9dffe3bf35286a24489f9caa9eeb", "afterSha256": "93fe81c2ea5b0b321b6bf50e7833f6152bc8e4464ea6e65afc2c891c4097ad69", "replacements": [["#define LM_GGML_COMMON_IMPL_C", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || defined(_M_X64))\n#define LM_GGML_COMMON_IMPL_C"], ["*s = hsum_float_8(accum);\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n", "*s = hsum_float_8(accum);\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n\n#endif // compile-target CPU architecture\n"]]},
   {"source": "cpp/ggml-cpu/arch/x86/repack.cpp", "beforeSha256": "18c55964dcdf1ac589dfca0e5013755a856505f5d48e4c935ed8300580e4a7c2", "afterSha256": "0141703d24d858af37ea92eab1246e5d4a6cded95cf57de113d035345da27e92", "replacements": [["#define LM_GGML_COMMON_IMPL_CPP", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || defined(_M_X64))\n#define LM_GGML_COMMON_IMPL_CPP"], ["_mm256_sub_ps(acc_rows[i], acc_min_rows[i]));\n            }\n        }\n    }\n#else\n\n    lm_ggml_gemm_q2_K_8x8_q8_K_generic(n, s, bs, vx, vy, nr, nc);\n\n\n#endif\n}\n", "_mm256_sub_ps(acc_rows[i], acc_min_rows[i]));\n            }\n        }\n    }\n#else\n\n    lm_ggml_gemm_q2_K_8x8_q8_K_generic(n, s, bs, vx, vy, nr, nc);\n\n\n#endif\n}\n\n#endif // compile-target CPU architecture\n"]]},
+  {"source":"cpp/rn-llama.cpp","beforeSha256":"e33948572e199c90a74f1ecb4d27be791924fe4954737f0d83c96b2a18ad0d1c","afterSha256":"b4ad27f004e6398d5de8fe49181f52e1d77c734f0b499389b8c5973ba6d14835","replacements":[["            LOG_ERROR(\"unable to load model: %s\", params_.model.path.c_str());","            LOG_ERROR(\"unable to load model\");"],["            LOG_ERROR(\"unable to initialize context for model: %s\", params_.model.path.c_str());","            LOG_ERROR(\"unable to initialize context for model\");"]]},
 ];
 // JSI fixes are compiled locally in every mode. Clock and sampler fixes are in the core:
 // source-build configuration must also be enforced by the native config verifier.
@@ -322,7 +482,6 @@ const BUILD_FILES = Object.freeze({
   'cpp/common/jinja/runtime.h': '89c8efc60ad287f49089fbcf7f028d1b88b32d41a2e859f1b68af5a574816a3f',
   'cpp/common/chat-auto-parser.h': 'c774fcc02980529671793e110118ecfccb1e3c48eac52c852ce354922f599b52',
   'cpp/common/chat.h': 'e6d106744146668453d38fa3db725b630a438eb982c74effd094f30cd3ed4d65',
-  'cpp/rn-llama.cpp': 'e33948572e199c90a74f1ecb4d27be791924fe4954737f0d83c96b2a18ad0d1c',
 });
 
 function hashSource(text) {

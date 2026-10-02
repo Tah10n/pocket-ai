@@ -3101,7 +3101,8 @@ const ChatScreenContent = () => {
         // Explicit native QA owns unload/reload until process restart, including
         // cold-reopen checkpoints and failed drains.
         if (isAndroidQaDocumentModelBootstrapEnabled()
-            && (getAndroidQaInferenceSmokeEvidence().status !== 'idle'
+            && (isTtsQaBusy
+                || getAndroidQaInferenceSmokeEvidence().status !== 'idle'
                 || getAndroidQaDocumentRetrievalEvidence().status !== 'idle'
                 || getAndroidQaDocumentRetrievalEvidence().requiresForceStop
                 || getAndroidQaDocumentIndexPublicationEvidence().status !== 'idle'
@@ -3198,6 +3199,7 @@ const ChatScreenContent = () => {
         showAlertForError,
         activeThread,
         isCurrentChatModelReady,
+        isTtsQaBusy,
     ]);
 
     useEffect(() => {

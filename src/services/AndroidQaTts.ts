@@ -1,4 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { AppState } from 'react-native';
 import fixtures from '../../docs/validation/llama-rn-stage6/tts-fixtures.json';
 import loraFixture from '../../docs/validation/llama-rn-stage3/lora-fixture.json';
 import { useChatStore } from '../store/chatStore';
@@ -10,7 +11,7 @@ import { bindManagedCompanion, getCompanionBindingIdentity, getCompanionSourceId
 import { getModelFileIdentity } from '../utils/modelRoles';
 import { getAppCacheRootDir } from './FileSystemSetup';
 import { isAndroidQaDocumentModelBootstrapEnabled, ANDROID_QA_DOCUMENT_MODEL_ID } from './AndroidQaDocumentModelBootstrap';
-import { getAndroidQaEffectiveProfileIdentity } from './AndroidQaStage3';
+import { getAndroidQaEffectiveProfileIdentity, prepareAndroidQaStage3Adapter } from './AndroidQaStage3';
 import { selectAuxiliaryModel } from './AuxiliaryModelService';
 import { llmEngineService } from './LLMEngineService';
 import { getModelDownloadManager, ModelFileLeaseBusyError } from './ModelDownloadManager';
@@ -31,6 +32,7 @@ export interface AndroidQaTtsEvidence {
   flow?: TtsFlow; clipId?: string; failureCode?: string; requiresForceStop: boolean;
   backend: 'cpu'; runtimeVersion: '0.13.0-rc.3'; patchSha256: string; steps: Receipt[];
   contentVerification: 'not_run';
+  mode?: 'playback_start'; synthesisCount?: number;
 }
 const initial = (): AndroidQaTtsEvidence => ({ schemaVersion: 1, status: 'idle', phase: 'idle',
   requiresForceStop: false, backend: 'cpu', runtimeVersion: '0.13.0-rc.3', patchSha256: LLAMA_SOURCE_PATCH_SHA256,
@@ -152,7 +154,38 @@ export function runAndroidQaTts(flow: TtsFlow): Promise<void> {
   return active;
 }
 
-async function execute(flow: TtsFlow): Promise<void> {
+/** One real clip, then ordinary rendered controls; no export or repeated synthesis. */
+export function runAndroidQaTtsPlayback(): Promise<void> {
+  if (!isAndroidQaDocumentModelBootstrapEnabled()) return Promise.resolve();
+  if (active) return active;
+  evidence = initial();
+  publish({ status: 'running', flow: 'tokens', phase: 'prepare', mode: 'playback_start', synthesisCount: 0 });
+  active = execute('tokens', true).finally(() => { active = null; });
+  return active;
+}
+
+export async function waitForAndroidQaTtsPublicControls(): Promise<void> {
+  publish({ phase: 'awaiting_public_controls' });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let backgroundStartedPlaying = false;
+  const backgroundListener = AppState.addEventListener('change', next => {
+    const state = ttsService.getState();
+    if (next !== 'active') backgroundStartedPlaying = state.phase === 'playing' && state.clipAvailable === true && !state.errorCode;
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      continueClip = resolve;
+      timer = setTimeout(() => reject(new QaTtsFailure('public_controls_timeout')), 180_000);
+    });
+    check(backgroundStartedPlaying, 'background_playback_missing');
+  } finally {
+    continueClip = null;
+    if (timer) clearTimeout(timer);
+    backgroundListener.remove();
+  }
+}
+
+async function execute(flow: TtsFlow, playbackOnly = false): Promise<void> {
   const originalThread = useChatStore.getState().activeThreadId;
   const originalBindings = getSettings().auxiliaryModels;
   const originalModel = llmEngineService.getState().activeModelId;
@@ -165,6 +198,7 @@ async function execute(flow: TtsFlow): Promise<void> {
   try {
     const profile = TTS_EXECUTION_PROFILES.find(item => item.flow === flow)!;
     const fixture = fixtures.fixtures.find(item => item.id === profile.id)!;
+    if (playbackOnly) await prepareAndroidQaStage3Adapter(180_000);
     const model = await prepare(profile);
     selectAuxiliaryModel('tts', model);
     check(getSettings().activeModelId === ANDROID_QA_DOCUMENT_MODEL_ID, 'chat_selection_changed');
@@ -208,6 +242,9 @@ async function execute(flow: TtsFlow): Promise<void> {
       let decoded: TtsObservation | undefined;
       let deletion: Promise<boolean> | undefined;
       const observe = (event: TtsObservation) => {
+        if (playbackOnly && event.operation === 'completion' && event.phase === 'started') {
+          publish({ synthesisCount: (evidence.synthesisCount ?? 0) + 1 });
+        }
         if (event.operation === 'completion' && event.phase === 'started' && !deletion) {
           const codec = registry.getModel(model.id)?.artifacts?.find(item => item.kind === 'tts_codec' && item.selected);
           check(codec, 'codec_missing');
@@ -225,6 +262,20 @@ async function execute(flow: TtsFlow): Promise<void> {
       const retainedCodecFile = await FileSystem.getInfoAsync(originalCodec.codecUri);
       check(retainedCodecFile.exists && !retainedCodecFile.isDirectory && retainedCodecFile.size === originalCodecFile.size,
         'codec_file_changed');
+      if (playbackOnly) {
+        check(evidence.synthesisCount === 1 && ttsService.getState().phase === 'ready', 'synthesis_count');
+        pass({ id, flow, nativeSynthesis: 'passed', decode: 'passed', contentVerification: 'not_run',
+          sampleRate: decoded.sampleRate, sampleCount: decoded.sampleCount, duration: decoded.sampleCount / decoded.sampleRate,
+          elementCount: decoded.elementCount, profileRestored: true, chatUnchanged: true, deletionRejected: true });
+        await waitForAndroidQaTtsPublicControls();
+        // The host continues only after rendered controls and background cleanup.
+        const cache = getAppCacheRootDir(); check(cache, 'cache_unavailable');
+        check(ttsService.getState().phase === null
+          && !(await FileSystem.getInfoAsync(`${cache}tts-clips/clip.wav`)).exists, 'background_clip_cleanup');
+        assertRestored();
+        pass({ id: 'background_cleanup', playback: 'passed', fileRemoved: true, profileRestored: true, chatUnchanged: true });
+        return;
+      }
       await ttsService.play(); await delay(600);
       check(ttsService.getState().position! > 0 && ttsService.getState().phase === 'playing', 'playback_position');
       await ttsService.pause(); check(ttsService.getState().phase === 'paused', 'playback_pause');
@@ -235,28 +286,32 @@ async function execute(flow: TtsFlow): Promise<void> {
         elementCount: decoded.elementCount, profileRestored: true, chatUnchanged: true, deletionRejected: true });
       await awaitClipCopy(id); await ttsService.cancelAndClear();
     };
-    await synthesize(fixture.acceptanceTexts[0], `${flow}-1`);
-    await synthesize(fixture.acceptanceTexts[1], `${flow}-2`);
-    publish({ phase: 'stop_drain' });
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let stopPromise: Promise<void> | undefined;
-    let completion: TtsObservation | undefined;
-    let stopSettled = false;
-    let cancelled = false;
-    try {
-      await ttsService.start({ text: fixture.acceptanceTexts[2].text, language: fixture.acceptanceTexts[2].language,
-        playAfterSynthesis: false, observe: event => {
-          if (event.operation === 'completion' && event.phase === 'started') timer = setTimeout(() => {
-            stopPromise = ttsService.stop(); void stopPromise.catch(() => undefined);
-          }, 500);
-          if (event.operation === 'completion' && event.phase === 'settled') completion = event;
-          if (event.operation === 'completion_stop' && event.phase === 'settled') stopSettled = true;
-        } });
-    } catch (error) { cancelled = error instanceof TtsError && error.code === 'cancelled'; }
-    finally { if (timer) clearTimeout(timer); await stopPromise; }
-    check(cancelled && completion?.interrupted === true && stopSettled && !llmEngineService.hasAuxiliaryContextOperation(), 'stop_drain');
-    assertRestored(); pass({ id: 'stop_drain', flow, interrupted: true, completionDrained: true, profileRestored: true, chatUnchanged: true });
-    await synthesize(fixture.acceptanceTexts[2], `${flow}-retry`);
+    if (playbackOnly) {
+      await synthesize(fixture.acceptanceTexts[1], `${flow}-1`);
+    } else {
+      await synthesize(fixture.acceptanceTexts[0], `${flow}-1`);
+      await synthesize(fixture.acceptanceTexts[1], `${flow}-2`);
+      publish({ phase: 'stop_drain' });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let stopPromise: Promise<void> | undefined;
+      let completion: TtsObservation | undefined;
+      let stopSettled = false;
+      let cancelled = false;
+      try {
+        await ttsService.start({ text: fixture.acceptanceTexts[2].text, language: fixture.acceptanceTexts[2].language,
+          playAfterSynthesis: false, observe: event => {
+            if (event.operation === 'completion' && event.phase === 'started') timer = setTimeout(() => {
+              stopPromise = ttsService.stop(); void stopPromise.catch(() => undefined);
+            }, 500);
+            if (event.operation === 'completion' && event.phase === 'settled') completion = event;
+            if (event.operation === 'completion_stop' && event.phase === 'settled') stopSettled = true;
+          } });
+      } catch (error) { cancelled = error instanceof TtsError && error.code === 'cancelled'; }
+      finally { if (timer) clearTimeout(timer); await stopPromise; }
+      check(cancelled && completion?.interrupted === true && stopSettled && !llmEngineService.hasAuxiliaryContextOperation(), 'stop_drain');
+      assertRestored(); pass({ id: 'stop_drain', flow, interrupted: true, completionDrained: true, profileRestored: true, chatUnchanged: true });
+      await synthesize(fixture.acceptanceTexts[2], `${flow}-retry`);
+      }
     publish({ phase: 'chat_after' });
     let callbacks = 0;
     const result = await llmEngineService.chatCompletion({ expectedModelId: base.id,

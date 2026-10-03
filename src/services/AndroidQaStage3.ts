@@ -499,3 +499,6 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
 export function resetAndroidQaStage3ForTests(): void {
   if (process.env.NODE_ENV === 'test') { evidence = initialEvidence(); activeRun = null; }
 }
+
+// Reuse the pinned adapter installer for narrow isolated QA without the full Stage 3 pack.
+export { prepareAdapter as prepareAndroidQaStage3Adapter };

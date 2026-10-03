@@ -198,3 +198,23 @@ it('defines every speech phase and sanitized error in both UI languages', () => 
   expect(en.tts.errors.storage_failed).toBeTruthy();
   expect(ru.tts.errors.memory_unknown).toBeTruthy();
 });
+
+
+it.each(['audio_focus_failed', 'audio_focus_delayed', 'playback_start_timeout'])('shows %s with explicit Play retry on the retained WAV', async errorCode => {
+  mockState = { phase: 'error', errorCode, sampleCount: 24000, duration: 1, position: 0, clipAvailable: true };
+  const view = render(<TtsPreviewSheet {...props()} />);
+  expect(view.getByTestId('tts-error').props.children).toBe('tts.errors.' + errorCode);
+  expect(view.getByTestId('tts-phase').props.children).toBe('tts.phases.error');
+  expect(view.getByTestId('tts-play')).toBeEnabled();
+  fireEvent.press(view.getByTestId('tts-play'));
+  await waitFor(() => expect(service.play).toHaveBeenCalledTimes(1));
+  expect(service.start).not.toHaveBeenCalled();
+});
+
+it('keeps pending native startup separate from Playing and Stop available', () => {
+  mockState = { phase: 'starting', sampleCount: 24000, clipAvailable: true };
+  const view = render(<TtsPreviewSheet {...props()} />);
+  expect(view.getByTestId('tts-phase').props.children).toBe('tts.phases.starting');
+  expect(view.queryByTestId('tts-pause')).toBeNull();
+  expect(view.getByTestId('tts-stop')).toBeTruthy();
+});

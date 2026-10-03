@@ -48,6 +48,8 @@ export interface TtsServiceState {
   duration?: number;
   sampleRate?: number;
   sampleCount?: number;
+  /** True only while the service owns a validated clip; cleanup errors still block reuse. */
+  clipAvailable?: boolean;
 }
 interface TtsBinding {
   model: ModelMetadata;
@@ -140,17 +142,17 @@ export class TtsService {
   private unsubscriptions: (() => void)[] = [];
   private generation = 0;
   private executionIdentity: string | null = null;
+  private playbackGeneration: number | null = null;
   private readonly playback = new TtsPlaybackController();
 
   constructor() {
     this.playback.subscribe(() => {
-      if (this.drain || this.controlDrain || (this.state.phase === 'error'
+      if ((this.drain && this.playbackGeneration !== this.generation) || this.controlDrain || (this.state.phase === 'error'
         && ['storage_failed', 'release_failed', 'restore_failed'].includes(this.state.errorCode ?? ''))) return;
       const next = this.playback.getState();
-      const errorCode = next.errorCode === 'release_failed' || next.errorCode === 'storage_failed'
-        ? next.errorCode : next.errorCode ? 'playback_failed' : undefined;
+      const errorCode = next.errorCode;
       this.publish({ ...this.state, phase: next.phase, position: next.position, duration: next.duration,
-        ...(errorCode ? { errorCode } : {}) });
+        errorCode });
     });
   }
   getState = (): TtsServiceState => this.state;
@@ -215,6 +217,8 @@ export class TtsService {
   private async perform(request: TtsRequest, controller: AbortController, generation: number): Promise<void> {
     this.unsubscribe();
     this.executionIdentity = null;
+    this.playbackGeneration = null;
+    let clipInstalled = false;
     let selectionInvalidated = false;
     try {
       await this.playback.clear();
@@ -255,6 +259,7 @@ export class TtsService {
         if (selectionCurrent()) return;
         selectionInvalidated = true;
         controller.abort();
+        this.playback.cancelStart();
         this.publish({ ...this.state, phase: 'stopping' });
         // The same subscriber protects a ready clip from later model/chat/source changes.
         if (!this.drain) void this.cancelAndClear().catch(() => this.publish({ phase: 'error', errorCode: 'storage_failed' }));
@@ -318,14 +323,24 @@ export class TtsService {
       check();
       await this.playback.setClip(wav, metadata, publicationCurrent);
       check();
-      this.publish({ ...this.state, phase: 'ready', sampleRate: metadata.sampleRate,
+      clipInstalled = true;
+      this.playbackGeneration = generation;
+      this.publish({ ...this.state, phase: 'ready', clipAvailable: true, sampleRate: metadata.sampleRate,
         sampleCount: metadata.sampleCount, position: 0, duration: metadata.sampleCount / metadata.sampleRate });
       if (request.playAfterSynthesis !== false) {
         await this.playback.play();
         check();
-        this.publish({ ...this.state, phase: 'playing' });
+        // Controller events alone publish Playing; Play acceptance is insufficient.
       }
     } catch (error) {
+      // Admission failure already disposed the player. Keep the validated WAV
+      // and selection guard for explicit retry without another synthesis.
+      if (clipInstalled && generation === this.generation && !controller.signal.aborted && !selectionInvalidated
+        && error instanceof TtsError && ['audio_focus_failed', 'audio_focus_delayed', 'playback_start_timeout', 'playback_failed'].includes(error.code)) {
+        this.publish({ ...this.state, phase: 'error', errorCode: error.code, clipAvailable: true });
+        throw error;
+      }
+      this.playbackGeneration = null;
       this.unsubscribe();
       let playbackCleanupFailed = false;
       try { await this.playback.clear(); } catch { playbackCleanupFailed = true; }
@@ -339,7 +354,9 @@ export class TtsService {
         : selectionInvalidated ? 'selection_changed'
         : controller.signal.aborted ? 'cancelled'
         : (error as { code?: string })?.code === 'engine_busy' ? 'busy' : 'native_failed';
-      this.publish({ ...this.state, phase: code === 'cancelled' || code === 'selection_changed' ? 'stopped' : 'error', errorCode: code });
+      this.publish({ ...this.state, clipAvailable: false,
+        ...(!playbackCleanupFailed ? { sampleCount: undefined, sampleRate: undefined, position: 0, duration: 0 } : {}),
+        phase: code === 'cancelled' || code === 'selection_changed' ? 'stopped' : 'error', errorCode: code });
       throw new TtsError(code);
     }
   }
@@ -355,6 +372,7 @@ export class TtsService {
   }
   stop(): Promise<void> {
     this.controller?.abort();
+    this.playback.cancelStart();
     if (this.controlDrain) return this.controlDrain;
     return this.ownControl('stop', () => this.stopAndDrain());
   }
@@ -370,6 +388,8 @@ export class TtsService {
   }
   cancelAndClear(): Promise<void> {
     ++this.generation;
+    this.playbackGeneration = null;
+    this.playback.cancelStart();
     this.unsubscribe();
     this.controller?.abort();
     if (this.controlKind === 'clear' && this.controlDrain) return this.controlDrain;
@@ -389,9 +409,15 @@ export class TtsService {
       }
     });
   }
-  async play(): Promise<void> { if (this.drain || this.controlDrain) throw new TtsError('busy'); await this.playback.play(); }
+  private assertPlaybackAllowed(): void {
+    if (this.drain || this.controlDrain) throw new TtsError('busy');
+    if (this.state.errorCode && ['release_failed', 'storage_failed', 'restore_failed'].includes(this.state.errorCode)) {
+      throw new TtsError(this.state.errorCode);
+    }
+  }
+  async play(): Promise<void> { this.assertPlaybackAllowed(); await this.playback.play(); }
   async pause(): Promise<void> { if (this.controlDrain) throw new TtsError('busy'); await this.playback.pause(); }
-  async replay(): Promise<void> { if (this.drain || this.controlDrain) throw new TtsError('busy'); await this.playback.replay(); }
+  async replay(): Promise<void> { this.assertPlaybackAllowed(); await this.playback.replay(); }
 }
 
 export const ttsService = new TtsService();

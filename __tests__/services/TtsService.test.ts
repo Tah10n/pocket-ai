@@ -39,11 +39,45 @@ jest.mock('../../src/services/TtsPlayback', () => ({
   TtsPlaybackController: jest.fn().mockImplementation(() => ({
     subscribe: jest.fn(() => () => undefined),
     getState: jest.fn(() => ({ phase: 'stopped', position: 0, duration: 0 })),
-    clear: jest.fn(async () => undefined), stop: jest.fn(async () => undefined),
+    cancelStart: jest.fn(), clear: jest.fn(async () => undefined), stop: jest.fn(async () => undefined),
     setClip: jest.fn(async () => undefined), play: jest.fn(async () => undefined),
     pause: jest.fn(async () => undefined), replay: jest.fn(async () => undefined),
   })), cleanupColdTtsClips: jest.fn(async () => undefined),
 }));
+
+
+// Integration boundary: a loaded clip with an accepted Play never fabricates
+// playing=true. Only a deliberately delivered native snapshot can confirm it.
+const mockClipFiles = new Map<string, Uint8Array>();
+const mockClipDirectories = new Set<string>();
+const mockClipWrite = jest.fn();
+const mockClipDelete = jest.fn();
+const mockCreateNativePlayer = jest.fn();
+jest.mock('expo-audio', () => ({ setAudioModeAsync: jest.fn(async () => undefined),
+  createAudioPlayer: (...args: unknown[]) => mockCreateNativePlayer(...args) }));
+jest.mock('expo-file-system', () => {
+  const join = (parts: (string | { uri: string })[]) => parts.map(p => typeof p === 'string' ? p : p.uri)
+    .reduce((result, part, index) => index === 0 ? part : result.replace(/\/$/, '') + '/' + part.replace(/^\/+/, ''), '');
+  class Directory {
+    uri: string;
+    constructor(...parts: (string | { uri: string })[]) { this.uri = join(parts); }
+    get exists() { return mockClipDirectories.has(this.uri); }
+    create() { mockClipDirectories.add(this.uri); }
+    list() { return Array.from(mockClipFiles.keys()).filter(p => p.startsWith(this.uri + '/')).map(p => new File(p)); }
+  }
+  class File {
+    uri: string;
+    constructor(...parts: (string | { uri: string })[]) { this.uri = join(parts); }
+    get name() { return this.uri.split('/').at(-1); }
+    get parentDirectory() { return new Directory(this.uri.slice(0, this.uri.lastIndexOf('/'))); }
+    get exists() { return mockClipFiles.has(this.uri); }
+    get size() { return mockClipFiles.get(this.uri)?.length ?? 0; }
+    create() { mockClipFiles.set(this.uri, new Uint8Array()); }
+    write(bytes: Uint8Array) { mockClipWrite(bytes); mockClipFiles.set(this.uri, bytes); }
+    delete() { mockClipDelete(); mockClipFiles.delete(this.uri); }
+  }
+  return { File, Directory, Paths: { cache: { uri: 'file:///test-cache' } } };
+});
 
 const engine = jest.mocked(llmEngineService);
 const synthesize = jest.mocked(synthesizeTtsOnContext);
@@ -178,6 +212,10 @@ beforeEach(() => {
   service = new TtsService();
   const playerConstructor = TtsPlaybackController as jest.MockedClass<typeof TtsPlaybackController>;
   playback = playerConstructor.mock.results[playerConstructor.mock.results.length - 1].value;
+  playback.play.mockImplementation(async () => {
+    const next = { phase: 'playing' as const, position: 0, duration: 1 };
+    playback.getState.mockReturnValue(next); playback.subscribe.mock.calls[0][0](next);
+  });
 });
 
 afterEach(async () => {
@@ -594,4 +632,153 @@ it('retaining restoration eligibility never keeps a hidden ready clip eligible f
   expect(sequenceRequests[0].isCurrent()).toBe(false);
   expect(contextRequests[0].isCurrent()).toBe(false);
   expect(isClipCurrent()).toBe(false);
+});
+
+describe('service + real playback controller initial admission', () => {
+  let native: ReturnType<typeof makeAdmissionPlayer>;
+  let phases: (string | null)[];
+  function makeAdmissionPlayer() {
+    let listener: ((status: import('expo-audio').AudioStatus) => void) | undefined;
+    let requestId = 0;
+    const native = {
+      isLoaded: true, preventAutomaticResume: false,
+      // Intentionally silent: this is the original void native Play failure.
+      play: jest.fn(),
+      playAsync: jest.fn(async (id: number) => { requestId = id; }),
+      pause: jest.fn(), seekTo: jest.fn(async () => undefined),
+      disposeAsync: jest.fn(async () => undefined), release: jest.fn(),
+      addListener: jest.fn((_event: string, next: typeof listener) => {
+        listener = next; return { remove: jest.fn(() => { listener = undefined; }) };
+      }),
+      emit: (patch: Partial<import('expo-audio').AudioStatus> & { playbackRequestId?: number }) => listener?.({
+        id: 'native', currentTime: 0, duration: 1, playbackState: 'ready', timeControlStatus: 'paused',
+        reasonForWaitingToPlay: '', mute: false, playing: false, loop: false, didJustFinish: false,
+        isBuffering: false, isLoaded: true, playbackRate: 1, shouldCorrectPitch: false,
+        playbackRequestId: requestId, ...patch,
+      } as import('expo-audio').AudioStatus),
+    };
+    return native;
+  }
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockClipFiles.clear(); mockClipDirectories.clear(); mockClipWrite.mockClear(); mockClipDelete.mockReset();
+    native = makeAdmissionPlayer(); mockCreateNativePlayer.mockReset().mockReturnValue(native);
+    const Actual = jest.requireActual<typeof import('../../src/services/TtsPlayback')>('../../src/services/TtsPlayback').TtsPlaybackController;
+    jest.mocked(TtsPlaybackController).mockImplementationOnce(() => new Actual());
+    service = new TtsService();
+    phases = []; service.subscribe(() => phases.push(service.getState().phase));
+    choose();
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
+  it.each(['FAILED', 'DELAYED'])('rejects initial AUDIOFOCUS_REQUEST_%s without ever announcing Playing, and retains the same WAV', async focus => {
+    native.playAsync.mockRejectedValueOnce(Object.assign(new Error('sanitized focus denial'), { code: 'ERR_TTS_AUDIO_FOCUS_' + focus }));
+    const start = service.start({ text: 'Hello.', language: 'en' });
+    const rejected = expect(start).rejects.toMatchObject({ code: focus === 'FAILED' ? 'audio_focus_failed' : 'audio_focus_delayed' });
+    await rejected;
+    native.emit({ playing: false });
+    expect(phases).not.toContain('playing');
+    expect(service.getState()).toMatchObject({ phase: 'error', clipAvailable: true });
+    expect(native.disposeAsync).toHaveBeenCalledTimes(1);
+    expect(mockClipFiles.size).toBe(1);
+  });
+
+  it('retains an early real confirmation during the synthesis drain, and publishes Playing only afterwards', async () => {
+    const admission = deferred<void>(); native.playAsync.mockReturnValueOnce(admission.promise);
+    const start = service.start({ text: 'Hello.', language: 'en' });
+    await until(() => native.playAsync.mock.calls.length === 1);
+    expect(service.getState().phase).toBe('starting');
+    expect(phases).not.toContain('playing');
+    native.emit({ playing: true, playbackRequestId: native.playAsync.mock.calls[0][0] });
+    expect(service.getState().phase).toBe('playing');
+    admission.resolve(); await start;
+    expect(service.getState().phase).toBe('playing');
+  });
+
+  it('waits for a delayed playing event after accepted focus and rejects old seek snapshots', async () => {
+    const start = service.start({ text: 'Hello.', language: 'en' });
+    await until(() => native.playAsync.mock.calls.length === 1);
+    native.emit({ playing: false, playbackRequestId: 0 });
+    native.emit({ playing: false });
+    expect(service.getState().phase).toBe('starting');
+    jest.advanceTimersByTime(250);
+    native.emit({ playing: true }); await start;
+    expect(service.getState().phase).toBe('playing');
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it.each(['FAILED', 'DELAYED'])('explicitly retries %s using the same WAV and no synthesis', async focus => {
+    native.playAsync.mockRejectedValueOnce(Object.assign(new Error('denied'), { code: 'ERR_TTS_AUDIO_FOCUS_' + focus }));
+    await service.start({ text: 'Hello.', language: 'en' }).catch(() => undefined);
+    const oldListener = native.addListener.mock.calls[0][1]!;
+    const next = makeAdmissionPlayer(); mockCreateNativePlayer.mockReturnValueOnce(next);
+    const retry = service.play();
+    await until(() => next.playAsync.mock.calls.length === 1);
+    oldListener({ playing: true, playbackRequestId: native.playAsync.mock.calls[0][0] } as import('expo-audio').AudioStatus);
+    expect(service.getState().phase).toBe('starting');
+    next.emit({ playing: true }); await retry;
+    expect(service.getState()).toMatchObject({ phase: 'playing', errorCode: undefined });
+    expect(synthesize).toHaveBeenCalledTimes(1); expect(mockClipWrite).toHaveBeenCalledTimes(1);
+    expect(mockClipFiles.size).toBe(1);
+  });
+
+  it.each(['stop', 'cancelAndClear'] as const)('%s cancels waiting admission without late autoplay or timer leaks', async operation => {
+    const admission = deferred<void>(); native.playAsync.mockReturnValueOnce(admission.promise);
+    const start = service.start({ text: 'Hello.', language: 'en' });
+    const cancelled = expect(start).rejects.toMatchObject({ code: 'cancelled' });
+    await until(() => native.playAsync.mock.calls.length === 1);
+    const late = native.addListener.mock.calls[0][1]!;
+    const cleanup = service[operation]();
+    await cancelled; await cleanup;
+    admission.resolve();
+    late({ playing: true, playbackRequestId: native.playAsync.mock.calls[0][0] } as import('expo-audio').AudioStatus);
+    expect(phases).not.toContain('playing');
+    expect(jest.getTimerCount()).toBe(0);
+    expect(mockClipFiles.size).toBe(0);
+    expect(service.getState().clipAvailable).not.toBe(true);
+    expect(service.getState().sampleCount).toBeUndefined();
+  });
+
+  it('rejects a prior request on the same player during Pause/Replay', async () => {
+    const start = service.start({ text: 'Hello.', language: 'en' });
+    await until(() => native.playAsync.mock.calls.length === 1);
+    const previousRequest = native.playAsync.mock.calls[0][0];
+    native.emit({ playing: true }); await start;
+    await service.pause();
+    const replay = service.replay();
+    await until(() => native.playAsync.mock.calls.length === 2);
+    native.emit({ playing: true, playbackRequestId: previousRequest });
+    native.emit({ playing: false, playbackRequestId: previousRequest });
+    native.emit({ playing: false, playbackState: 'failed', playbackRequestId: previousRequest });
+    expect(service.getState().phase).toBe('starting');
+    native.emit({ playing: true }); await replay;
+    expect(service.getState().phase).toBe('playing');
+    expect(native.disposeAsync).not.toHaveBeenCalled(); expect(synthesize).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps ownership and blocks retry when disposal after a start timeout fails', async () => {
+    native.disposeAsync.mockRejectedValue(new Error('unsafe release'));
+    const start = service.start({ text: 'Hello.', language: 'en' });
+    const failed = expect(start).rejects.toMatchObject({ code: 'storage_failed' });
+    await until(() => native.playAsync.mock.calls.length === 1);
+    jest.advanceTimersByTime(3_000); await failed;
+    expect(mockClipFiles.size).toBe(1); expect(mockClipDelete).not.toHaveBeenCalled();
+    expect(service.getState()).toMatchObject({ phase: 'error', errorCode: 'storage_failed' });
+    await expect(service.play()).rejects.toMatchObject({ code: 'storage_failed' });
+    await expect(service.replay()).rejects.toMatchObject({ code: 'storage_failed' });
+    expect(native.playAsync).toHaveBeenCalledTimes(1);
+    native.disposeAsync.mockResolvedValue(undefined);
+  });
+
+  it('does not claim success for GRANTED without any playing:true before the deadline', async () => {
+    const start = service.start({ text: 'Hello.', language: 'en' });
+    const rejected = expect(start).rejects.toMatchObject({ code: 'playback_start_timeout' });
+    await until(() => native.play.mock.calls.length > 0 || native.playAsync.mock.calls.length > 0);
+    native.emit({ playing: false }); native.emit({ playing: false });
+    expect(phases).not.toContain('playing');
+    jest.advanceTimersByTime(3_000);
+    await rejected;
+    expect(service.getState()).toMatchObject({ phase: 'error', errorCode: 'playback_start_timeout', clipAvailable: true });
+    expect(mockClipFiles.size).toBe(1);
+  });
 });

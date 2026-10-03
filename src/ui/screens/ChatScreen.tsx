@@ -43,7 +43,7 @@ import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
 import { TtsPreviewSheet, getTtsQaPlaybackMarker } from '@/components/ui/TtsPreviewSheet';
 import { ttsService } from '@/services/TtsService';
-import { getAndroidQaTtsEvidence, subscribeAndroidQaTts, runAndroidQaTts, continueAndroidQaTts } from '@/services/AndroidQaTts';
+import { getAndroidQaTtsEvidence, subscribeAndroidQaTts, runAndroidQaTts, runAndroidQaTtsPlayback, continueAndroidQaTts } from '@/services/AndroidQaTts';
 import { prepareSpeechText, type PreparedSpeechText } from '@/utils/ttsText';
 import type { TtsErrorCode, TtsFlow } from '@/types/tts';
 import ttsQaFixtures from '../../../docs/validation/llama-rn-stage6/tts-fixtures.json';
@@ -934,14 +934,20 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                             disabled={isAnyNativeQaBusy || ttsQaEvidence.requiresForceStop
                                 || !['idle', 'native_passed', 'failed'].includes(ttsQaEvidence.status)}
                             onPress={() => void runAndroidQaTts('continuous_embd')}><ButtonText>QA TTS continuous</ButtonText></Button>
+                        <Button size="xs" action="secondary" testID="chat-qa-run-tts-playback"
+                            disabled={isAnyNativeQaBusy || ttsQaEvidence.requiresForceStop}
+                            onPress={() => void runAndroidQaTtsPlayback()}><ButtonText>QA TTS playback</ButtonText></Button>
                         <Button size="xs" action="secondary" testID="chat-qa-continue-tts-clip"
                             disabled={ttsQaEvidence.status !== 'running' || ttsQaEvidence.phase !== 'awaiting_clip_copy'}
                             onPress={continueAndroidQaTts}><ButtonText>QA continue clip copy</ButtonText></Button>
+                        <Button size="xs" action="secondary" testID="chat-qa-continue-tts-playback"
+                            disabled={ttsQaEvidence.status !== 'running' || ttsQaEvidence.phase !== 'awaiting_public_controls'}
+                            onPress={continueAndroidQaTts}><ButtonText>QA finish playback controls</ButtonText></Button>
                         <View accessible collapsable={false} testID="chat-qa-tts-evidence"
                             accessibilityLabel={JSON.stringify(ttsQaEvidence)} style={styles.androidQaEvidenceMarker} />
-                        {ttsQaEvidence.status === 'native_passed' && ttsQaEvidence.flow ? (
+                        {(ttsQaEvidence.status === 'native_passed' || ttsQaEvidence.phase === 'awaiting_public_controls') && ttsQaEvidence.flow ? (
                             <Button size="xs" action="secondary" testID="chat-qa-open-tts-preview"
-                                disabled={isAnyNativeQaBusy || ttsQaEvidence.requiresForceStop}
+                                disabled={(isAnyNativeQaBusy && ttsQaEvidence.phase !== 'awaiting_public_controls') || ttsQaEvidence.requiresForceStop}
                                 onPress={() => onOpenTtsPreview(ttsQaEvidence.flow!)}>
                                 <ButtonText>QA ordinary speech preview</ButtonText>
                             </Button>
@@ -1238,7 +1244,20 @@ const ChatScreenContent = () => {
                 ...(message && threadId ? { source: { threadId, messageId: message.id }, originalContent: message.content } : {}) });
         }, onSpeechCleanupFailure);
     }, [cancelSpeech, isGenerationBusy, onSpeechCleanupFailure]);
-    const openQaSpeechPreview = useCallback((flow: TtsFlow) => openSpeechPreview(undefined, flow), [openSpeechPreview]);
+    const openQaSpeechPreview = useCallback((flow: TtsFlow) => {
+        const evidence = getAndroidQaTtsEvidence();
+        if (isAndroidQaGenerationEvidenceEnabled() && evidence.status === 'running'
+            && evidence.mode === 'playback_start' && evidence.phase === 'awaiting_public_controls' && flow === 'tokens') {
+            if (!speechFocused.current || speechCleanupFailed.current || !ttsService.getState().clipAvailable) return;
+            // This QA-only action renders the clip already synthesized once. Ordinary openings clear their owner.
+            const text = ttsQaFixtures.fixtures.find(fixture => fixture.flow === flow)?.acceptanceTexts[1]?.text;
+            if (!text) return;
+            setSpeechUiError(undefined);
+            setSpeechPreview({ id: ++speechVersion.current, text });
+            return;
+        }
+        openSpeechPreview(undefined, flow);
+    }, [openSpeechPreview]);
     const closeSpeechPreview = useCallback(() => {
         ++speechVersion.current;
         setSpeechPreview(null);

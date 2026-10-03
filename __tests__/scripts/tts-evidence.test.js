@@ -2,7 +2,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { sanitizeTtsEvidence, validateTtsEvidence, validateTtsWav } = require('../../scripts/lib/tts-evidence');
+const { sanitizeTtsEvidence, validateTtsEvidence, validateTtsWav, validateTtsPlaybackEvidence } = require('../../scripts/lib/tts-evidence');
 const fixtures = require('../../docs/validation/llama-rn-stage6/tts-fixtures.json');
 const patchSha256 = crypto.createHash('sha256').update(fs.readFileSync(
   path.resolve(__dirname, '../../patches/llama-rn-0.13.0-rc.3.js'), 'utf8').replace(/\r\n/gu, '\n')).digest('hex');
@@ -34,6 +34,39 @@ function wav(step = clip()) {
   bytes.writeUInt32LE(step.sampleCount * 2, 40);
   return bytes;
 }
+
+function playbackEvidence() {
+  const source = evidence();
+  const first = source.steps[0];
+  return { native: { ...source, mode: 'playback_start', synthesisCount: 1, steps: [
+    { ...first, playback: undefined },
+    { id: 'background_cleanup', status: 'passed', playback: 'passed', fileRemoved: true, profileRestored: true, chatUnchanged: true },
+    ...source.steps.slice(-2),
+  ] }, publicControls: { status: 'passed', playback: 'passed', pause: 'passed', stop: 'passed', replay: 'passed',
+    sampleRate: first.sampleRate, sampleCount: first.sampleCount, contentVerification: 'not_run',
+    observedPausedPositions: [{ position: 0.003 }, { position: 0.01 }, { position: 0.006 }] },
+  sameClip: { before: 'a'.repeat(64), after: 'a'.repeat(64) },
+  background: { playingObserved: true, clipRemoved: true, previewClosed: true, noAutoplay: true } };
+}
+
+it('accepts one synthesis joined to same-WAV controls, native background admission, cleanup and restored chat', () => {
+  const value = playbackEvidence();
+  value.native = sanitizeTtsEvidence(value.native);
+  expect(validateTtsPlaybackEvidence(value)).toBe(value);
+});
+
+it.each([
+  value => { value.native.synthesisCount = 2; },
+  value => { value.sameClip.after = 'b'.repeat(64); },
+  value => { value.native.steps[1].playback = undefined; },
+  value => { value.native.steps[2].profileRestored = false; },
+  value => { value.publicControls.observedPausedPositions = []; },
+  value => { value.background.noAutoplay = false; },
+  value => { value.native.status = 'running'; },
+])('rejects incomplete or contradicted single-clip playback evidence %#', mutate => {
+  const value = playbackEvidence(); mutate(value);
+  expect(() => validateTtsPlaybackEvidence(value)).toThrow('Incomplete single-clip TTS playback acceptance.');
+});
 
 it('exports only bounded known receipts and never raw text, paths, errors, audio or schema objects', () => {
   const privateText = 'secret_password';

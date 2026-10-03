@@ -124,7 +124,8 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
   const fatalCleanup = cleanupFailed.current || ['release_failed', 'restore_failed', 'storage_failed'].includes(state.errorCode ?? '');
   const blocked = pending || clearing || fatalCleanup;
   const error = localError ?? inputError ?? selection.errorCode ?? state.errorCode;
-  const audioReady = Boolean(state.sampleCount) && ['ready', 'playing', 'paused', 'stopped'].includes(state.phase ?? '');
+  const audioReady = !fatalCleanup && Boolean(state.sampleCount)
+    && (state.clipAvailable || ['ready', 'playing', 'paused', 'stopped'].includes(state.phase ?? ''));
   const invoke = async (action: () => Promise<void>, fallback: TtsErrorCode = 'native_failed') => {
     if (busy.current || clearDrain.current || cleanupFailed.current) return;
     busy.current = true;

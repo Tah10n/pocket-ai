@@ -1393,6 +1393,7 @@
       "releasing": "Releasing speech resources…",
       "restoring": "Restoring chat model…",
       "ready": "Audio ready",
+      "starting": "Starting audio…",
       "playing": "Playing",
       "paused": "Paused",
       "stopping": "Stopping and waiting for cleanup…",
@@ -1421,6 +1422,9 @@
       "release_failed": "Speech resources could not be safely released. Further work is blocked.",
       "restore_failed": "The chat model could not be restored. Further work is blocked.",
       "storage_failed": "Temporary audio cleanup failed. Further speech is blocked.",
+      "audio_focus_failed": "Audio focus was denied. Tap Play to retry the saved clip.",
+      "audio_focus_delayed": "Audio focus is delayed. Waiting was cancelled; tap Play when audio is available.",
+      "playback_start_timeout": "Playback did not start. Tap Play to retry the saved clip.",
       "playback_failed": "The audio player failed.",
       "unsafe_content": "This input contains internal protocol or private file paths and cannot be spoken."
     }

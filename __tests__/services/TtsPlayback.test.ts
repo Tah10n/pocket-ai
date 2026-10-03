@@ -45,7 +45,7 @@ jest.mock('expo-file-system', () => {
 });
 
 const initialStatus: AudioStatus = {
-  id: 'player', currentTime: 0, duration: 1, playbackState: 'ready', timeControlStatus: 'paused',
+  playbackRequestId: 0, id: 'player', currentTime: 0, duration: 1, playbackState: 'ready', timeControlStatus: 'paused',
   reasonForWaitingToPlay: '', mute: false, playing: false, loop: false, didJustFinish: false,
   isBuffering: false, isLoaded: true, playbackRate: 1, shouldCorrectPitch: false,
 };
@@ -55,6 +55,7 @@ interface MockPlayer {
   playing: boolean;
   currentStatus: AudioStatus;
   play: jest.Mock<void, []>;
+  playAsync: jest.Mock<Promise<void>, [number]>;
   pause: jest.Mock<void, []>;
   seekTo: jest.Mock<Promise<void>, [number]>;
   remove: jest.Mock;
@@ -69,6 +70,10 @@ function makePlayer(loaded = true): MockPlayer {
   const player: MockPlayer = {
     preventAutomaticResume: false,
     isLoaded: loaded, playing: false, currentStatus: { ...initialStatus, isLoaded: loaded },
+    playAsync: jest.fn(async (requestId: number) => {
+      player.currentStatus = { ...player.currentStatus, playbackRequestId: requestId };
+      player.play();
+    }),
     play: jest.fn(() => {
       player.playing = true;
       player.emit({ playing: true, timeControlStatus: 'playing' });
@@ -195,7 +200,7 @@ describe('TtsPlaybackController', () => {
     });
     const play = command === 'replay' ? controller.replay() : controller.play();
     await flush(); expect(pausedSeekSnapshot).toBeDefined();
-    seek.resolve(); await play;
+    seek.resolve(); await flush();
     expect(player.playing).toBe(true);
     const playCalls = player.play.mock.calls.length;
     deliverNative(pausedSeekSnapshot!); await flush();
@@ -203,6 +208,7 @@ describe('TtsPlaybackController', () => {
     expect(player.release).not.toHaveBeenCalled();
     expect(player.play).toHaveBeenCalledTimes(playCalls);
     deliverNative({ ...player.currentStatus, currentTime: 0.2 });
+    await play;
     expect(controller.getState()).toMatchObject({ phase: 'playing', position: 0.2 });
     player.playing = false;
     player.currentStatus = { ...player.currentStatus, playing: false, timeControlStatus: 'paused' };

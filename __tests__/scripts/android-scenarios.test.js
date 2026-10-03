@@ -629,6 +629,11 @@ describe('android-scenarios smoke bootstrap args', () => {
     const nativeEnv = {};
     configureScenarioBuildEnvironment({ pack: 'native', apkVariant: 'release', isolatedQaInstall: true }, true, nativeEnv);
     expect(nativeEnv.POCKET_AI_QA_PRIVATE_FILE_ACCESS).toBeUndefined();
+    const playbackEnv = {};
+    configureScenarioBuildEnvironment({ scenario: 'runtime-local-tts-playback', apkVariant: 'release', isolatedQaInstall: true }, true, playbackEnv);
+    expect(playbackEnv).toMatchObject({ POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1', EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1' });
+    expect(() => configureScenarioBuildEnvironment({ scenario: 'runtime-local-tts-playback', apkVariant: 'release' }, true, {}))
+      .toThrow(ScenarioPreconditionFailureError);
   });
   it('configures release and the QA seam before current-head launch, and rejects debug', () => {
     const releaseEnv = {};
@@ -4661,6 +4666,7 @@ describe('android-scenarios pack selection', () => {
         'runtime-document-index-publication',
         'runtime-local-tts-tokens',
         'runtime-local-tts-continuous',
+        'runtime-local-tts-playback',
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));

@@ -3,7 +3,7 @@ import type { File } from 'expo-file-system';
 import { TTS_LIMITS, TtsError, type TtsErrorCode } from '../types/tts';
 
 export interface TtsPlaybackState {
-  readonly phase: 'ready' | 'playing' | 'paused' | 'stopped' | 'error';
+  readonly phase: 'ready' | 'starting' | 'playing' | 'paused' | 'stopped' | 'error';
   readonly position: number;
   readonly duration: number;
   readonly errorCode?: TtsErrorCode;
@@ -16,10 +16,12 @@ type OwnedPlayer = {
   disposed: boolean;
   released: boolean;
   observedPlaying: boolean;
+  requestId: number;
   disposing: boolean;
 };
 
 const LOAD_TIMEOUT_MS = 15_000;
+export const TTS_PLAYBACK_START_TIMEOUT_MS = 3_000;
 const CLIP_NAME = 'clip.wav';
 let activeController: TtsPlaybackController | null = null;
 let coldCleanupActive = false;
@@ -92,6 +94,8 @@ export class TtsPlaybackController {
   private isClipCurrent: (() => boolean) | null = null;
   private cancelLoad: (() => void) | null = null;
   private installingClip = false;
+  private pendingStart: { owned: OwnedPlayer; generation: number; accepted: boolean;
+    finish(error?: TtsError): void } | null = null;
 
   private cancelLoading(): void { this.cancelLoad?.(); }
 
@@ -110,6 +114,7 @@ export class TtsPlaybackController {
     this.generation += 1;
     this.desiredPlaying = false;
     this.cancelLoading();
+    this.pendingStart?.finish();
     return this.generation;
   }
   private current(generation: number): boolean {
@@ -206,7 +211,7 @@ export class TtsPlaybackController {
     if (!this.current(generation)) return null;
     const player = audio.createAudioPlayer(this.file, { updateInterval: 200, downloadFirst: false, keepAudioSessionActive: false });
     const owned: OwnedPlayer = { player, subscription: null, paused: false, disposed: false, released: false,
-      observedPlaying: false, disposing: false };
+      observedPlaying: false, requestId: 0, disposing: false };
     this.owned = owned;
     player.preventAutomaticResume = true;
     if (!player.preventAutomaticResume) throw new TtsError('playback_failed');
@@ -225,8 +230,11 @@ export class TtsPlaybackController {
     });
     owned.subscription = player.addListener('playbackStatusUpdate', status => {
       if (this.owned !== owned || owned.disposing || owned.disposed || owned.released) return;
+      // Apply request identity to failures as well as playing/seek snapshots.
+      if (status.playbackRequestId !== owned.requestId) return;
       if (status.playbackState === 'failed' || status.playbackState === 'error') {
         settlement.finish?.(new TtsError('playback_failed'));
+        if (this.pendingStart?.owned === owned) this.pendingStart.finish(new TtsError('playback_failed'));
         this.interrupted(owned, 'playback_failed');
         return;
       }
@@ -240,6 +248,9 @@ export class TtsPlaybackController {
   }
 
   private onStatus(owned: OwnedPlayer, status: AudioStatus): void {
+    // Native snapshots carry the request that captured them. A prior pause/seek
+    // or Play cannot confirm or interrupt the latest admission.
+    if (status.playbackRequestId !== owned.requestId) return;
     const position = Number.isFinite(status.currentTime) ? Math.max(0, Math.min(status.currentTime, this.state.duration)) : this.state.position;
     if (status.mediaServicesDidReset || !this.current(this.generation)
       || (status.playing && !this.desiredPlaying)
@@ -254,6 +265,7 @@ export class TtsPlaybackController {
     } else if (status.playing) {
       owned.observedPlaying = true;
       this.publish({ phase: 'playing', position, duration: this.state.duration });
+      if (this.pendingStart?.owned === owned && this.pendingStart.accepted) this.pendingStart.finish();
     } else if (this.state.phase === 'paused') this.publish({ ...this.state, position });
   }
   private interrupted(owned: OwnedPlayer, errorCode?: TtsErrorCode, position = this.state.position): void {
@@ -289,18 +301,49 @@ export class TtsPlaybackController {
         if (!player || !this.current(generation)) return;
         await player.seekTo(position);
         if (!this.current(generation)) return;
+        const owned = this.owned;
+        if (!owned) return;
         this.desiredPlaying = true;
-        if (this.owned) { this.owned.paused = false; this.owned.observedPlaying = false; }
-        player.play();
-        // Native getters are live, but status snapshots cross the JS queue.
-        // Only ordered events can arm interruption detection: a getter here
-        // can overtake an older paused/seek snapshot and stop a new Play.
+        owned.paused = false;
+        owned.observedPlaying = false;
+        owned.requestId = generation;
+        this.publish({ ...this.state, phase: 'starting', errorCode: undefined });
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => pending.finish(new TtsError('playback_start_timeout')), TTS_PLAYBACK_START_TIMEOUT_MS);
+          const pending = { owned, generation, accepted: false, finish: (error?: TtsError) => {
+            if (this.pendingStart !== pending) return;
+            this.pendingStart = null;
+            clearTimeout(timer);
+            if (error) reject(error); else resolve();
+          } };
+          this.pendingStart = pending;
+          // Admission is separate from an ordered native playing snapshot. Both
+          // may arrive while the service is still draining the initial start.
+          void player.playAsync(generation).then(() => {
+            if (this.pendingStart !== pending || !this.current(generation)) return;
+            pending.accepted = true;
+            if (owned.observedPlaying) pending.finish();
+          }, error => {
+            const code = (error as { code?: string })?.code;
+            pending.finish(new TtsError(code === 'ERR_TTS_AUDIO_FOCUS_FAILED' ? 'audio_focus_failed'
+              : code === 'ERR_TTS_AUDIO_FOCUS_DELAYED' ? 'audio_focus_delayed' : 'playback_failed'));
+          });
+        });
       } catch (error) {
         this.desiredPlaying = false;
+        this.pendingStart?.finish();
         try { await this.disposePlayer(); } catch (cleanup) { throw this.report(cleanup, generation); }
         throw this.report(error, generation);
       }
     });
+  }
+  /** Break a pending start before the service waits for its operation drain. */
+  cancelStart(): void {
+    this.invalidate();
+    if (this.owned) {
+      try { this.owned.player.pause(); this.owned.paused = true; }
+      catch { /* Confirmed queued disposal still owns any failure. */ }
+    }
   }
   play(): Promise<void> { return this.start(false); }
   replay(): Promise<void> { return this.start(true); }

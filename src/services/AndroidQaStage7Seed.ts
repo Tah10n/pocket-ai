@@ -6,6 +6,7 @@ import { LifecycleStatus, type ModelMetadata } from '../types/models';
 import { validateGgufFileHeader } from '../utils/ggufValidation';
 import { bindManagedCompanion } from '../utils/modelArtifacts';
 import { getModelFileIdentity } from '../utils/modelRoles';
+import { resolveHuggingFaceResolveIdentity } from '../utils/huggingFaceUrls';
 import { fileUriToNativePath, safeJoinModelPath } from '../utils/safeFilePath';
 import { isAndroidQaDocumentModelBootstrapEnabled } from './AndroidQaDocumentModelBootstrap';
 import { getAppCacheRootDir, getModelsDir } from './FileSystemSetup';
@@ -21,6 +22,11 @@ export type AndroidQaStage7SeedKind = 'ultravox' | 'neutts' | 'qwen3';
 function check(value: unknown): asserts value { if (!value) throw new Error('stage7_seed_invalid'); }
 const url = (source: TtsSourceIdentity) =>
   `https://huggingface.co/${source.repository}/resolve/${source.revision}/${source.filename}?download=true`;
+function matchesPinnedSourceUrl(value: string | undefined, source: TtsSourceIdentity): boolean {
+  const identity = resolveHuggingFaceResolveIdentity(value);
+  return identity?.repoId === source.repository && identity.revision === source.revision
+    && identity.filePath === source.filename;
+}
 
 function selectedPair(kind: AndroidQaStage7SeedKind) {
   if (kind === 'ultravox') {
@@ -63,19 +69,19 @@ export async function prepareAndroidQaStage7Seed(
   check(!current || getModelFileIdentity(current) === getModelFileIdentity(expected));
   const base = { ...desired, ...current };
   check(pair.projector || !base.artifacts?.some(item => item.kind === 'tts_codec' && item.selected
-    && (item.sha256 !== pair.companion.sha256 || item.downloadUrl !== url(pair.companion))));
+    && (item.sha256 !== pair.companion.sha256 || !matchesPinnedSourceUrl(item.downloadUrl, pair.companion))));
   const bound = pair.projector ? base : bindManagedCompanion(base, {
     kind: 'tts_codec', downloadUrl: url(pair.companion), sizeBytes: pair.companion.bytes, sha256: pair.companion.sha256 });
   const companion = bound.artifacts?.find(item => item.kind === (pair.projector ? 'multimodal_projector' : 'tts_codec')
     && item.sha256 === pair.companion.sha256 && item.remoteFileName === pair.companion.filename
-    && item.hfRevision === pair.companion.revision && item.downloadUrl === url(pair.companion)
+    && item.hfRevision === pair.companion.revision && matchesPinnedSourceUrl(item.downloadUrl, pair.companion)
     && item.sizeBytes === pair.companion.bytes && (!pair.projector || item.id === bound.selectedProjectorId));
   check(companion);
   if (pair.projector) {
     const projector = bound.projectorCandidates?.find(item => item.id === companion.id);
     check(projector && projector.ownerModelId === pair.id && projector.fileName === pair.companion.filename
       && projector.hfRevision === pair.companion.revision && projector.sha256 === pair.companion.sha256
-      && projector.size === pair.companion.bytes && projector.downloadUrl === url(pair.companion));
+      && projector.size === pair.companion.bytes && matchesPinnedSourceUrl(projector.downloadUrl, pair.companion));
   }
   const sources = [pair.backbone, pair.companion];
   const seeds = sources.map(source => `${cache}stage7-model-fixtures/${source.sha256}.gguf`);
@@ -91,7 +97,7 @@ export async function prepareAndroidQaStage7Seed(
     check(!options?.companionArtifactId || options.companionArtifactId === companion.id);
     const queuedCompanion = queued.artifacts?.find(item => item.id === companion.id);
     check(!queuedCompanion || (queuedCompanion.sha256 === pair.companion.sha256
-      && queuedCompanion.downloadUrl === url(pair.companion) && queuedCompanion.sizeBytes === pair.companion.bytes));
+      && matchesPinnedSourceUrl(queuedCompanion.downloadUrl, pair.companion) && queuedCompanion.sizeBytes === pair.companion.bytes));
     await getModelDownloadManager().cancelDownload(pair.id, { waitForDrain: true });
     check(!useDownloadStore.getState().queue.some(item => item.id === pair.id));
   }

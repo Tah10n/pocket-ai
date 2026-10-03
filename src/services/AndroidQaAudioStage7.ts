@@ -21,6 +21,7 @@ import { selectAuxiliaryModel } from './AuxiliaryModelService';
 import { getAppCacheRootDir } from './FileSystemSetup';
 import { llmEngineService } from './LLMEngineService';
 import { registry } from './LocalStorageRegistry';
+import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { getModelDownloadManager } from './ModelDownloadManager';
 import { getSettings, updateSettings } from './SettingsStore';
 import { referenceVoiceStore } from './ReferenceVoiceStore';
@@ -192,7 +193,7 @@ export async function prepareAndroidQaStage7AudioModel(): Promise<ModelMetadata>
   const source = audioFixture.audioInput;
   const url = (file: string) => `https://huggingface.co/${source.repository}/resolve/${source.revision}/${file}?download=true`;
   const projectorId = 'android-qa-stage7-ultravox-projector';
-  const desired: ModelMetadata = { id: ANDROID_QA_STAGE7_AUDIO_MODEL_ID, name: 'Android QA Ultravox 1B',
+  const desired = normalizePersistedModelMetadata({ id: ANDROID_QA_STAGE7_AUDIO_MODEL_ID, name: 'Android QA Ultravox 1B',
     author: 'ggml-org / fixie-ai', size: source.backbone.bytes, sha256: source.backbone.sha256,
     downloadUrl: url(source.backbone.filename), resolvedFileName: source.backbone.filename, hfRevision: source.revision,
     lifecycleStatus: LifecycleStatus.AVAILABLE, fitsInRam: null, downloadProgress: 0, metadataTrust: 'trusted_remote',
@@ -205,14 +206,18 @@ export async function prepareAndroidQaStage7AudioModel(): Promise<ModelMetadata>
       lifecycleStatus: 'available', matchStatus: 'matched' }],
     artifacts: [{ id: projectorId, kind: 'multimodal_projector', requiredFor: ['audio'],
       hfRevision: source.revision, remoteFileName: source.projector.filename, downloadUrl: url(source.projector.filename),
-      sizeBytes: source.projector.bytes, sha256: source.projector.sha256, installState: 'remote' }] };
+      sizeBytes: source.projector.bytes, sha256: source.projector.sha256, installState: 'remote' }] });
+  const desiredProjector = desired.artifacts?.find(item => item.id === desired.selectedProjectorId);
+  check(desiredProjector, 'audio_fixture_identity_conflict');
   const ready = () => {
     const model = registry.getModel(desired.id);
-    const artifact = model?.artifacts?.find(item => item.id === projectorId);
+    const artifact = model?.artifacts?.find(item => item.id === desiredProjector.id);
     return model?.localPath && getModelFileIdentity(model) === getModelFileIdentity(desired)
       && model.downloadIntegrity?.kind === 'sha256' && model.downloadIntegrity.sha256 === source.backbone.sha256
       && model.downloadIntegrity.sizeBytes === source.backbone.bytes
-      && artifact?.localPath && artifact.installState === 'installed' && artifact.integrity?.kind === 'sha256'
+      && model.selectedProjectorId === desiredProjector.id
+      && artifact?.localPath && getCompanionSourceIdentity(artifact) === getCompanionSourceIdentity(desiredProjector)
+      && artifact.installState === 'installed' && artifact.integrity?.kind === 'sha256'
       && artifact.integrity.sha256 === source.projector.sha256 && artifact.integrity.sizeBytes === source.projector.bytes ? model : undefined;
   };
   const existing = ready(); if (existing) return existing;

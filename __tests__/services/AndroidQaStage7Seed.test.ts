@@ -2,6 +2,7 @@ import { prepareAndroidQaStage7Seed } from '../../src/services/AndroidQaStage7Se
 import manifest from '../../docs/validation/llama-rn-stage7/audio-input-fixtures.json';
 import { TTS_EXECUTION_PROFILES } from '../../src/services/TtsExecutionProfiles';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 
 type File = { size: number; hash: string; header: string; isDirectory?: boolean };
 const mockFiles = new Map<string, File>();
@@ -110,6 +111,41 @@ test.each(['ultravox', 'neutts', 'qwen3'] as const)('verifies the fixed %s pair 
   expect(mockRegistryWrite).toHaveBeenCalledTimes(1); expect(mockRegistryWrite).toHaveBeenCalledWith(result);
   expect(mockDownloadLease).toBe(false); expect(mockResourceLease).toBe(false);
 });
+
+test('admits the actual registry-normalized projector source while preserving native verification and file leases', async () => {
+  seed();
+  const raw = desired();
+  mockCurrent = normalizePersistedModelMetadata(raw);
+  const projector = mockCurrent.artifacts?.find(item => item.id === mockCurrent?.selectedProjectorId)!;
+  const candidate = mockCurrent.projectorCandidates?.find(item => item.id === projector.id)!;
+  expect(mockCurrent.selectedProjectorId).not.toBe(raw.selectedProjectorId);
+  expect(projector.downloadUrl).not.toBe(raw.artifacts?.[0].downloadUrl);
+  expect(candidate.downloadUrl).not.toBe(raw.projectorCandidates?.[0].downloadUrl);
+  expect(projector.downloadUrl).not.toContain('?download=true');
+  const result = await prepareAndroidQaStage7Seed('ultravox', raw);
+  expect(result?.selectedProjectorId).toBe(mockCurrent.selectedProjectorId);
+  expect(mockHash).toHaveBeenCalledTimes(4);
+  expect(mockRegistryWrite).toHaveBeenCalledTimes(1);
+  expect(mockRegistryWrite).toHaveBeenCalledWith(result);
+  expect(mockDownloadLease).toBe(false); expect(mockResourceLease).toBe(false);
+});
+
+test.each(['repository', 'url_revision', 'url_filename', 'revision', 'filename', 'sha256', 'size'] as const)(
+  'does not reinterpret a normalized projector with a changed %s as the pinned fixture', async field => {
+    seed(); mockCurrent = normalizePersistedModelMetadata(desired());
+    const projector = mockCurrent.artifacts?.find(item => item.id === mockCurrent?.selectedProjectorId)!;
+    if (field === 'repository') projector.downloadUrl = projector.downloadUrl.replace('ggml-org/', 'other-owner/');
+    if (field === 'url_revision') projector.downloadUrl = projector.downloadUrl.replace(manifest.audioInput.revision, 'other-revision');
+    if (field === 'url_filename') projector.downloadUrl = projector.downloadUrl.replace(manifest.audioInput.projector.filename, 'other.gguf');
+    if (field === 'revision') projector.hfRevision = 'other-revision';
+    if (field === 'filename') projector.remoteFileName = 'other.gguf';
+    if (field === 'sha256') projector.sha256 = 'b'.repeat(64);
+    if (field === 'size') projector.sizeBytes = (projector.sizeBytes ?? 0) + 1;
+    await expect(prepareAndroidQaStage7Seed('ultravox', desired())).rejects.toThrow();
+    expect(mockMove).not.toHaveBeenCalled(); expect(mockHash).not.toHaveBeenCalled();
+    expect(mockRegistryWrite).not.toHaveBeenCalled(); expect(mockCancel).not.toHaveBeenCalled();
+  },
+);
 
 test('disabled flags or ordinary package never access staged files', async () => {
   mockEnabled = false; expect(await prepareAndroidQaStage7Seed('ultravox', desired())).toBeNull();

@@ -8,6 +8,7 @@ import type { TtsRequest } from '../../src/services/TtsService';
 import { LifecycleStatus, type ModelMetadata } from '../../src/types/models';
 import { AudioPreparationError } from '../../src/services/AudioPreparationService';
 import { sanitizeAudioStage7Evidence } from '../../scripts/lib/audio-stage7-evidence';
+import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 
 const mockStartRecording = jest.fn(); const mockStopRecording = jest.fn(); const mockClearRecording = jest.fn();
 const mockPrep = jest.fn(); const mockDiscard = jest.fn(); const mockPreviewPlay = jest.fn(); const mockPreviewStop = jest.fn();
@@ -27,6 +28,7 @@ const mockBase = { id: 'base', artifacts: [{ id: 'lora', kind: 'lora_adapter',
   sha256: require('../../docs/validation/llama-rn-stage3/lora-fixture.json').adapter.sha256,
   installState: 'installed', localPath: 'lora.gguf', sizeBytes: 10 }] };
 let mockAudioModel: Record<string, unknown>;
+let fixtureDesired: ModelMetadata;
 
 jest.mock('expo-file-system/legacy', () => ({ copyAsync: (...args: unknown[]) => mockCopy(...args),
   getInfoAsync: (...args: unknown[]) => mockFileInfo(...args) }));
@@ -50,9 +52,10 @@ jest.mock('../../src/services/FileSystemSetup', () => ({ getAppCacheRootDir: () 
 jest.mock('../../src/services/LocalStorageRegistry', () => ({ registry: { getModel: (id: string) => id === 'base' ? mockBase : mockAudioModel,
   updateModel: (...args: unknown[]) => mockRegistryUpdate(...args) } }));
 jest.mock('../../src/services/ModelDownloadManager', () => ({ getModelDownloadManager: () => mockDownloadManager() }));
-jest.mock('../../src/utils/modelArtifacts', () => ({ getCompanionBindingIdentity: () => 'base-identity',
-  getCompanionSourceIdentity: () => 'lora-identity' }));
-jest.mock('../../src/utils/modelRoles', () => ({ getModelFileIdentity: (model: { sha256: string }) => model.sha256 }));
+jest.mock('../../src/utils/modelArtifacts', () => ({ ...jest.requireActual('../../src/utils/modelArtifacts'),
+  getCompanionBindingIdentity: () => 'base-identity' }));
+jest.mock('../../src/utils/modelRoles', () => ({ ...jest.requireActual('../../src/utils/modelRoles'),
+  getModelFileIdentity: (model: { sha256: string }) => model.sha256 }));
 jest.mock('../../src/services/SettingsStore', () => ({ getSettings: () => ({ activeModelId: 'base', auxiliaryModels: {} }), updateSettings: jest.fn() }));
 jest.mock('../../src/services/AuxiliaryModelService', () => ({ selectAuxiliaryModel: jest.fn() }));
 jest.mock('../../src/store/downloadStore', () => ({ useDownloadStore: { getState: () => ({ queue: [], addToQueue: mockQueue }) } }));
@@ -77,6 +80,13 @@ async function until(phase: string) {
   for (let i = 0; i < 20; i++) { await flush(); if (getAndroidQaAudioStage7Evidence().phase === phase) return; await jest.advanceTimersByTimeAsync(400); }
   throw new Error(`Expected ${phase}, saw ${getAndroidQaAudioStage7Evidence().phase}`);
 }
+beforeAll(async () => {
+  mockAudioModel = {};
+  mockSeed.mockImplementationOnce(async (_kind: string, desired: ModelMetadata) => {
+    fixtureDesired = desired; return desired;
+  });
+  await prepareAndroidQaStage7AudioModel();
+});
 beforeEach(() => {
   jest.useFakeTimers(); jest.clearAllMocks(); mockEnabled = true; mockCache = 'file:///data/user/0/app.qa/cache/';
   mockRecorderState = { phase: 'idle' }; mockTtsState = { phase: null }; mockVoices = { voices: [], selectedVoiceId: null };
@@ -117,23 +127,22 @@ beforeEach(() => {
     mockVoices.voices = [voice]; return voice;
   });
   mockDelete.mockImplementation(async () => { mockVoices = { voices: [], selectedVoiceId: null }; });
-  const source = fixture.audioInput;
-  mockAudioModel = { id: 'pocket-ai/android-qa-ultravox-1b', sha256: source.backbone.sha256, localPath: 'audio.gguf',
-    downloadIntegrity: { kind: 'sha256', sha256: source.backbone.sha256, sizeBytes: source.backbone.bytes },
-    artifacts: [{ id: 'android-qa-stage7-ultravox-projector', localPath: 'projector.gguf', installState: 'installed',
-      integrity: { kind: 'sha256', sha256: source.projector.sha256, sizeBytes: source.projector.bytes } }],
-    multimodalReadiness: { status: 'ready', support: ['audio'] } };
+  mockAudioModel = installedAudioModel(fixtureDesired) as unknown as Record<string, unknown>;
 });
 afterEach(() => jest.useRealTimers());
 
 function installedAudioModel(model: ModelMetadata): ModelMetadata {
   const source = fixture.audioInput;
-  return { ...model, localPath: 'verified-audio.gguf', lifecycleStatus: LifecycleStatus.DOWNLOADED,
+  return normalizePersistedModelMetadata({ ...model, localPath: 'verified-audio.gguf', lifecycleStatus: LifecycleStatus.DOWNLOADED,
     metadataTrust: 'verified_local', downloadIntegrity: { kind: 'sha256', sha256: source.backbone.sha256,
       sizeBytes: source.backbone.bytes, checkedAt: 1 },
     artifacts: model.artifacts?.map(artifact => ({ ...artifact, localPath: 'verified-projector.gguf',
       installState: 'installed', integrity: { kind: 'sha256', sha256: source.projector.sha256,
-        sizeBytes: source.projector.bytes, checkedAt: 1 } })) };
+        sizeBytes: source.projector.bytes, checkedAt: 1 } })),
+    projectorCandidates: model.projectorCandidates?.map(candidate => ({ ...candidate,
+      localPath: 'verified-projector.gguf', lifecycleStatus: 'downloaded' })),
+    multimodalReadiness: { modelId: model.id, status: 'ready', projectorId: model.selectedProjectorId,
+      support: ['audio'], checkedAt: 1 } });
 }
 
 describe('audio fixture seed consumer', () => {
@@ -147,7 +156,7 @@ describe('audio fixture seed consumer', () => {
     expect(actual).toBe(verified);
     expect(mockSeed).toHaveBeenCalledWith('ultravox', expect.objectContaining({
       id: 'pocket-ai/android-qa-ultravox-1b', sha256: fixture.audioInput.backbone.sha256,
-      selectedProjectorId: 'android-qa-stage7-ultravox-projector' }));
+      selectedProjectorId: fixtureDesired.selectedProjectorId }));
     expect(mockRegistryUpdate).not.toHaveBeenCalled(); expect(mockQueue).not.toHaveBeenCalled();
     expect(mockDownloadManager).not.toHaveBeenCalled(); expect(mockCancelDownload).not.toHaveBeenCalled();
   });
@@ -177,6 +186,36 @@ describe('audio fixture seed consumer', () => {
     expect(mockSeed).not.toHaveBeenCalled(); expect(mockRegistryUpdate).not.toHaveBeenCalled();
     expect(mockQueue).not.toHaveBeenCalled();
   });
+
+  it('cold-reuses actual normalized canonical projector metadata without reseeding or enqueuing downloads', async () => {
+    const current = normalizePersistedModelMetadata(mockAudioModel as unknown as ModelMetadata);
+    mockAudioModel = current as unknown as Record<string, unknown>;
+    const selected = current.artifacts?.find(item => item.id === current.selectedProjectorId)!;
+    expect(current.selectedProjectorId).not.toBe('android-qa-stage7-ultravox-projector');
+    expect(selected.downloadUrl).not.toContain('?download=true');
+    await expect(prepareAndroidQaStage7AudioModel()).resolves.toBe(current);
+    expect(mockSeed).not.toHaveBeenCalled(); expect(mockRegistryUpdate).not.toHaveBeenCalled();
+    expect(mockQueue).not.toHaveBeenCalled(); expect(mockDownloadManager).not.toHaveBeenCalled();
+  });
+
+  it.each(['downloadUrl', 'hfRevision', 'remoteFileName', 'sha256', 'sizeBytes', 'selection'] as const)(
+    'does not cold-reuse or overwrite a conflicting selected projector (%s)', async field => {
+      const current = mockAudioModel as unknown as ModelMetadata;
+      const selected = current.artifacts?.find(item => item.id === current.selectedProjectorId)!;
+      if (field === 'downloadUrl') selected.downloadUrl = selected.downloadUrl.replace(fixture.audioInput.revision, 'changed-revision');
+      if (field === 'hfRevision') selected.hfRevision = 'changed-revision';
+      if (field === 'remoteFileName') selected.remoteFileName = 'changed.gguf';
+      if (field === 'sha256') selected.sha256 = 'b'.repeat(64);
+      if (field === 'sizeBytes') selected.sizeBytes = (selected.sizeBytes ?? 0) + 1;
+      if (field === 'selection') current.selectedProjectorId = 'other-projector';
+      const snapshot = JSON.stringify(current);
+      mockSeed.mockRejectedValueOnce(new Error('stage7_seed_invalid'));
+      await expect(prepareAndroidQaStage7AudioModel()).rejects.toThrow('stage7_seed_invalid');
+      expect(mockSeed).toHaveBeenCalledTimes(1);
+      expect(mockRegistryUpdate).not.toHaveBeenCalled(); expect(mockQueue).not.toHaveBeenCalled();
+      expect(JSON.stringify(current)).toBe(snapshot);
+    },
+  );
 });
 
 it('refuses fixture/native activity outside the flagged isolated package', async () => {

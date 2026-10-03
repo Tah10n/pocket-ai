@@ -11,11 +11,12 @@ import { TtsError, type TtsObservation, type TtsVoiceSelection } from '../types/
 import { getCompanionBindingIdentity, getCompanionSourceIdentity } from '../utils/modelArtifacts';
 import { getModelFileIdentity } from '../utils/modelRoles';
 import { audioRecordingService } from './AudioRecordingService';
-import { prepareManagedAudio, discardPreparedAudio, type PreparedAudio } from './AudioPreparationService';
+import { AudioPreparationError, prepareManagedAudio, discardPreparedAudio, type PreparedAudio } from './AudioPreparationService';
 import { audioSamplePreviewService } from './AudioSamplePreviewService';
 import { ANDROID_QA_DOCUMENT_MODEL_ID, isAndroidQaDocumentModelBootstrapEnabled } from './AndroidQaDocumentModelBootstrap';
 import { getAndroidQaEffectiveProfileIdentity, prepareAndroidQaStage3Adapter } from './AndroidQaStage3';
 import { prepareAndroidQaTtsProfile } from './AndroidQaTts';
+import { prepareAndroidQaStage7Seed } from './AndroidQaStage7Seed';
 import { selectAuxiliaryModel } from './AuxiliaryModelService';
 import { getAppCacheRootDir } from './FileSystemSetup';
 import { llmEngineService } from './LLMEngineService';
@@ -96,13 +97,45 @@ async function playback(audio: PreparedAudio): Promise<void> {
   await delay(300);
   await audioSamplePreviewService.stop();
 }
+function safeFailureCode(error: unknown): string {
+  if (error instanceof AudioPreparationError) {
+    let fallback: string;
+    switch (error.code) {
+      case 'invalid_audio': fallback = 'audio_preparation_invalid_audio'; break;
+      case 'audio_limit': fallback = 'audio_preparation_limit'; break;
+      case 'cancelled': fallback = 'audio_preparation_cancelled'; break;
+      case 'preparation_failed': fallback = 'audio_preparation_failed'; break;
+      case 'cleanup_failed': fallback = 'audio_preparation_cleanup_failed'; break;
+      default: return 'qa_operation_failed';
+    }
+    switch (error.safeReason) {
+      case 'native_result': return 'audio_preparation_native_result';
+      case 'prepared_uri': return 'audio_preparation_prepared_uri';
+      case 'channels': return 'audio_preparation_channels';
+      case 'sample_rate': return 'audio_preparation_sample_rate';
+      case 'sample_count': return 'audio_preparation_sample_count';
+      case 'output_size': return 'audio_preparation_output_size';
+      case 'source_hash': return 'audio_preparation_source_hash';
+      case 'output_hash': return 'audio_preparation_output_hash';
+      case 'native_input': return 'audio_preparation_native_input';
+      case 'native_admission': return 'audio_preparation_native_admission';
+      case 'native_sniff': return 'audio_preparation_native_sniff';
+      case 'native_output': return 'audio_preparation_native_output';
+      case 'native_decode': return 'audio_preparation_native_decode';
+      case 'native_identity': return 'audio_preparation_native_identity';
+      case 'native_delivery': return 'audio_preparation_native_delivery';
+      default: return fallback;
+    }
+  }
+  return error instanceof QaAudioFailure || error instanceof TtsError ? error.code : 'qa_operation_failed';
+}
 function run(mode: Mode, action: () => Promise<void>): Promise<void> {
   if (!isAndroidQaAudioStage7Enabled()) return Promise.resolve();
   if (active) return active;
   evidence = initial(); publish({ mode, status: 'running', phase: 'prepare' });
   active = action().then(() => publish({ status: 'native_passed', phase: 'complete' }), error => {
-    publish({ status: 'failed', phase: 'complete', failureCode: error instanceof QaAudioFailure || error instanceof TtsError
-      ? error.code : 'qa_operation_failed', requiresForceStop: llmEngineService.hasAuxiliaryContextOperation()
+    publish({ status: 'failed', phase: 'complete', failureCode: safeFailureCode(error),
+      requiresForceStop: llmEngineService.hasAuxiliaryContextOperation()
         || llmEngineService.hasActiveCompletion() || llmEngineService.getState().diagnostics?.contextRecoveryStatus === 'failed' });
   }).finally(() => { active = null; });
   return active;
@@ -153,7 +186,7 @@ export function runAndroidQaStage7Recording(): Promise<void> {
 }
 
 export const ANDROID_QA_STAGE7_AUDIO_MODEL_ID = 'pocket-ai/android-qa-ultravox-1b';
-/** One exact backbone/projector through the existing verified download queue; no alternate loader. */
+/** One fixed backbone/projector, natively verified from host fixtures or the download queue. */
 export async function prepareAndroidQaStage7AudioModel(): Promise<ModelMetadata> {
   check(isAndroidQaAudioStage7Enabled(), 'isolated_package_required');
   const source = audioFixture.audioInput;
@@ -183,6 +216,8 @@ export async function prepareAndroidQaStage7AudioModel(): Promise<ModelMetadata>
       && artifact.integrity.sha256 === source.projector.sha256 && artifact.integrity.sizeBytes === source.projector.bytes ? model : undefined;
   };
   const existing = ready(); if (existing) return existing;
+  const seeded = await prepareAndroidQaStage7Seed('ultravox', desired);
+  if (seeded) return seeded;
   const manager = getModelDownloadManager();
   let owned = false;
   try {

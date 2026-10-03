@@ -16,6 +16,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -30,10 +31,15 @@ class PocketAudioPreparationModule : Module() {
       if (!busy.compareAndSet(false, true)) { promise.reject("ERR_AUDIO_BUSY", "preparation_busy", null); return@AsyncFunction }
       try {
         worker.execute {
-          try { promise.resolve(prepare(source, rate, seconds, bytes)) }
+          var phase = "native_input"
+          try {
+            val result = prepare(source, rate, seconds, bytes) { phase = it }
+            phase = "native_delivery"
+            promise.resolve(result)
+          }
           catch (_: Exception) {
             if (cleanupFailed.get()) promise.reject("ERR_AUDIO_CLEANUP", "cleanup_failed", null)
-            else promise.reject("ERR_AUDIO_PREPARATION", "invalid_or_oversized_audio", null)
+            else promise.reject("ERR_AUDIO_PREPARATION_" + phase.uppercase(Locale.ROOT), "preparation_failed", null)
           }
           finally { busy.set(false) }
         }
@@ -70,15 +76,17 @@ class PocketAudioPreparationModule : Module() {
     }
     return digest.digest().joinToString("") { "%02x".format(it) }
   }
-  private fun prepare(uri: String, rate: Int, seconds: Int, maxBytes: Int): Map<String, Any> {
+  private fun prepare(uri: String, rate: Int, seconds: Int, maxBytes: Int, phase: (String) -> Unit): Map<String, Any> {
     require(rate in 8000..48000 && seconds in 1..30 && maxBytes in 1..4 * 1024 * 1024)
     val source = managed(uri)
     require(source.isFile && source.length() in 1..maxBytes.toLong()) { "audio_limit" }
     val context = requireNotNull(appContext.reactContext)
+    phase("native_admission")
     val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
     val memory = ActivityManager.MemoryInfo(); manager.getMemoryInfo(memory)
     // OS codec buffers are not measured here. Reserve 64 MiB in addition to its low-memory threshold.
     require(!memory.lowMemory && memory.availMem - memory.threshold >= 64L * 1024 * 1024) { "memory_insufficient" }
+    phase("native_sniff")
     val originalHash = hash(source)
     val header = ByteArray(12)
     source.inputStream().use { require(it.read(header) == 12) { "invalid_audio" } }
@@ -86,12 +94,15 @@ class PocketAudioPreparationModule : Module() {
     val compressed = String(header, 4, 4) == "ftyp" || String(header, 0, 3) == "ID3"
       || (header[0].toInt() and 255 == 255 && header[1].toInt() and 224 == 224)
     require(wave || compressed) { "invalid_audio" }
+    phase("native_output")
     val root = File(context.cacheDir, "audio-preparation").canonicalFile
     require(root.isDirectory || root.mkdirs())
     val file = File(root, UUID.randomUUID().toString() + ".wav")
     var success = false
     try {
+      phase("native_decode")
       val count = if (wave) decodeWave(source, file, rate, seconds) else decodeCompressed(source, file, rate, seconds)
+      phase("native_identity")
       require(source.length() <= maxBytes && hash(source) == originalHash) { "source_changed" }
       require(file.length() == 44L + count * 2L)
       val result = mapOf("uri" to Uri.fromFile(file).toString(), "sourceSha256" to originalHash,

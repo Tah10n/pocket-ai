@@ -91,7 +91,7 @@ it('requests nothing on construction and publishes recording only after true nat
   expect(service.getState().phase).toBe('starting');
   startGate.resolve({ ...initial(), isRecording: true }); await work;
   expect(service.getState().phase).toBe('recording');
-  expect(mockRecorder.prepareAsync).toHaveBeenCalledWith(1, 30, AUDIO_RECORDING_LIMITS.chat.sourceBytes);
+  expect(mockRecorder.prepareAsync).toHaveBeenCalledWith(1, 29.5, AUDIO_RECORDING_LIMITS.chat.sourceBytes);
   expect(mockRecorder.preventAutomaticResume).toBe(true);
 });
 
@@ -173,7 +173,39 @@ it('dispose failure retains hardware ownership and blocks a new recording until 
 
 it('reference recording is independent of chat capability and receives the smaller native bound', async () => {
   await service.start({ ownerKey: 'reference-ui', purpose: 'reference' });
-  expect(mockRecorder.prepareAsync).toHaveBeenCalledWith(1, 8, AUDIO_RECORDING_LIMITS.reference.sourceBytes);
+  expect(mockRecorder.prepareAsync).toHaveBeenCalledWith(1, 7.5, AUDIO_RECORDING_LIMITS.reference.sourceBytes);
+});
+
+it.each(['chat', 'reference'] as const)('keeps delayed %s native finalization within its unchanged decoder duration limit', async purpose => {
+  const limits = AUDIO_RECORDING_LIMITS[purpose];
+  await service.start({ ownerKey: 'capture-limit', purpose }); writeContainer();
+  const finish = deferred<ReturnType<typeof finalized>>();
+  mockRecorder.finishAsync.mockReturnValueOnce(finish.promise);
+  mockRecorder.emit({ isFinished: true, recordingRequestId: 1 }); await flush();
+  expect(service.getState().phase).toBe('finalizing');
+  expect(mockRecorder.disposeAsync).not.toHaveBeenCalled();
+  expect(mockRecorder.prepareAsync).toHaveBeenCalledWith(1, limits.durationSeconds - 0.5, limits.sourceBytes);
+  // Native finalization observed 95ms beyond the scheduled deadline in emulator QA.
+  const durationMillis = (limits.durationSeconds - 0.5) * 1000 + 95;
+  finish.resolve({ ...finalized(), durationMillis }); await flush();
+  expect(service.getState()).toMatchObject({ phase: 'ready', recording: { durationMillis } });
+  expect(durationMillis).toBeLessThanOrEqual(limits.durationSeconds * 1000);
+  expect(mockRecorder.disposeAsync).toHaveBeenCalledTimes(1);
+  expect(mockReleaseLease).toHaveBeenCalledTimes(1);
+});
+
+it.each(['chat', 'reference'] as const)('accepts the exact %s duration boundary but rejects delay exceeding the reserve', async purpose => {
+  const limits = AUDIO_RECORDING_LIMITS[purpose];
+  await service.start({ ownerKey: 'capture-limit', purpose }); writeContainer();
+  mockRecorder.finishAsync.mockResolvedValueOnce({ ...finalized(), durationMillis: limits.durationSeconds * 1000 });
+  await expect(service.stop()).resolves.toMatchObject({ durationMillis: limits.durationSeconds * 1000 });
+  await service.cancelAndClear();
+
+  await service.start({ ownerKey: 'capture-limit-new', purpose }); writeContainer();
+  mockRecorder.finishAsync.mockResolvedValueOnce({ ...finalized(), recordingRequestId: 2, durationMillis: limits.durationSeconds * 1000 + 1 });
+  await expect(service.stop()).rejects.toMatchObject({ code: 'file_invalid' });
+  expect(service.getState()).toMatchObject({ phase: 'error', recording: undefined });
+  expect(mockFiles.has(sourceUri)).toBe(false);
 });
 
 it('private cancellation waits for real preprocessing drain before deleting its original source', async () => {

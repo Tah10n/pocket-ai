@@ -16,6 +16,10 @@ function harness(source, module) {
   const methods = ['fun cancelRequest(', 'suspend fun prepareExplicit(', 'fun startExplicit(', 'private fun explicitStatus(',
     'fun finishExplicit(', 'fun disposeExplicit('].map(anchor => extract(source, anchor)).join('\n');
   const errorLine = source.split('\n').find(line => line.includes('private fun captureError('));
+  const nativeLimits = block(block(source, 'private fun setRecordingOptions('), 'if (preventAutomaticResume)');
+  const timerLine = block(source, 'fun recordWithOptions(').split('\n').find(line => line.trim().startsWith('delay('));
+  const timerExpression = timerLine?.match(/^\s*delay\((.+)\)\s*$/)?.[1];
+  if (!timerExpression) throw new Error('Missing native recorder timer conversion');
   const foregroundBody = block(module, 'OnActivityEntersForeground').slice(
     block(module, 'OnActivityEntersForeground').indexOf('      if (!allowsBackgroundRecording)'),
     block(module, 'OnActivityEntersForeground').indexOf('      if (shouldRouteThroughEarpiece)'));
@@ -33,7 +37,10 @@ class Bundle : HashMap<String, Any?>() {
 const val RECORDING_STATUS_UPDATE = "recordingStatusUpdate"
 class NativeRecorder {
   var starts = 0; var stops = 0; var releases = 0
+  var maxDurationMillis = 0; var maxFileBytes = 0L
   var failStart = false; var failStop = false; var failRelease = false
+  fun setMaxDuration(value: Int) { maxDurationMillis = value }
+  fun setMaxFileSize(value: Long) { maxFileBytes = value }
   fun start() { if (failStart) throw RuntimeException("start failed"); starts++ }
   fun stop() { stops++; if (failStop) throw RuntimeException("stop failed") }
   fun release() { if (failRelease) throw RuntimeException("release failed"); releases++ }
@@ -53,11 +60,21 @@ class AudioRecorder(val filePath: String) {
   var isPrepared = false; var isRecording = false; var isPaused = false
   var recorder: NativeRecorder? = null
   var duration = 1000L
+  var timerDeadlineMillis = 0L
   var events = 0
   val serviceConnection = ServiceConnection()
   ${errorLine}
-  suspend fun prepareRecording(options: Any?) { recorder = NativeRecorder(); isPrepared = true; File(filePath).writeBytes(ByteArray(64)) }
-  fun recordWithOptions(forDurationSeconds: Double) { recorder!!.start(); isRecording = true; isPaused = false }
+  suspend fun prepareRecording(options: Any?) {
+    recorder = NativeRecorder()
+    if (preventAutomaticResume) { with(recorder!!) { ${nativeLimits} } }
+    isPrepared = true; File(filePath).writeBytes(ByteArray(64))
+  }
+  fun recordWithOptions(forDurationSeconds: Double) {
+    recorder!!.start(); isRecording = true; isPaused = false
+    // Execute the installed coroutine's exact Double-to-milliseconds expression.
+    val it = forDurationSeconds
+    timerDeadlineMillis = ${timerExpression}
+  }
   fun record() { recorder!!.start(); isRecording = true; isPaused = false }
   fun pauseRecording() { isRecording = false; isPaused = true }
   fun reset() { recorder?.release(); recorder = null; isPrepared = false; isRecording = false; isPaused = false }
@@ -81,6 +98,19 @@ suspend fun main(args: Array<String>) {
   test("unopted prepare is refused") { val r = recorder(); r.preventAutomaticResume = false; try { r.prepareExplicit(1, 8.0, 1000); error("accepted") } catch (error: CodedException) { check(error.code == "ERR_AUDIO_CAPTURE_NOT_OPTED_IN") } }
   test("oversized duration refuses before native prepare") { val r = recorder(); try { r.prepareExplicit(1, 31.0, 1000); error("accepted") } catch (error: CodedException) { check(error.code == "ERR_AUDIO_CAPTURE_LIMITS" && r.recorder == null) } }
   test("prepare is status, not capture") { val r = recorder(); val status = r.prepareExplicit(2, 8.0, 1000); check(status["canRecord"] == true && status["isRecording"] == false && status["recordingRequestId"] == 2); r.disposeExplicit() }
+  for ((captureSeconds, admissionMillis, maxBytes) in listOf(Triple(29.5, 30000L, 4 * 1024 * 1024), Triple(7.5, 8000L, 2 * 1024 * 1024))) {
+    test("fractional native capture reserve " + captureSeconds + " survives delayed finalization") {
+      val r = recorder(); r.prepareExplicit(1, captureSeconds, maxBytes); val native = r.recorder!!
+      check(native.maxDurationMillis.toLong() == admissionMillis - 500 && native.maxFileBytes == maxBytes.toLong())
+      r.startExplicit(1)
+      check(r.timerDeadlineMillis == admissionMillis - 500 && native.starts == 1)
+      r.duration = r.timerDeadlineMillis + 95
+      val status = r.finishExplicit(1)
+      check(status["durationMillis"] == admissionMillis - 405 && status["hasError"] == false && status["isFinished"] == true)
+      check(native.stops == 1 && native.releases == 1 && !r.isRecording)
+      r.disposeExplicit(); refused("ERR_AUDIO_CAPTURE_STALE") { r.startExplicit(1) }; check(native.starts == 1)
+    }
+  }
   test("stale start cannot capture") { val r = recorder(); r.prepareExplicit(2, 8.0, 1000); refused("ERR_AUDIO_CAPTURE_STALE") { r.startExplicit(1) }; check(r.recorder!!.starts == 0); r.disposeExplicit() }
   test("cancel before queued prepare prevents hidden capture and remains disposable") { val r = recorder(); r.cancelRequest(1); try { r.prepareExplicit(1, 8.0, 1000); error("accepted") } catch (error: CodedException) { check(error.code == "ERR_AUDIO_CAPTURE_CANCELLED") }; check(r.recorder == null); r.disposeExplicit(); check(r.disposed) }
   test("synchronous cancellation before queued start prevents real recorder start") { val r = recorder(); r.prepareExplicit(1, 8.0, 1000); val native = r.recorder!!; r.cancelRequest(1); refused("ERR_AUDIO_CAPTURE_STALE") { r.startExplicit(1) }; check(native.starts == 0 && !r.isRecording); r.disposeExplicit(); check(native.releases == 1) }

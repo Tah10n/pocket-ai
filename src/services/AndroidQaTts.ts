@@ -12,6 +12,7 @@ import { getModelFileIdentity } from '../utils/modelRoles';
 import { getAppCacheRootDir } from './FileSystemSetup';
 import { isAndroidQaDocumentModelBootstrapEnabled, ANDROID_QA_DOCUMENT_MODEL_ID } from './AndroidQaDocumentModelBootstrap';
 import { getAndroidQaEffectiveProfileIdentity, prepareAndroidQaStage3Adapter } from './AndroidQaStage3';
+import { prepareAndroidQaStage7Seed } from './AndroidQaStage7Seed';
 import { selectAuxiliaryModel } from './AuxiliaryModelService';
 import { llmEngineService } from './LLMEngineService';
 import { getModelDownloadManager, ModelFileLeaseBusyError } from './ModelDownloadManager';
@@ -84,6 +85,12 @@ export async function prepareAndroidQaTtsProfile(profile: TtsExecutionProfile): 
         && model.downloadIntegrity?.kind === 'sha256' && model.downloadIntegrity.sha256 === profile.backbone.sha256
         && model.downloadIntegrity.sizeBytes === profile.backbone.bytes ? model : undefined;
     };
+    const seedKind = profile.id === 'neutts-nano-q4_k_m-neucodec-q8_0' ? 'neutts'
+      : profile.id === 'qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0' ? 'qwen3' : null;
+    if (seedKind) {
+      const seeded = await prepareAndroidQaStage7Seed(seedKind, desired);
+      if (seeded) return seeded;
+    }
     if (!ready()) {
       check(!registry.getModel(desired.id)?.localPath, 'fixture_identity_conflict');
       if (claimNewFixtureDownload(desired, owned)) {

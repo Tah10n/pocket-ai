@@ -21,8 +21,12 @@ export const AUDIO_PREPARATION_LIMITS = Object.freeze({
   channels: 2, sourceSampleRate: 192_000, outputSampleRate: 48_000,
   nativeAdmissionReserveBytes: 64 * 1024 * 1024,
 });
+export type AudioPreparationFailureReason = 'native_result' | 'prepared_uri' | 'channels' | 'sample_rate'
+  | 'sample_count' | 'output_size' | 'source_hash' | 'output_hash' | 'native_input' | 'native_admission'
+  | 'native_sniff' | 'native_output' | 'native_decode' | 'native_identity' | 'native_delivery';
 export class AudioPreparationError extends Error {
-  constructor(readonly code: 'invalid_audio' | 'audio_limit' | 'cancelled' | 'preparation_failed' | 'cleanup_failed') {
+  constructor(readonly code: 'invalid_audio' | 'audio_limit' | 'cancelled' | 'preparation_failed' | 'cleanup_failed',
+    readonly safeReason?: AudioPreparationFailureReason) {
     super(code); this.name = 'AudioPreparationError';
   }
 }
@@ -82,12 +86,18 @@ async function performManagedAudio(options: AudioPreparationOptions): Promise<Pr
   try {
     // Cancellation invalidates publication and retains ownership until this actual promise settles.
     result = await getNative().prepare(options.sourceUri, rate, limits.seconds, limits.sourceBytes);
+    if (!result || typeof result !== 'object') throw new AudioPreparationError('invalid_audio', 'native_result');
     if (isPreparedUri(result.uri)) ownedDerivatives.add(result.uri);
     check(options.signal, options.assertCurrent);
-    if (result.channels !== 1 || result.sampleRate !== rate || !Number.isSafeInteger(result.sampleCount)
-      || result.sampleCount < 1 || result.sampleCount > rate * limits.seconds
-      || result.sizeBytes !== 44 + result.sampleCount * 2 || !/^([a-f0-9]{64})$/.test(result.sourceSha256)
-      || !/^([a-f0-9]{64})$/.test(result.sha256) || !isPreparedUri(result.uri)) throw new AudioPreparationError('invalid_audio');
+    if (result.channels !== 1) throw new AudioPreparationError('invalid_audio', 'channels');
+    if (result.sampleRate !== rate) throw new AudioPreparationError('invalid_audio', 'sample_rate');
+    if (!Number.isSafeInteger(result.sampleCount) || result.sampleCount < 1 || result.sampleCount > rate * limits.seconds) {
+      throw new AudioPreparationError('invalid_audio', 'sample_count');
+    }
+    if (result.sizeBytes !== 44 + result.sampleCount * 2) throw new AudioPreparationError('invalid_audio', 'output_size');
+    if (!/^([a-f0-9]{64})$/.test(result.sourceSha256)) throw new AudioPreparationError('invalid_audio', 'source_hash');
+    if (!/^([a-f0-9]{64})$/.test(result.sha256)) throw new AudioPreparationError('invalid_audio', 'output_hash');
+    if (!isPreparedUri(result.uri)) throw new AudioPreparationError('invalid_audio', 'prepared_uri');
     return { uri: result.uri, sourceSha256: result.sourceSha256, sampleRate: rate, channels: 1,
       sampleCount: result.sampleCount, durationMs: result.sampleCount * 1000 / rate, sizeBytes: result.sizeBytes,
       identity: JSON.stringify(['audio-preparation/v1', result.sourceSha256, options.purpose, rate,
@@ -102,6 +112,17 @@ async function performManagedAudio(options: AudioPreparationOptions): Promise<Pr
     if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ERR_AUDIO_CLEANUP') {
       cleanupBlocked = true;
       throw new AudioPreparationError('cleanup_failed');
+    }
+    const nativeReasons: Readonly<Record<string, AudioPreparationFailureReason>> = {
+      ERR_AUDIO_PREPARATION_NATIVE_INPUT: 'native_input', ERR_AUDIO_PREPARATION_NATIVE_ADMISSION: 'native_admission',
+      ERR_AUDIO_PREPARATION_NATIVE_SNIFF: 'native_sniff', ERR_AUDIO_PREPARATION_NATIVE_OUTPUT: 'native_output',
+      ERR_AUDIO_PREPARATION_NATIVE_DECODE: 'native_decode', ERR_AUDIO_PREPARATION_NATIVE_IDENTITY: 'native_identity',
+      ERR_AUDIO_PREPARATION_NATIVE_DELIVERY: 'native_delivery',
+    };
+    const nativeCode = typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
+      ? error.code : undefined;
+    if (nativeCode && Object.prototype.hasOwnProperty.call(nativeReasons, nativeCode)) {
+      throw new AudioPreparationError('preparation_failed', nativeReasons[nativeCode]);
     }
     throw new AudioPreparationError('preparation_failed');
   } finally { pending -= 1; }

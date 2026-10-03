@@ -14,6 +14,13 @@ const NUMBERS = ['sampleRate', 'sampleCount', 'durationMs', 'sizeBytes', 'callba
 const BOOLEANS = ['profileRestored', 'chatUnchanged', 'interrupted', 'noAutomaticResume', 'headerValidated',
   'speakerBaked', 'selected', 'contentMatched', 'completionDrained'];
 const FAILURES = ['qa_operation_failed', 'host_continuation_timeout', 'isolated_package_required', 'preview_not_playing',
+  'audio_preparation_invalid_audio', 'audio_preparation_limit', 'audio_preparation_cancelled',
+  'audio_preparation_failed', 'audio_preparation_cleanup_failed',
+  'audio_preparation_native_result', 'audio_preparation_prepared_uri', 'audio_preparation_channels',
+  'audio_preparation_sample_rate', 'audio_preparation_sample_count', 'audio_preparation_output_size',
+  'audio_preparation_source_hash', 'audio_preparation_output_hash', 'audio_preparation_native_input',
+  'audio_preparation_native_admission', 'audio_preparation_native_sniff', 'audio_preparation_native_output',
+  'audio_preparation_native_decode', 'audio_preparation_native_identity', 'audio_preparation_native_delivery',
   'recorder_busy', 'recorder_not_recording', 'source_not_finalized', 'source_discard_failed', 'retry_not_recording',
   'background_not_finalized', 'automatic_recording_resume', 'stage3_adapter_missing', 'profile_restore', 'chat_history_changed',
   'profile_missing', 'synthesis_receipt', 'reference_not_used', 'bake_mode_mismatch', 'speaker_release_order',

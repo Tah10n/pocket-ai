@@ -14,6 +14,9 @@ export const AUDIO_RECORDING_LIMITS = Object.freeze({
   chat: Object.freeze({ durationSeconds: 30, sourceBytes: 4 * 1024 * 1024 }),
   reference: Object.freeze({ durationSeconds: 8, sourceBytes: 2 * 1024 * 1024 }),
 });
+// Native stop/container finalization can exceed its scheduled capture duration.
+// Keep that delay inside the unchanged decoder admission limit.
+const CAPTURE_FINALIZATION_RESERVE_SECONDS = 0.5;
 export interface RecordedAudio {
   readonly uri: string;
   readonly byteSize: number;
@@ -179,7 +182,8 @@ export class AudioRecordingService {
           if (status.isFinished && this.state.phase === 'recording') void this.finalize(status.interrupted === true).catch(() => undefined);
         });
         const limits = AUDIO_RECORDING_LIMITS[options.purpose];
-        const prepared = await recorder.prepareAsync(owned.requestId, limits.durationSeconds, limits.sourceBytes);
+        const prepared = await recorder.prepareAsync(owned.requestId,
+          limits.durationSeconds - CAPTURE_FINALIZATION_RESERVE_SECONDS, limits.sourceBytes);
         const fs = await loadFiles();
         const uri = recorder.uri;
         if (typeof uri !== 'string' || !uri.startsWith(fs.Paths.cache.uri)) throw new AudioRecordingError('file_invalid');
@@ -241,7 +245,7 @@ export class AudioRecordingService {
         const limits = this.options && AUDIO_RECORDING_LIMITS[this.options.purpose];
         if (!file || !limits || !file.exists || file.size < 16 || file.size > limits.sourceBytes
           || !Number.isFinite(status.durationMillis) || status.durationMillis <= 0
-          || status.durationMillis > limits.durationSeconds * 1000 + 500) throw new AudioRecordingError('file_invalid');
+          || status.durationMillis > limits.durationSeconds * 1000) throw new AudioRecordingError('file_invalid');
         const handle = file.open();
         let header: Uint8Array;
         try { header = handle.readBytes(12); } finally { handle.close(); }

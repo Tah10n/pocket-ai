@@ -364,6 +364,258 @@ const patches = [
   },
 ];
 
+// Upgrade only known prior patched bytes; fresh installations still transform
+// the pinned upstream hashes above. Admission is opt-in and separate from play().
+const admissionUpgrades = [
+  ...['src/AudioModule.types.ts', 'build/AudioModule.types.d.ts'].map(file => ({
+    file, after: {
+      'src/AudioModule.types.ts': '48c7b5c7b3ce29186944f072996e8b1835e3c1810f8184bb6a47eca20ff720cc',
+      'build/AudioModule.types.d.ts': '550f1e0d735cb03978b1f211e1da3161691e679b36e8337eeedf431fddee8950',
+    }[file],
+    transform: text => replace(text, '  disposeAsync(): Promise<void>;',
+      '  disposeAsync(): Promise<void>;\n  /** Opt-in command admission on native MAIN. Playback requires a matching playing status. */\n  playAsync(requestId: number): Promise<void>;'),
+  })),
+  ...['src/Audio.types.ts', 'build/Audio.types.d.ts'].map(file => ({
+    file, before: {
+      'src/Audio.types.ts': 'fea7cf9120fd50db808e8b8428027deff211d39a904ac222b682142a3951d0af',
+      'build/Audio.types.d.ts': 'cd5da0a2c30e2420e147d370ee34318e8f1611aa5e3728018a5e255c8369e4d1',
+    }[file], after: {
+      'src/Audio.types.ts': '81f98785bb4e80cd87c9c60067e3528d1c09e6b7a7f8b74fa21de33393a1dbfc',
+      'build/Audio.types.d.ts': '36fb0bc74a5aab78ce8a7cb644b755115ab448e187ddecd1d04697a45c4c7c3e',
+    }[file],
+    transform: text => replace(text, 'export type AudioStatus = {',
+      'export type AudioStatus = {\n  /** Native request identity captured when an explicit-only player serializes this status. */\n  playbackRequestId?: number;'),
+  })),
+  {
+    file: 'android/src/main/java/expo/modules/audio/AudioModule.kt', after: '8486424bfa8f6289f0421081a063bdf833f08b241e4a5e31630e6720033f2f4b',
+    transform(text) {
+      text = replace(text, 'import expo.modules.kotlin.exception.Exceptions',
+        'import expo.modules.kotlin.exception.Exceptions\nimport expo.modules.kotlin.exception.CodedException');
+      text = replace(text, '  private var audioFocusRequest: AudioFocusRequest? = null', `  private var audioFocusRequest: AudioFocusRequest? = null
+  // Explicit players own their request even before focus is acquired. Never let
+  // a cancelled listener affect global focus or a later player/request.
+  private var explicitFocusRequest: AudioFocusRequest? = null
+  private var explicitFocusListener: AudioManager.OnAudioFocusChangeListener? = null
+  private var explicitFocusOwner: AudioPlayer? = null
+  private var explicitFocusGeneration = 0
+  private var explicitFocusAcquired = false`);
+      text = replace(text, `    appContext.mainQueue.launch {
+      when (focusChange) {`, `    appContext.mainQueue.launch { handleAudioFocusChange(focusChange) }
+  }
+
+  private fun handleAudioFocusChange(focusChange: Int) {
+      when (focusChange) {`);
+      text = replace(text, `      }
+    }
+  }
+
+  private fun shouldReleaseFocus()`, `      }
+  }
+
+  private fun cancelExplicitAudioFocus(player: AudioPlayer? = null) {
+    val owner = explicitFocusOwner ?: return
+    if (player != null && owner !== player) return
+    // Invalidate before abandon: Android may already have queued a GAIN.
+    explicitFocusGeneration += 1
+    // Explicit acquisition never changes the legacy global focus flag.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      explicitFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+    } else {
+      @Suppress("DEPRECATION")
+      explicitFocusListener?.let { audioManager.abandonAudioFocus(it) }
+    }
+    // If abandon throws, retain ownership for a confirmed retry, with the old
+    // listener invalidated so it still cannot play or change a later owner.
+    explicitFocusRequest = null
+    explicitFocusListener = null
+    explicitFocusOwner = null
+    explicitFocusAcquired = false
+  }
+
+  private fun requestExplicitAudioFocus(player: AudioPlayer): Int {
+    if (explicitFocusOwner === player && explicitFocusAcquired) return AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    cancelExplicitAudioFocus()
+    // Existing legacy focus can be borrowed; this player never owns or abandons it.
+    if (focusAcquired) return AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    explicitFocusOwner = player
+    val generation = ++explicitFocusGeneration
+    val listener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+      appContext.mainQueue.launch {
+        if (generation != explicitFocusGeneration || explicitFocusOwner !== player || player.disposalStarted) return@launch
+        handleAudioFocusChange(focusChange, player)
+      }
+    }
+    explicitFocusListener = listener
+    val requestType = if (interruptionMode == InterruptionMode.DUCK_OTHERS) {
+      AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+    } else {
+      AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+    }
+    val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      val request = AudioFocusRequest.Builder(requestType).run {
+        setAudioAttributes(AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+        setAcceptsDelayedFocusGain(false)
+        setOnAudioFocusChangeListener(listener)
+        build()
+      }
+      explicitFocusRequest = request
+      audioManager.requestAudioFocus(request)
+    } else {
+      @Suppress("DEPRECATION")
+      audioManager.requestAudioFocus(listener, AudioManager.STREAM_MUSIC, requestType)
+    }
+    if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+      explicitFocusAcquired = true
+    } else {
+      // FAILED and defensive DELAYED are explicit refusals. Abandon even when
+      // focusAcquired is false; no unbounded pending request survives admission.
+      cancelExplicitAudioFocus(player)
+    }
+    return result
+  }
+
+  private fun shouldReleaseFocus()`);
+      // Keep legacy focus and its all-player callback behavior independent.
+      // A default player starting beside TTS requests and owns its own focus.
+      const handlerStart = text.indexOf('  private fun handleAudioFocusChange(');
+      const handlerEnd = text.indexOf('  private fun cancelExplicitAudioFocus(', handlerStart);
+      let handler = text.slice(handlerStart, handlerEnd);
+      handler = replace(handler, 'handleAudioFocusChange(focusChange: Int)',
+        'handleAudioFocusChange(focusChange: Int, explicitPlayer: AudioPlayer? = null)');
+      handler = replace(handler, '      when (focusChange) {',
+        '      val affectedPlayables = explicitPlayer?.let { sequenceOf<Playable>(it) } ?: allPlayables\n      when (focusChange) {');
+      handler = replace(handler, 'allPlayables.forEach', 'affectedPlayables.forEach', 5);
+      handler = replace(handler, '          focusAcquired = false',
+        '          if (explicitPlayer != null) explicitFocusAcquired = false else focusAcquired = false', 2);
+      handler = replace(handler, '          focusAcquired = true',
+        '          if (explicitPlayer != null) explicitFocusAcquired = true else focusAcquired = true');
+      text = text.slice(0, handlerStart) + handler + text.slice(handlerEnd);
+      text = replace(text, `  private fun releaseAudioFocus() {
+    if (!focusAcquired) {`, `  private fun releaseAudioFocus() {
+    cancelExplicitAudioFocus()
+    if (!focusAcquired) {`);
+      text = replace(text, `      Function("pause") { player: AudioPlayer ->`, `      // Resolving means command admission, never proof that ExoPlayer started.
+      AsyncFunction("playAsync") { player: AudioPlayer, requestId: Int ->
+        if (!player.preventAutomaticResume) throw CodedException("ERR_TTS_AUDIO_PLAY_NOT_OPTED_IN", "Explicit playback admission requires opt-in.", null)
+        if (player.disposalStarted) throw CodedException("ERR_TTS_AUDIO_DISPOSED", "The audio player has been disposed.", null)
+        if (requestId <= 0) throw CodedException("ERR_TTS_AUDIO_REQUEST_INVALID", "The playback request is invalid.", null)
+        if (!audioEnabled) throw CodedException("ERR_TTS_AUDIO_DISABLED", "Audio playback is disabled.", null)
+        player.isPaused = false
+        player.pause()
+        player.playbackRequestId = requestId
+        val result = requestExplicitAudioFocus(player)
+        if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+          val code = if (result == AudioManager.AUDIOFOCUS_REQUEST_DELAYED) "ERR_TTS_AUDIO_FOCUS_DELAYED" else "ERR_TTS_AUDIO_FOCUS_FAILED"
+          throw CodedException(code, "Audio focus did not permit playback. Try Play again.", null)
+        }
+        player.play()
+      }.runOnQueue(Queues.MAIN)
+
+      Function("pause") { player: AudioPlayer ->`);
+      text = replace(text, `          player.pause()
+        }
+      }
+
+      Function("replace")`, `          player.pause()
+          if (player.preventAutomaticResume) cancelExplicitAudioFocus(player)
+        }
+      }
+
+      Function("replace")`);
+      text = replace(text, `      AsyncFunction("disposeAsync") { player: AudioPlayer ->
+        player.dispose()`, `      AsyncFunction("disposeAsync") { player: AudioPlayer ->
+        cancelExplicitAudioFocus(player)
+        player.dispose()`);
+      return text;
+    },
+  },
+  {
+    file: 'android/src/main/java/expo/modules/audio/AudioPlayer.kt', after: '6f99ef319485dd5920aee83bb9a913e2264b3de56c60dca276188c729d805cad',
+    transform(text) {
+      text = replace(text, '  var preventAutomaticResume = false', '  var preventAutomaticResume = false\n  var playbackRequestId = 0');
+      text = replace(text, `        if (disposalStarted) return
+        playing = isPlaying`, `        if (disposalStarted) return
+        // Media3 can deliver an older transition after a new Play request.
+        if (preventAutomaticResume && isPlaying != ref.isPlaying) return
+        playing = isPlaying`);
+      text = replace(text, `      override fun onPlaybackStateChanged(playbackState: Int) {
+        val justFinished`, `      override fun onPlaybackStateChanged(playbackState: Int) {
+        if (preventAutomaticResume && playbackState != ref.playbackState) return
+        val justFinished`);
+      text = replace(text, '    val playingStatus = if (isBuffering) intendedPlayingState else ref.isPlaying',
+        '    val playingStatus = if (preventAutomaticResume) ref.isPlaying else if (isBuffering) intendedPlayingState else ref.isPlaying');
+      text = replace(text, `      "isBuffering" to isBuffering
+    )`, `      "isBuffering" to isBuffering
+    ) + if (preventAutomaticResume) mapOf("playbackRequestId" to playbackRequestId) else emptyMap()`);
+      return text;
+    },
+  },
+  {
+    file: 'ios/AudioModule.swift', after: '406782c024ab1a3ced1026851ed409ae03e4c99aac29058e18b94afb4beb98fc',
+    transform: text => replace(text, `      Function("setPlaybackRate") { (player, rate: Double, pitchCorrectionQuality: PitchCorrectionQuality?) in`, `      // Resolving means command admission; matching native status proves playback.
+      AsyncFunction("playAsync") { (player: AudioPlayer, requestId: Int, promise: Promise) in
+        guard player.preventAutomaticResume else {
+          promise.reject("ERR_TTS_AUDIO_PLAY_NOT_OPTED_IN", "Explicit playback admission requires opt-in.")
+          return
+        }
+        guard !player.disposalStarted else {
+          promise.reject("ERR_TTS_AUDIO_DISPOSED", "The audio player has been disposed.")
+          return
+        }
+        guard requestId > 0 else {
+          promise.reject("ERR_TTS_AUDIO_REQUEST_INVALID", "The playback request is invalid.")
+          return
+        }
+        guard self.sessionIsActive else {
+          promise.reject("ERR_TTS_AUDIO_DISABLED", "Audio playback is disabled.")
+          return
+        }
+        player.wasPlaying = false
+        player.ref.pause()
+        player.playbackRequestId = requestId
+        do {
+          try self.activateSession()
+          let rate = player.currentRate > 0 ? player.currentRate : 1.0
+          player.play(at: rate)
+          promise.resolve()
+        } catch {
+          promise.reject("ERR_TTS_AUDIO_FOCUS_FAILED", "The audio session did not permit playback. Try Play again.")
+        }
+      }.runOnQueue(.main)
+
+      Function("setPlaybackRate") { (player, rate: Double, pitchCorrectionQuality: PitchCorrectionQuality?) in`),
+  },
+  {
+    file: 'ios/AudioPlayer.swift', after: '84b33494fcfe9e58f1d0b92a161c717b7b53180b7336be98629cd20534857d71',
+    transform(text) {
+      text = replace(text, '  var preventAutomaticResume = false', '  var preventAutomaticResume = false\n  var playbackRequestId = 0');
+      text = replace(text, `    let rate = isPlaying ? ref.rate : currentRate
+    return [`, `    let rate = isPlaying ? ref.rate : currentRate
+    var status: [String: Any] = [`);
+      text = replace(text, `      "isBuffering": isBuffering
+    ]
+  }`, `      "isBuffering": isBuffering
+    ]
+    if preventAutomaticResume { status["playbackRequestId"] = playbackRequestId }
+    return status
+  }`);
+      return text;
+    },
+  },
+];
+for (const upgrade of admissionUpgrades) {
+  const previous = patches.find(patch => patch.file === upgrade.file);
+  if (previous) {
+    const previousTransform = previous.transform;
+    previous.legacyAfter = previous.after;
+    previous.after = upgrade.after;
+    previous.upgrade = upgrade.transform;
+    previous.transform = text => upgrade.transform(previousTransform(text));
+  } else {
+    patches.push(upgrade);
+  }
+}
+
 function prepare(packageRoot) {
   const metadata = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
   if (metadata.version !== VERSION) throw new Error(`expo-audio patch requires ${VERSION}; refusing changed version`);
@@ -374,8 +626,8 @@ function prepare(packageRoot) {
     const original = normalize(fs.readFileSync(target, 'utf8'));
     const originalHash = hash(original);
     if (originalHash === patch.after) return { target, text: original, changed: false, file: patch.file };
-    if (originalHash !== patch.before) throw new Error(`expo-audio patch source hash mismatch: ${patch.file}`);
-    const updated = patch.transform(original);
+    if (originalHash !== patch.before && originalHash !== patch.legacyAfter) throw new Error(`expo-audio patch source hash mismatch: ${patch.file}`);
+    const updated = originalHash === patch.legacyAfter ? patch.upgrade(original) : patch.transform(original);
     if (hash(updated) !== patch.after) throw new Error(`expo-audio patch result hash mismatch: ${patch.file}`);
     return { target, text: updated, changed: true, file: patch.file };
   });

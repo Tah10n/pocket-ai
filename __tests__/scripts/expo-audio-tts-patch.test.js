@@ -48,7 +48,7 @@ it('rejects a changed package version without writing any source', () => {
   expect(contents()).toEqual(before);
 });
 
-it('rejects drift in the final native file before making any writes', () => {
+it('rejects drift in the final guarded file before making any writes', () => {
   const target = path.join(fixtureRoot, patches.at(-1).file);
   fs.appendFileSync(target, '\n// unexpected upstream change\n');
   const before = contents();
@@ -77,4 +77,16 @@ it('keeps native opt-in guards and synchronous teardown visible in the public co
     expect(read(file)).toContain('preventAutomaticResume: boolean;');
     expect(read(file)).toContain('disposeAsync(): Promise<void>;');
   }
+});
+
+it('exposes explicit native Play admission and per-request status correlation', () => {
+  const read = file => fs.readFileSync(path.join(fixtureRoot, file), 'utf8');
+  for (const file of ['src/AudioModule.types.ts', 'build/AudioModule.types.d.ts']) {
+    expect(read(file)).toContain('playAsync(requestId: number): Promise<void>;');
+  }
+  for (const file of ['src/Audio.types.ts', 'build/Audio.types.d.ts']) {
+    expect(fs.readFileSync(path.join(installed, file), 'utf8')).toContain('playbackRequestId?: number;');
+  }
+  expect(read('android/src/main/java/expo/modules/audio/AudioModule.kt')).toContain('AsyncFunction("playAsync")');
+  expect(read('ios/AudioModule.swift')).toContain('AsyncFunction("playAsync")');
 });

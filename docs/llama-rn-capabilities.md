@@ -77,6 +77,44 @@ Cancellation requests `stopCompletion` and awaits actual settlement. Vocoder ini
 
 [Source observations](validation/llama-rn-stage6/model-sources.md) are selection and contract evidence. The [Stage 6 acceptance report](validation/llama-rn-stage6/acceptance.md) records native synthesis/decode/playback, Stop/drain/retry, A+LoRA restoration and independent local ASR correspondence for the selected English token and Mandarin continuous CPU pairs. Completed-answer Speak, EN/RU structured review and 241-character device entry retain their historical APK scope. Fresh ordinary no-A synthesis and background clear/no-autoplay passed on the current APK; that separate clip has no content acceptance. Both fresh CPU flows passed synthesis/decode/playback/lifecycle and new independent English/Mandarin ASR review after the async cleanup classification fix. Five independent same-APK baselines passed; raw failed-pack/partial attempts retain their status in the report. Implementation-source CI, including its hosted unsigned iOS simulator build, passed; actual listening, Russian speech and iOS/GPU/NPU TTS remain `not_run`. Nonempty PCM, player motion and an upstream success report do not establish content.
 
+## Stage 7 recording and reference voices: implementation scope
+
+The existing composer provides explicit Record → Stop/finalize → Preview → Attach/Discard → Send.
+Chat sending retains active model/projector/runtime audio gating. The same recorder can create a
+reference independently of chat audio capability. Permission is requested just before Record;
+native status establishes capture, with opt-in duration/byte limits and background no-resume.
+One shared capture/player owner waits for actual disposal before switching modes. The existing
+Stage 6 focus/request/deadline/retry protections are retained.
+
+Bounded native content-based decoding/downmix/resampling produces mono PCM16 WAV. Chat sources
+are limited to 4 MiB/30 seconds, references to 2 MiB/eight seconds. Source hashes and preprocessing
+identity bind derivatives; decoded arrays never enter chat history. Recording drafts use the
+ordinary attachment transaction, persistence and deletion path. Audio-model replies are not a
+universal standalone ASR service.
+
+The existing speech preview separates speakerless, builtin and reference choices. Exact English
+NeuTTS Nano + NeuCodec adds helper-selected `en-us` payloads and a bundled offline IPA phonemizer;
+its synthesis language stays `en`. Exact English Qwen3-TTS 0.6B + tokenizer uses real 24 kHz PCM,
+context-owned `createSpeaker`, explicit or lazy bake, formatter/completion/decode and speaker-first
+release. The guarded formatter reports lazy baked/rows without re-encoding. Qwen's actual native
+`talker_embd` flow is handled specifically despite its omission from the rc.3 TypeScript union.
+Unsupported Qwen transcript/emotion fields are omitted. New contexts recreate handles; cancellation,
+deletion and private reset drain actual calls before cleanup/restoration. R1 → R2 → no-reference
+cannot reuse pending state from a previous context.
+
+References default to temporary private copies. Explicit consent and Save voice persist original
+audio/configuration in the existing encrypted store: four voices, 2 MiB each/eight seconds and
+8 MiB total. Handles and embeddings are never saved. Cold opening restores selection without
+capture/synthesis; deletion waits for active leases and preserves borrowed chat files. Temporary
+native cache bytes are unencrypted, bounded, excluded from backup and reconciled after drain.
+
+See [local speech](local-tts.md), [audio attachments](multimodal-attachments.md),
+[privacy](privacy-disclosures.md), the [Stage 7 manifests and report](validation/llama-rn-stage7/acceptance.md).
+Implementation, source tests, native operation receipts, spoken content and reference resemblance
+retain separate statuses. Stage 7 native acceptance is pending on the implementation source;
+Stage 6 content receipts do not establish it. Physical acoustic recording, Bluetooth, Russian speech
+and iOS/GPU/NPU execution remain separate unverified scopes.
+
 ## Stage 4 local tools: implementation and verification
 
 [Local tools](local-tools.md) documents the per-chat opt-in, three built-in functions,
@@ -267,8 +305,8 @@ Every source link in this table is pinned to the selected tag. “Proof” descr
 | [Sessions and cache](https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/src/index.ts#L696): `loadSession(filepath)`, `saveSession(filepath, {tokenSize}?)`, `clearCache(clearData?)`; parallel state file fields; context `state_cache_budget_mb`, `state_cache_max_checkpoints` | Sessions remain deferred. Stage 3 uses confirmed `clearCache(true)` only to invalidate state after LoRA mutation. Cross-turn prompt state cache remains disabled by `PromptStateCachePolicy` and init policy. | State must match model/config and conversation ownership. Recurrent/hybrid architectures need full reset; data clearing differs from metadata reset. Saved state is sensitive application data. | **1** preserve explicit budget `0` and checkpoints `8`; enablement **8**. Cross-chat isolation, stale-state rejection, state-file round-trip, measured bounded memory and invalidation before any cache enablement. |
 | [LoRA](https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/src/index.ts#L1011): init `lora`, `lora_scaled`, `lora_list`; `applyLoraAdapters(list)`, `removeLoraAdapters()`, `getLoadedLoraAdapters()` | Canonical artifact profiles and explicit apply/list/scale/remove are integrated with verified init restore, exclusive ownership and rollback. Native behavioral acceptance is tracked separately. | Base model compatibility, adapter file integrity and additional RAM; scale and reloading can affect output/state. | **3**, artifact roles **2**. Known matching adapter changes controlled output, inspect loaded list, remove and restore baseline, recover from invalid adapter. |
 | [TTS and vocoder](https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/src/index.ts#L1086): `initVocoder({path,n_batch,use_gpu})`, `isVocoderEnabled()`, `getTTSCapabilities()`, `getFormattedAudioCompletion(options)`, `decodeAudioTokens(tokens)`, `decodeAudioEmbeddings(embeddings, embeddingDim)`, `getAudioSampleRate()`, `releaseVocoder()`; normal `completion`/`stopCompletion`; deprecated `generateAudioCodes(options)` | Stage 6 integrates both final-payload pipelines, exact CPU profiles, native-drain ownership and one bounded ephemeral clip/player. No audio/latent history persistence. Deprecated wrapper is not used. Device and content acceptance remain separate. | Exact matching TTS model/codec and conservative memory admission; family determines token versus continuous flow. Format result, native EOS, shape and actual codec rate are validated. Unknown pairs fail closed. Experimental upstream API is a risk, not itself a `blocked-upstream` finding. | **6**, resource roles **2**. Fresh English token and Mandarin continuous CPU synthesis/decode/playback, Stop/drain/retry, release/repeat and new ASR content passed. Five independent same-APK baselines passed; raw failed attempts, historical observations and untested cases keep their own scope in the report. |
-| [Voices, languages and phonemizer](https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/src/tts-voices.ts): `getTTSVoice`, `listTTSVoices`, `listTTSLanguages`; `TTSCapabilities`, `OuteTTSWord`, `OuteTTSSpeaker`, `NeuTTSSpeaker`, `SpeakerPayload`; `getFormattedAudioCompletion` phonemizer hook | Stage 6 retains basic helper/default-speaker contracts and offers the exact profile's English or Mandarin language. Selected speakerless paths omit speaker. No phonemizer or sample-based voice workflow is installed. | Lookup is a JS reference-payload catalog, not universal language support. `requiresPhonemes` is model-derived; a missing required hook blocks synthesis. OuteTTS 1.0 cannot use the legacy default word/code payload. Russian UI is not Russian speech. | **6**. Helper/default semantics and missing prerequisites remain separate from pronunciation/content evidence. Exact selected English/Mandarin inputs have scoped independent ASR correspondence; listening, Russian speech and wider upstream languages remain unverified. |
-| [Speaker lifecycle](https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/src/index.ts#L1269): `createSpeaker(config)`, exported `LlamaSpeaker`, `LlamaSpeaker.bake()`, `.release()`; fields `id`, `family`, `rows`, `baked` | Deferred; no sample-based voice capture or speaker lifecycle. | Native handle belongs to its context; reference PCM/sample rate, optional text/emotion and compatible model/codec required. Bake changes state and consumes resources. Reference audio must not enter logs. | **7**. Create from known PCM, bake, synthesize, release; reject stale/cross-context handles and account for memory. |
+| [Voices, languages and phonemizer](https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/src/tts-voices.ts): `getTTSVoice`, `listTTSVoices`, `listTTSLanguages`; `TTSCapabilities`, `OuteTTSWord`, `OuteTTSSpeaker`, `NeuTTSSpeaker`, `SpeakerPayload`; `getFormattedAudioCompletion` phonemizer hook | Stage 7 selects real Neu builtin payloads and a bounded offline English IPA hook in the existing preview; catalog `en-us`, phonemizer `en-us` and synthesis `en` remain separate. Existing Oute/Blue paths omit speaker. | A catalog is not universal language support. Missing required hooks or unknown voices reject. Legacy Oute payload stays excluded for 1.0. Russian UI is not Russian speech. | **6–7**. Source/deferred tests, native builtin/phonemizer receipt and independent words/content checks retain separate evidence in the Stage 7 report. |
+| [Speaker lifecycle](https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/src/index.ts#L1269): `createSpeaker(config)`, exported `LlamaSpeaker`, `LlamaSpeaker.bake()`, `.release()`; fields `id`, `family`, `rows`, `baked` | Stage 7 Qwen reference import/record/consent, eager or lazy bake, real formatter handle, synthesis and speaker-first release under the existing owner. Saved encrypted originals/config recreate handles after restart. | Native handles belong to one context/epoch and are never persisted. Qwen uses bounded 24 kHz PCM; ignored text/emotion are omitted. Native drain precedes deletion, codec release and chat restore. | **7**. Lifecycle races, stale/cross-context rejection, R1 → R2 → no-reference, A+LoRA restore, cold save/delete and independent reference comparison are separate acceptance categories. |
 | [Measurements and logs](https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/src/index.ts#L980): `bench(pp,tg,pl,nr)`, `BenchResult`; completion `timings`, `n_probs`, `completion_probabilities`; `toggleNativeLog(enabled)`, `addNativeLogListener(listener)` and listener `.remove()` | Timings/speculative telemetry and guarded native logs integrated through engine/adapter; Stage 3 adds opt-in bounded `n_probs` diagnostics. Expanded benchmarks and product decisions driven by probabilities remain deferred. | Logs may contain sensitive data: app must sanitize/filter; do not log prompts, tool arguments, documents, audio/images or private paths. Benchmark affects memory/thermal state. Probabilities increase payload cost. | **1** preserve telemetry/privacy; expanded measurement **8**, release audit **9**. Finite counters/timings, probability fixtures, native bounded benchmark with actual backend, log subscription cleanup and privacy review. |
 
 ## Complete parameter and result ledger
@@ -327,11 +365,15 @@ Both decoders resolve `number[]`. Neither establishes streaming playback. Stage 
 
 `getTTSVoice(family, name, language?)` resolves a payload or `null`; `listTTSVoices(family, language?)` and `listTTSLanguages(family)` return names. `OuteTTSWord` has `word`, `duration`, `codes`; `OuteTTSSpeaker` has `words`. `NeuTTSSpeaker` has `ref_phones`, `ref_codes`. `SpeakerPayload` additionally permits a custom payload. The optional phonemizer hook `(text, language) => string | Promise<string>` is caller-owned; the wrapper uses it for required phonemes and applicable reference text.
 
-Stage 6 omits speaker for its selected native speakerless paths; explicit `speaker: "default"` is not interchangeable with omission and can reject OuteTTS 1.0. Empty helper lists do not disprove that path. The app installs no phonemizer and rejects an actual required-phoneme capability instead of silently using ordinary text. Helper contents do not extend the exact application's language profiles.
+Stage 6 omits speaker for its selected native speakerless paths; explicit `speaker: "default"` is not interchangeable with omission and can reject OuteTTS 1.0. Empty helper lists do not disprove that path. Stage 7 installs a bounded offline `en-us` phonemizer for the admitted NeuTTS profile. An unsupported actual required-phoneme capability still rejects instead of using ordinary text. Helper contents do not extend the exact application's synthesis-language profiles.
 
 `createSpeaker` accepts `refAudio: Float32Array | number[]`, `refAudioSampleRate`, optional `refText`, `emotion`, `bake`. A returned `LlamaSpeaker` has readonly `id`/`family`, mutable `rows`/`baked`, and async `bake`/`release`. Its constructor takes context ID plus native handle metadata; applications should obtain real handles through `createSpeaker`, not fabricate IDs.
 
-Reference-audio capture/input, creation, bake and speaker-handle release remain Stage 7 work. Stage 6 does not request a microphone or construct sample-based voices.
+Stage 7 implements explicit sample capture/import and real create/bake/format/release for the exact
+Qwen profile. Eager bake validates the returned object's state. Lazy format validates a guarded
+native receipt because upstream does not update the JS object's rows/baked when formatting bakes.
+No handle is fabricated or carried across contexts. Stage 6 receipts do not prove reference
+conditioning; the separate Stage 7 comparison must establish that effect.
 
 ## Aliases, discrepancies and runtime-owned controls
 
@@ -355,7 +397,7 @@ Reference-audio capture/input, creation, bake and speaker-handle release remain 
 | **4 — Tools** | Implemented bounded local allowlist, validated final calls, sequential execution, canonical history and result-to-model loop. Application tests and documented Android CPU acceptance pass; automatic calculator non-selection and untested platforms remain explicit. Partial streams remain non-executable. |
 | **5 — Embeddings/rerank** | Implemented pooled vectors, hybrid rank fusion, genuine optional rerank and bounded encrypted indexes through shared chat/tool ownership. Android CPU fixed-corpus, LoRA, tool/schema, Stop, repeat/cold reuse and persistent deletion passed; ordinary EN/RU controls were captured with documented observation and answer-quality limits. |
 | **6 — TTS** | Implemented bounded token/continuous pipelines, exact CPU profiles, prerequisite checks and ephemeral playback. Both fresh CPU protocol/content flows, ordinary no-A/background, five independent same-APK baselines and implementation-source CI passed. Historical Speak/EN-RU review/overlength UI, no-A content `not_run`, memory limits, finite privacy capture and untested cases retain explicit scope. |
-| **7 — Audio input and sample-based voices** | Model-supported audio input plus reference-audio speaker creation/bake/release, ownership and privacy. |
+| **7 — Audio input and sample-based voices** | Implemented explicit recording/finalization, bounded native preparation, ordinary audio drafts, builtin/offline phonemizer and reference create/eager-lazy bake/release with encrypted saved sources. Source/native/content/reference comparison and untested scopes are reported separately; implementation alone does not pass acceptance. |
 | **8 — Parallel, sessions, cache and measurements** | Request isolation, error/cancellation settlement, bounded slots/cache, session validity and representative backend benchmarks. |
 | **9 — Completeness and stable release** | Reconcile exports/types against final selected stable tag; model/platform evidence and release regression gates. Deferred or unavailable paths cannot silently become “supported.” |
 

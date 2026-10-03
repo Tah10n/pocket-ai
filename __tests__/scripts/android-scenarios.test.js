@@ -534,20 +534,19 @@ describe('app image picker configuration', () => {
     ]);
     expect(appConfig.expo.plugins).toContain('./plugins/withIosPhotoLibraryPermissionLocalization');
     expect(appConfig.expo.android.permissions).not.toContain('CAMERA');
-    expect(appConfig.expo.android.permissions).not.toContain('RECORD_AUDIO');
+    expect(appConfig.expo.android.permissions).toContain('RECORD_AUDIO');
     expect(appConfig.expo.android.permissions).toContain('READ_EXTERNAL_STORAGE');
     expect(appConfig.expo.android.permissions).not.toContain('WRITE_EXTERNAL_STORAGE');
     expect(appConfig.expo.android.blockedPermissions).toEqual(
       expect.arrayContaining([
         'android.permission.CAMERA',
-        'android.permission.RECORD_AUDIO',
         'android.permission.WRITE_EXTERNAL_STORAGE',
       ])
     );
     expect(appConfig.expo.android.blockedPermissions).not.toContain('android.permission.READ_EXTERNAL_STORAGE');
   });
 
-  it('release config plugin removes blocked Android capture/write permissions and caps legacy gallery read', () => {
+  it('release config keeps explicit microphone permission, removes blocked camera/write permissions and caps legacy gallery read', () => {
     const nextConfig = {
       modResults: {
         manifest: {
@@ -573,11 +572,13 @@ describe('app image picker configuration', () => {
     expect(permissionNames).toEqual([
       'android.permission.INTERNET',
       'android.permission.CAMERA',
+      'android.permission.RECORD_AUDIO',
       'android.permission.READ_EXTERNAL_STORAGE',
     ]);
     expect(result.modResults.manifest['uses-permission']).toEqual([
       { $: { 'android:name': 'android.permission.INTERNET' } },
       { $: { 'android:name': 'android.permission.CAMERA', 'tools:node': 'remove' } },
+      { $: { 'android:name': 'android.permission.RECORD_AUDIO' } },
       {
         $: {
           'android:name': 'android.permission.READ_EXTERNAL_STORAGE',
@@ -4667,6 +4668,9 @@ describe('android-scenarios pack selection', () => {
         'runtime-local-tts-tokens',
         'runtime-local-tts-continuous',
         'runtime-local-tts-playback',
+        'runtime-stage7-recording',
+        'runtime-stage7-audio-input',
+        'runtime-stage7-voices',
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));
@@ -4697,6 +4701,12 @@ describe('android-scenarios pack selection', () => {
       expect(selectScenarios(scenarios, parseCliOptions(['--pack', pack])).map(item => item.id))
         .not.toEqual(expect.arrayContaining(['runtime-local-tts-tokens', 'runtime-local-tts-continuous']));
     }
+  });
+
+  it('keeps Stage7 capture, audio input and voices in one explicit bounded pack', () => {
+    const selected = selectScenarios(scenarios, parseCliOptions(['--pack', 'audio-voices', '--apk-variant', 'release', '--isolated-qa-install']));
+    expect(selected.map(item => item.id)).toEqual(['runtime-stage7-recording', 'runtime-stage7-audio-input', 'runtime-stage7-voices']);
+    expect(selected.every(item => item.requiresCurrentHeadProvenance && item.requiresIsolatedQaInstall)).toBe(true);
   });
 });
 

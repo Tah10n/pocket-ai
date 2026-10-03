@@ -1,0 +1,196 @@
+import { AppState } from 'react-native';
+import { checkAndroidQaStage7ColdVoice, continueAndroidQaAudioStage7, getAndroidQaAudioStage7Evidence,
+  isAndroidQaAudioStage7Enabled, runAndroidQaStage7Input, runAndroidQaStage7Recording,
+  runAndroidQaStage7Voices } from '../../src/services/AndroidQaAudioStage7';
+import fixture from '../../docs/validation/llama-rn-stage7/audio-input-fixtures.json';
+import syntheticFixtures from '../../docs/validation/llama-rn-stage7/synthetic-inputs.json';
+import type { TtsRequest } from '../../src/services/TtsService';
+
+const mockStartRecording = jest.fn(); const mockStopRecording = jest.fn(); const mockClearRecording = jest.fn();
+const mockPrep = jest.fn(); const mockDiscard = jest.fn(); const mockPreviewPlay = jest.fn(); const mockPreviewStop = jest.fn();
+const mockTtsStart = jest.fn(); const mockTtsClear = jest.fn(); const mockSave = jest.fn(); const mockDelete = jest.fn();
+const mockChatCompletion = jest.fn(); const mockPrepareProfile = jest.fn(); const mockLoad = jest.fn();
+const mockCopy = jest.fn(); const mockFileInfo = jest.fn(); const mockQueue = jest.fn();
+let mockEnabled = true; let mockCache = 'file:///data/user/0/app.qa/cache/';
+let mockRecorderState: { phase: string; interrupted?: boolean };
+let mockTtsState: { phase: string | null; clipAvailable?: boolean; sampleRate?: number; sampleCount?: number };
+let mockVoices: { voices: Array<Record<string, unknown>>; selectedVoiceId: string | null };
+let mockEngineModel = 'base';
+let mockThread = 'original';
+const mockThreads: Record<string, unknown> = {};
+const mockBase = { id: 'base', artifacts: [{ id: 'lora', kind: 'lora_adapter',
+  sha256: require('../../docs/validation/llama-rn-stage3/lora-fixture.json').adapter.sha256,
+  installState: 'installed', localPath: 'lora.gguf', sizeBytes: 10 }] };
+let mockAudioModel: Record<string, unknown>;
+
+jest.mock('expo-file-system/legacy', () => ({ copyAsync: (...args: unknown[]) => mockCopy(...args),
+  getInfoAsync: (...args: unknown[]) => mockFileInfo(...args) }));
+jest.mock('../../src/services/AudioRecordingService', () => ({ audioRecordingService: {
+  getState: () => mockRecorderState, start: (...args: unknown[]) => mockStartRecording(...args),
+  stop: () => mockStopRecording(), cancelAndClear: () => mockClearRecording() } }));
+jest.mock('../../src/services/AudioPreparationService', () => ({ prepareManagedAudio: (...args: unknown[]) => mockPrep(...args),
+  discardPreparedAudio: (...args: unknown[]) => mockDiscard(...args) }));
+jest.mock('../../src/services/AudioSamplePreviewService', () => ({ audioSamplePreviewService: {
+  play: (...args: unknown[]) => mockPreviewPlay(...args), stop: () => mockPreviewStop(), getState: () => ({ phase: 'playing' }) } }));
+jest.mock('../../src/services/AndroidQaDocumentModelBootstrap', () => ({ ANDROID_QA_DOCUMENT_MODEL_ID: 'base',
+  isAndroidQaDocumentModelBootstrapEnabled: () => mockEnabled }));
+jest.mock('../../src/services/AndroidQaStage3', () => ({ getAndroidQaEffectiveProfileIdentity: () => 'profile',
+  prepareAndroidQaStage3Adapter: jest.fn(async () => undefined) }));
+jest.mock('../../src/services/AndroidQaTts', () => ({ prepareAndroidQaTtsProfile: (...args: unknown[]) => mockPrepareProfile(...args) }));
+jest.mock('../../src/services/FileSystemSetup', () => ({ getAppCacheRootDir: () => mockCache }));
+jest.mock('../../src/services/LocalStorageRegistry', () => ({ registry: { getModel: (id: string) => id === 'base' ? mockBase : mockAudioModel,
+  updateModel: jest.fn() } }));
+jest.mock('../../src/services/ModelDownloadManager', () => ({ getModelDownloadManager: () => ({ cancelDownload: jest.fn() }) }));
+jest.mock('../../src/utils/modelArtifacts', () => ({ getCompanionBindingIdentity: () => 'base-identity',
+  getCompanionSourceIdentity: () => 'lora-identity' }));
+jest.mock('../../src/utils/modelRoles', () => ({ getModelFileIdentity: (model: { sha256: string }) => model.sha256 }));
+jest.mock('../../src/services/SettingsStore', () => ({ getSettings: () => ({ activeModelId: 'base', auxiliaryModels: {} }), updateSettings: jest.fn() }));
+jest.mock('../../src/services/AuxiliaryModelService', () => ({ selectAuxiliaryModel: jest.fn() }));
+jest.mock('../../src/store/downloadStore', () => ({ useDownloadStore: { getState: () => ({ queue: [], addToQueue: mockQueue }) } }));
+jest.mock('../../src/store/chatStore', () => ({ useChatStore: { getState: () => ({ activeThreadId: mockThread, threads: mockThreads,
+  createThread: () => { mockThread = 'owned'; return mockThread; }, deleteThread: jest.fn(),
+  setActiveThread: (id: string) => { mockThread = id; } }) } }));
+jest.mock('../../src/services/LLMEngineService', () => ({ llmEngineService: {
+  getState: () => ({ activeModelId: mockEngineModel, status: 'ready', diagnostics: { backendMode: 'cpu',
+    actualGpuAccelerated: false, initNParallel: 1, stateCacheBudgetMb: 0, stateCacheMaxCheckpoints: 8 } }),
+  getEffectiveLoadParameters: () => ({ contextSize: 512 }), load: (...args: unknown[]) => mockLoad(...args), unload: jest.fn(),
+  hasActiveCompletion: () => false, hasAuxiliaryContextOperation: () => false,
+  chatCompletion: (...args: unknown[]) => mockChatCompletion(...args) } }));
+jest.mock('../../src/services/TtsService', () => ({ ttsService: { start: (...args: unknown[]) => mockTtsStart(...args),
+  getState: () => mockTtsState, play: async () => { mockTtsState.phase = 'playing'; }, stop: jest.fn(async () => undefined),
+  cancelAndClear: () => mockTtsClear() } }));
+jest.mock('../../src/services/ReferenceVoiceStore', () => ({ referenceVoiceStore: { hydrate: jest.fn(), getState: () => mockVoices,
+  save: (...args: unknown[]) => mockSave(...args), select: (id: string) => { mockVoices.selectedVoiceId = id; },
+  delete: (...args: unknown[]) => mockDelete(...args) } }));
+
+const flush = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+async function until(phase: string) {
+  for (let i = 0; i < 20; i++) { await flush(); if (getAndroidQaAudioStage7Evidence().phase === phase) return; await jest.advanceTimersByTimeAsync(400); }
+  throw new Error(`Expected ${phase}, saw ${getAndroidQaAudioStage7Evidence().phase}`);
+}
+beforeEach(() => {
+  jest.useFakeTimers(); jest.clearAllMocks(); mockEnabled = true; mockCache = 'file:///data/user/0/app.qa/cache/';
+  mockRecorderState = { phase: 'idle' }; mockTtsState = { phase: null }; mockVoices = { voices: [], selectedVoiceId: null };
+  mockEngineModel = 'base'; mockThread = 'original';
+  Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'active' });
+  mockStartRecording.mockImplementation(async () => { mockRecorderState = { phase: 'recording' }; });
+  mockStopRecording.mockImplementation(async () => { mockRecorderState = { phase: 'ready' }; return { uri: 'file:///source.m4a', durationMillis: 1000, byteSize: 200 }; });
+  mockClearRecording.mockImplementation(async () => { mockRecorderState = { phase: 'idle' }; });
+  mockPrep.mockImplementation(async ({ sourceUri }: { sourceUri: string }) => {
+    const expected = syntheticFixtures.fixtures.find(item => sourceUri.endsWith(item.filename));
+    return { uri: 'file:///prepared.wav', sampleRate: expected?.sampleRate ?? 16000,
+      sampleCount: expected?.sampleCount ?? 24000, durationMs: expected?.durationMs ?? 1000, sizeBytes: 48044,
+      sourceSha256: expected?.sha256 ?? 'a'.repeat(64) };
+  });
+  mockDiscard.mockResolvedValue(undefined); mockPreviewPlay.mockResolvedValue(undefined); mockPreviewStop.mockResolvedValue(undefined);
+  mockCopy.mockResolvedValue(undefined); mockFileInfo.mockImplementation(async (uri: string) => ({ exists: !uri.includes('source.m4a') }));
+  mockLoad.mockImplementation(async (id: string) => { mockEngineModel = id; });
+  mockChatCompletion.mockImplementation(async (request: { onToken: (value: string) => void }) => {
+    request.onToken('token'); return { text: 'orange seven', content: 'orange seven' };
+  });
+  mockPrepareProfile.mockImplementation(async (profile: { id: string }) => ({ id: profile.id }));
+  mockTtsClear.mockImplementation(async () => { mockTtsState = { phase: null }; });
+  mockTtsStart.mockImplementation(async (request: TtsRequest) => {
+    const settled = (operation: string, extra = {}) => request.observe?.({ operation, phase: 'settled', ...extra } as never);
+    settled('vocoder_init');
+    if (request.voice?.kind === 'reference') { settled('speaker_create'); if (request.voice.bake === 'eager') settled('speaker_bake'); }
+    if (request.voice?.kind === 'builtin') settled('phonemizer', { elapsedMs: 10 });
+    settled('formatter', request.voice?.kind === 'reference' ? { speakerRows: 1, speakerBaked: true } : {});
+    settled('completion'); settled('decode', { sampleRate: 24000, sampleCount: 24000 });
+    if (request.voice?.kind === 'reference') settled('speaker_release'); settled('vocoder_release');
+    mockTtsState = { phase: 'ready', clipAvailable: true, sampleRate: 24000, sampleCount: 24000 };
+  });
+  mockSave.mockImplementation(async (input: Record<string, unknown>) => {
+    const voice = { id: 'qa-saved', name: input.name, sourceSha256: input.sourceSha256 };
+    mockVoices.voices = [voice]; return voice;
+  });
+  mockDelete.mockImplementation(async () => { mockVoices = { voices: [], selectedVoiceId: null }; });
+  const source = fixture.audioInput;
+  mockAudioModel = { id: 'pocket-ai/android-qa-ultravox-1b', sha256: source.backbone.sha256, localPath: 'audio.gguf',
+    downloadIntegrity: { kind: 'sha256', sha256: source.backbone.sha256, sizeBytes: source.backbone.bytes },
+    artifacts: [{ id: 'android-qa-stage7-ultravox-projector', localPath: 'projector.gguf', installState: 'installed',
+      integrity: { kind: 'sha256', sha256: source.projector.sha256, sizeBytes: source.projector.bytes } }],
+    multimodalReadiness: { status: 'ready', support: ['audio'] } };
+});
+afterEach(() => jest.useRealTimers());
+
+it('refuses fixture/native activity outside the flagged isolated package', async () => {
+  mockCache = 'file:///data/user/0/app/cache/'; expect(isAndroidQaAudioStage7Enabled()).toBe(false);
+  await runAndroidQaStage7Recording(); expect(mockStartRecording).not.toHaveBeenCalled();
+});
+it('awaits actual controlled capture, preparation and real background draft before passing', async () => {
+  const work = runAndroidQaStage7Recording(); await until('recording_awaiting_controlled_sound');
+  expect(mockStopRecording).not.toHaveBeenCalled(); continueAndroidQaAudioStage7();
+  await until('awaiting_clip_copy'); expect(mockStopRecording).toHaveBeenCalledTimes(1); expect(mockPrep).toHaveBeenCalled();
+  continueAndroidQaAudioStage7(); await until('recording_awaiting_background');
+  mockRecorderState = { phase: 'ready', interrupted: true }; continueAndroidQaAudioStage7();
+  await jest.advanceTimersByTimeAsync(500); await work;
+  expect(getAndroidQaAudioStage7Evidence().status).toBe('native_passed'); expect(mockStartRecording).toHaveBeenCalledTimes(2);
+  expect(mockClearRecording).toHaveBeenCalledTimes(2);
+});
+it('never converts a false start receipt into native recording proof', async () => {
+  mockStartRecording.mockResolvedValueOnce(undefined); await runAndroidQaStage7Recording();
+  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'recorder_not_recording' });
+  expect(mockPrep).not.toHaveBeenCalled(); expect(mockClearRecording).toHaveBeenCalled();
+});
+it('requires actual background finalization rather than the return-to-foreground gate alone', async () => {
+  const work = runAndroidQaStage7Recording(); await until('recording_awaiting_controlled_sound'); continueAndroidQaAudioStage7();
+  await until('awaiting_clip_copy'); continueAndroidQaAudioStage7(); await until('recording_awaiting_background');
+  continueAndroidQaAudioStage7(); await work;
+  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'background_not_finalized' });
+});
+it('sends separately prepared imported and recorded WAVs through the real input_audio service contract', async () => {
+  mockPrep.mockImplementation(async ({ sourceUri }: { sourceUri: string }) => ({ uri: sourceUri, sampleRate: 16000,
+    sampleCount: sourceUri.endsWith('input-orange-seven.wav') ? 57280 : 1000,
+    sourceSha256: sourceUri.endsWith('input-orange-seven.wav') ? syntheticFixtures.fixtures[2].sha256 : 'c'.repeat(64) }));
+  await runAndroidQaStage7Input();
+  expect(mockChatCompletion).toHaveBeenCalledTimes(2);
+  const requests = mockChatCompletion.mock.calls.map(call => call[0]);
+  expect(requests[0].messages[0].contentParts[1]).toMatchObject({ type: 'input_audio', input_audio: { format: 'wav' } });
+  expect(requests[0].messages[0].contentParts[1].input_audio.url).toContain('input-orange-seven.wav');
+  expect(requests[1].messages[0].contentParts[1].input_audio.url).toContain('recorded.wav');
+  expect(getAndroidQaAudioStage7Evidence().status).toBe('native_passed'); expect(mockQueue).not.toHaveBeenCalled();
+  expect(mockEngineModel).toBe('base');
+});
+it('refuses a successful completion callback that misses the controlled audio content', async () => {
+  mockChatCompletion.mockImplementationOnce(async (request: { onToken: (value: string) => void }) => {
+    request.onToken('token'); return { text: 'I cannot hear it.' };
+  });
+  await runAndroidQaStage7Input();
+  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'audio_imported_content_mismatch' });
+  expect(mockChatCompletion).toHaveBeenCalledTimes(1); expect(mockDiscard).toHaveBeenCalled();
+});
+
+it('rejects changed fixture bytes before giving unrelated audio to the native model', async () => {
+  mockPrep.mockResolvedValueOnce({ uri: 'file:///prepared.wav', sampleRate: 16000, sampleCount: 57280,
+    sourceSha256: 'd'.repeat(64) });
+  await runAndroidQaStage7Input();
+  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'synthetic_fixture_identity_mismatch' });
+  expect(mockChatCompletion).not.toHaveBeenCalled(); expect(mockDiscard).toHaveBeenCalled();
+});
+it('runs fixed-target builtin/eager/lazy/no-reference consumers and cold saved deletion without handles', async () => {
+  const work = runAndroidQaStage7Voices();
+  for (const id of ['neu-jo', 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference']) {
+    await until('awaiting_clip_copy'); expect(getAndroidQaAudioStage7Evidence().clipId).toBe(id);
+    continueAndroidQaAudioStage7();
+  }
+  await work; expect(getAndroidQaAudioStage7Evidence().status).toBe('native_passed');
+  const requests = mockTtsStart.mock.calls.map(call => call[0]);
+  expect(new Set(requests.map(request => request.text)).size).toBe(1);
+  expect(requests.map(request => request.voice.kind)).toEqual(['builtin', 'reference', 'reference', 'speakerless']);
+  expect(requests[1].voice.bake).toBe('eager'); expect(requests[2].voice.bake).toBe('lazy');
+  mockTtsState = { phase: null }; const cold = checkAndroidQaStage7ColdVoice();
+  await until('awaiting_clip_copy'); expect(getAndroidQaAudioStage7Evidence().clipId).toBe('qwen-saved-cold');
+  continueAndroidQaAudioStage7(); await cold;
+  expect(getAndroidQaAudioStage7Evidence().status).toBe('native_passed'); expect(mockDelete).toHaveBeenCalledWith('qa-saved');
+  expect(mockTtsStart.mock.calls.at(-1)?.[0].voice.source).toMatchObject({ kind: 'saved', voiceId: 'qa-saved' });
+});
+it('requires an actual formatter speaker receipt before a reference path can pass', async () => {
+  const original = mockTtsStart.getMockImplementation()!;
+  mockTtsStart.mockImplementation(async (request: TtsRequest) => original({ ...request, observe: (event: unknown) => {
+    const typed = event as { operation: string; speakerBaked?: boolean };
+    request.observe?.({ ...typed, ...(typed.operation === 'formatter' ? { speakerBaked: false } : {}) } as never);
+  } }));
+  const work = runAndroidQaStage7Voices(); await until('awaiting_clip_copy'); continueAndroidQaAudioStage7();
+  await work; expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'reference_not_used' });
+});

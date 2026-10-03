@@ -457,7 +457,9 @@ describe('Android build content provenance', () => {
     }
   });
 
-  it.each(['docs/validation/llama-rn-stage3/lora-fixture.json', 'docs/validation/llama-rn-stage4/tool-fixture.json', 'docs/validation/llama-rn-stage5/retrieval-fixtures.json'])('hashes imported fixture %s without recursively including validation documents', (fixtureRelativePath) => {
+  it.each(['docs/validation/llama-rn-stage3/lora-fixture.json', 'docs/validation/llama-rn-stage4/tool-fixture.json', 'docs/validation/llama-rn-stage5/retrieval-fixtures.json',
+    'docs/validation/llama-rn-stage7/audio-input-fixtures.json', 'docs/validation/llama-rn-stage7/tts-fixtures.json',
+    'docs/validation/llama-rn-stage7/synthetic-inputs.json'])('hashes imported fixture %s without recursively including validation documents', (fixtureRelativePath) => {
     const projectRoot = createProject();
     const fixturePath = path.join(projectRoot, fixtureRelativePath);
     const reportPath = path.join(path.dirname(fixturePath), 'acceptance.md');

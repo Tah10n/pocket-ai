@@ -6,7 +6,10 @@ group = 'com.github.tah10n.pocketaudio'
 version = '0.0.1'
 android {
   namespace 'com.github.tah10n.pocketaudio'
-  defaultConfig { minSdk 24 }
+  defaultConfig {
+    minSdk 24
+    versionName '0.0.1'
+  }
 }
 dependencies {
   implementation project(':expo-modules-core')

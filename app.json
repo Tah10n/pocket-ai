@@ -113,7 +113,7 @@
         {
           "photosPermission": "Pocket AI uses your photo library so you can attach images to local chats.",
           "cameraPermission": false,
-          "microphonePermission": false
+          "microphonePermission": "Allow Pocket AI to record audio only when you tap Record, for a chat attachment or a voice sample."
         }
       ],
       "expo-sharing",

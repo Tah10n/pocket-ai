@@ -519,9 +519,12 @@ describe('Android scenario route deep links', () => {
 describe('app image picker configuration', () => {
   const appConfig = require('../../app.json');
 
-  it('declares gallery-only image picker permissions explicitly', () => {
+  it('preserves gallery/camera restrictions while allowing only explicit recorder microphone permission', () => {
     const imagePickerPlugin = appConfig.expo.plugins.find(
       (plugin) => Array.isArray(plugin) && plugin[0] === 'expo-image-picker'
+    );
+    const audioPlugin = appConfig.expo.plugins.find(
+      (plugin) => Array.isArray(plugin) && plugin[0] === 'expo-audio'
     );
 
     expect(imagePickerPlugin).toEqual([
@@ -529,9 +532,10 @@ describe('app image picker configuration', () => {
       expect.objectContaining({
         photosPermission: expect.stringContaining('attach images'),
         cameraPermission: false,
-        microphonePermission: false,
+        microphonePermission: audioPlugin[1].microphonePermission,
       }),
     ]);
+    expect(imagePickerPlugin[1].microphonePermission).toContain('tap Record');
     expect(appConfig.expo.plugins).toContain('./plugins/withIosPhotoLibraryPermissionLocalization');
     expect(appConfig.expo.android.permissions).not.toContain('CAMERA');
     expect(appConfig.expo.android.permissions).toContain('RECORD_AUDIO');
@@ -544,6 +548,7 @@ describe('app image picker configuration', () => {
       ])
     );
     expect(appConfig.expo.android.blockedPermissions).not.toContain('android.permission.READ_EXTERNAL_STORAGE');
+    expect(appConfig.expo.android.blockedPermissions).not.toContain('android.permission.RECORD_AUDIO');
   });
 
   it('release config keeps explicit microphone permission, removes blocked camera/write permissions and caps legacy gallery read', () => {

@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const os = require('node:os');
 const { patchLlamaBridge } = require('../patches/llama-rn-0.13.0-rc.3');
 const { patches: audioPatches, VERSION: audioVersion } = require('../patches/expo-audio-55.0.18');
 
@@ -74,6 +75,13 @@ function assertSourceConfig(root = projectRoot) {
       throw new Error('Local audio requires the pinned explicit-recording plugin with microphone permission and without background audio.');
     }
     assertExpoAudioSourceBuild(packageConfig);
+    const imagePicker = appConfig.expo.plugins.find(entry => Array.isArray(entry) && entry[0] === 'expo-image-picker');
+    if (imagePicker && imagePicker[1]?.microphonePermission !== options.microphonePermission) {
+      throw new Error('expo-image-picker must preserve the same explicit microphone usage as expo-audio; false blocks recording globally.');
+    }
+    if (appConfig.expo.android?.blockedPermissions?.some(permission => ['RECORD_AUDIO', 'android.permission.RECORD_AUDIO'].includes(permission))) {
+      throw new Error('Explicit recording cannot be blocked by android.blockedPermissions.');
+    }
   }
 
   if (backgroundModes.includes('processing')) {
@@ -97,6 +105,54 @@ function assertSourceConfig(root = projectRoot) {
   if (easConfig.build?.production?.autoIncrement !== true) {
     throw new Error('EAS production builds must auto-increment developer-facing build versions.');
   }
+}
+
+/** Execute the installed permission mods on fresh virtual native templates; never write native projects. */
+async function inspectComposedAudioPermissions(expoConfig) {
+  const { AndroidConfig, withPlugins, compileModsAsync } = require('expo/config-plugins');
+  const permissionPlugins = new Map([
+    ['expo-audio', require('expo-audio/plugin/build/withAudio').default],
+    ['expo-image-picker', require('expo-image-picker/plugin/build/withImagePicker').default],
+    ['./plugins/withAndroidReleaseConfig', require('../plugins/withAndroidReleaseConfig')],
+  ]);
+  const input = JSON.parse(JSON.stringify(expoConfig));
+  const configured = (input.plugins ?? []).flatMap(entry => {
+    const [name, options] = Array.isArray(entry) ? entry : [entry, undefined];
+    const plugin = permissionPlugins.get(name);
+    return plugin ? [[plugin, options]] : [];
+  });
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-audio-permissions-'));
+  try {
+    input._internal = { projectRoot: temporaryRoot };
+    // Keep the actual registration order, including the release permission filter.
+    let config = withPlugins(input, configured);
+    config = AndroidConfig.Permissions.withInternalBlockedPermissions(config);
+    config = await compileModsAsync(config, { projectRoot: temporaryRoot, introspect: true,
+      platforms: ['android', 'ios'], ignoreExistingNativeFiles: true });
+    return { androidManifest: config._internal?.modResults?.android?.manifest,
+      iosInfoPlist: config._internal?.modResults?.ios?.infoPlist };
+  } finally {
+    // Expo introspection is read-only. An unexpected generated file must fail this contract.
+    fs.rmdirSync(temporaryRoot);
+    if (fs.existsSync(temporaryRoot)) throw new Error('Permission introspection temporary directory was not removed.');
+  }
+}
+
+async function assertComposedAudioPermissions(expoConfig) {
+  if (!(expoConfig.plugins ?? []).some(entry => Array.isArray(entry) && entry[0] === 'expo-audio')) return;
+  const result = await inspectComposedAudioPermissions(expoConfig);
+  const recording = result.androidManifest?.manifest?.['uses-permission']?.filter(entry => entry.$?.['android:name'] === 'android.permission.RECORD_AUDIO') ?? [];
+  const usage = expoConfig.plugins.find(entry => Array.isArray(entry) && entry[0] === 'expo-audio')?.[1]?.microphonePermission;
+  if (recording.length !== 1 || recording[0].$?.['tools:node'] === 'remove'
+    || result.iosInfoPlist?.NSMicrophoneUsageDescription !== usage) {
+    throw new Error('Composed Expo permission mods must retain Android RECORD_AUDIO and the explicit iOS microphone usage description.');
+  }
+  if (result.iosInfoPlist?.UIBackgroundModes?.includes('audio')
+    || result.androidManifest?.manifest?.application?.some(application => application.service?.some(service =>
+      /expo\.modules\.audio\.service\.(?:AudioForegroundService|AudioRecordingService|AudioControlsService)/u.test(service.$?.['android:name'] ?? '')))) {
+    throw new Error('Composed Expo permission mods must forbid background audio.');
+  }
+  return result;
 }
 
 function assertLlamaNativeArtifacts(root = projectRoot) {
@@ -310,8 +366,12 @@ function run(argv = process.argv.slice(2), root = projectRoot) {
 }
 
 if (require.main === module) {
-  run();
-  console.log('Native configuration contract verified.');
+  Promise.resolve().then(async () => {
+    run();
+    const config = JSON.parse(readText(path.join(projectRoot, 'app.json'), 'Expo app config'));
+    await assertComposedAudioPermissions(config.expo);
+    console.log('Native configuration contract verified.');
+  }).catch(error => { console.error(error.message); process.exitCode = 1; });
 }
 
 module.exports = {
@@ -320,5 +380,7 @@ module.exports = {
   assertLlamaNativeArtifacts,
   assertExpoAudioNativePatch,
   assertSourceConfig,
+  inspectComposedAudioPermissions,
+  assertComposedAudioPermissions,
   run,
 };

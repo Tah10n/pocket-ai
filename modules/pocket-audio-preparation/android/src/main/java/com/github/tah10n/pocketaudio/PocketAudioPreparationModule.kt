@@ -105,7 +105,8 @@ class PocketAudioPreparationModule : Module() {
       phase("native_identity")
       require(source.length() <= maxBytes && hash(source) == originalHash) { "source_changed" }
       require(file.length() == 44L + count * 2L)
-      val result = mapOf("uri" to Uri.fromFile(file).toString(), "sourceSha256" to originalHash,
+      val emittedFile = PreparedAudioPath.emittedFile(appContext.cacheDirectory, root, file)
+      val result = mapOf("uri" to Uri.fromFile(emittedFile).toString(), "sourceSha256" to originalHash,
         "sha256" to hash(file), "sampleRate" to rate, "channels" to 1, "sampleCount" to count, "sizeBytes" to file.length())
       success = true
       return result

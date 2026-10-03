@@ -194,6 +194,7 @@ const VIDEO_ATTACHMENT_EXTENSIONS = new Set([
 const CHAT_ATTACHMENT_SOURCES = new Set<ChatAttachmentSource>([
   'photo_library',
   'document_picker',
+  'microphone',
   'derived_processor',
 ]);
 
@@ -773,12 +774,23 @@ export function normalizePersistedChatAttachment(
       }
 
       const durationMs = readPositiveInteger(audio.durationMs);
+      const sampleRate = readPositiveInteger(audio.sampleRate);
+      const sampleCount = readPositiveInteger(audio.sampleCount);
+      const sourceSha256 = typeof audio.sourceSha256 === 'string' && /^[a-f0-9]{64}$/u.test(audio.sourceSha256)
+        ? audio.sourceSha256 : undefined;
+      const preparationIdentity = typeof audio.preparationIdentity === 'string' && audio.preparationIdentity.length <= 2048
+        ? audio.preparationIdentity : undefined;
       return {
         ...base,
         kind: 'audio',
         audio: {
           format,
           ...(durationMs !== undefined ? { durationMs } : null),
+          ...(sampleRate !== undefined && sampleRate >= 8000 && sampleRate <= 48000 ? { sampleRate } : null),
+          ...(audio.channels === 1 ? { channels: 1 as const } : null),
+          ...(sampleCount !== undefined && sampleCount <= 48_000 * 30 ? { sampleCount } : null),
+          ...(sourceSha256 ? { sourceSha256 } : null),
+          ...(preparationIdentity ? { preparationIdentity } : null),
         },
       };
     }

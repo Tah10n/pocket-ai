@@ -3,6 +3,7 @@ import { Alert } from 'react-native';
 import { useTranslation } from 'react-i18next';
 import * as DocumentPicker from 'expo-document-picker';
 import type { ChatMediaAttachmentDraft } from '@/types/attachments';
+import type { PreparedAudio } from '@/services/AudioPreparationService';
 import {
   MAX_CHAT_ATTACHMENTS_BY_KIND,
   getSendableDraftMediaAttachments,
@@ -19,6 +20,7 @@ export type UseChatMediaAttachmentsOptions = {
   audioEnabled: boolean;
   audioDisabledReason?: string;
   ownerKey?: string | null;
+  onAudioCleanupFailure?: () => void;
 };
 
 export type ConsumeChatMediaDraftsForSendOptions = {
@@ -30,6 +32,7 @@ export type UseChatMediaAttachmentsResult = {
   isPickingAudio: boolean;
   remainingAudioSlots: number;
   attachAudio: () => Promise<void>;
+  attachRecordedAudio: (prepared: PreparedAudio, options?: { assertCurrent?: () => void }) => Promise<void>;
   removeDraft: (draftOrId: ChatMediaAttachmentDraft | string, index?: number) => void;
   clearDrafts: () => void;
   clearFailedDrafts: () => void;
@@ -89,6 +92,7 @@ export function useChatMediaAttachments({
   audioEnabled,
   audioDisabledReason,
   ownerKey = null,
+  onAudioCleanupFailure,
 }: UseChatMediaAttachmentsOptions): UseChatMediaAttachmentsResult {
   const { t } = useTranslation();
   const normalizedOwnerKey = ownerKey ?? 'default';
@@ -105,6 +109,7 @@ export function useChatMediaAttachments({
   const pickingLockRef = useRef(false);
   const ownerKeyRef = useRef(normalizedOwnerKey);
   const ownerGenerationRef = useRef(0);
+  const audioCleanupFailed = useRef(false);
   const audioCount = drafts.filter((draft) => draft.kind === 'audio').length;
   const remainingAudioSlots = Math.max(0, MAX_CHAT_ATTACHMENTS_BY_KIND.audio - audioCount);
 
@@ -161,6 +166,11 @@ export function useChatMediaAttachments({
       return;
     }
 
+    if (audioCleanupFailed.current) {
+      showAttachmentAlert('chat.attachments.attachAudio', 'audioRecording.errors.cleanup_failed');
+      return;
+    }
+
     if (!audioEnabled) {
       showAttachmentAlert('chat.attachments.attachAudio', audioDisabledReason ?? 'chat.attachments.audioPickerDisabled');
       return;
@@ -197,8 +207,16 @@ export function useChatMediaAttachments({
       const asset = result.assets[0];
       let nextDraft: ChatMediaAttachmentDraft;
       try {
-        nextDraft = await chatAttachmentStorageService.copyAudioAssetToDraft(asset);
+        nextDraft = await chatAttachmentStorageService.copyAudioAssetToDraft(asset, {
+          assertCurrent: () => { if (!isCurrentFlow()) throw new Error('Audio picker owner changed.'); },
+        });
       } catch (error) {
+        if (error && typeof error === 'object' && 'code' in error && error.code === 'cleanup_failed') {
+          audioCleanupFailed.current = true;
+          onAudioCleanupFailure?.();
+          if (isCurrentFlow()) showAttachmentAlert('chat.attachments.attachAudio', 'audioRecording.errors.cleanup_failed');
+          return;
+        }
         const reason = isChatMediaAttachmentTooLargeError(error)
           ? 'too_large'
           : isChatMediaAttachmentUnsupportedTypeError(error)
@@ -240,7 +258,35 @@ export function useChatMediaAttachments({
         setIsPickingAudio(false);
       }
     }
-  }, [appendDrafts, audioDisabledReason, audioEnabled, showAttachmentAlert]);
+  }, [appendDrafts, audioDisabledReason, audioEnabled, onAudioCleanupFailure, showAttachmentAlert]);
+
+  const attachRecordedAudio = useCallback(async (prepared: PreparedAudio, options: { assertCurrent?: () => void } = {}): Promise<void> => {
+    options.assertCurrent?.();
+    if (!mountedRef.current || pickingLockRef.current || audioCleanupFailed.current || !audioEnabled
+      || !validateChatMediaAttachmentLimit('audio', draftsRef.current.length, 1).ok) {
+      throw new Error('Recorded audio cannot be attached to the current chat.');
+    }
+    const owner = ownerKeyRef.current;
+    const generation = ownerGenerationRef.current;
+    pickingLockRef.current = true;
+    setIsPickingAudio(true);
+    try {
+      const draft = await chatAttachmentStorageService.copyPreparedAudioToDraft(prepared, 'microphone');
+      try {
+        options.assertCurrent?.();
+        if (!mountedRef.current || ownerKeyRef.current !== owner || ownerGenerationRef.current !== generation) {
+          throw new Error('Recorded audio owner changed.');
+        }
+      } catch (failure) {
+        await chatAttachmentStorageService.discardMediaDraft(draft);
+        throw failure;
+      }
+      appendDrafts([draft]);
+    } finally {
+      pickingLockRef.current = false;
+      if (mountedRef.current) setIsPickingAudio(false);
+    }
+  }, [appendDrafts, audioEnabled]);
 
   const removeDraft = useCallback((draftOrId: ChatMediaAttachmentDraft | string, index?: number) => {
     if (!mountedRef.current) {
@@ -411,6 +457,7 @@ export function useChatMediaAttachments({
     isPickingAudio,
     remainingAudioSlots,
     attachAudio,
+    attachRecordedAudio,
     removeDraft,
     clearDrafts,
     clearFailedDrafts,
@@ -419,6 +466,7 @@ export function useChatMediaAttachments({
     discardDrafts,
   }), [
     attachAudio,
+    attachRecordedAudio,
     clearDrafts,
     clearFailedDrafts,
     consumeDraftsForSend,

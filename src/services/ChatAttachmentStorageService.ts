@@ -9,6 +9,7 @@ import {
 } from '@/types/multimodal';
 import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '@/types/attachments';
 import type { ChatThread } from '@/types/chat';
+import { prepareManagedAudio, discardPreparedAudio, type PreparedAudio } from './AudioPreparationService';
 import {
   MAX_CHAT_AUDIO_ATTACHMENT_BYTES,
   isSupportedChatDocumentDraftFormat,
@@ -701,9 +702,10 @@ export function materializeMediaDraftsForMessage({
         fileName,
         mimeType,
         sizeBytes,
-        source: 'document_picker',
+        source: draft.source === 'microphone' ? 'microphone' : 'document_picker',
         createdAt: draft.createdAt ?? createdAt,
         audio: {
+          ...draft.audio,
           format,
           ...(normalizePositiveInteger(draft.audio?.durationMs) ? { durationMs: normalizePositiveInteger(draft.audio?.durationMs) } : null),
         },
@@ -1012,75 +1014,49 @@ export class ChatAttachmentStorageService {
     };
   }
 
-  public async copyAudioAssetToDraft(asset: CopyableDocumentAsset): Promise<ChatMediaAttachmentDraft> {
+  public async copyAudioAssetToDraft(asset: CopyableDocumentAsset, options: { assertCurrent?: () => void } = {}): Promise<ChatMediaAttachmentDraft> {
     const sourceUri = asset.uri.trim();
-    if (!sourceUri) {
-      throw new Error('Selected audio URI is empty.');
+    if (!sourceUri) throw new Error('Selected audio URI is empty.');
+    if (!resolveAudioCopyFormat(asset)) throw new ChatMediaAttachmentUnsupportedTypeError('audio');
+    if (asset.size && asset.size > MAX_CHAT_AUDIO_ATTACHMENT_BYTES) throw new ChatMediaAttachmentTooLargeError('audio');
+    let prepared: PreparedAudio;
+    try {
+      prepared = await prepareManagedAudio({ sourceUri, purpose: 'chat', assertCurrent: options.assertCurrent });
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+      if (code === 'audio_limit') throw new ChatMediaAttachmentTooLargeError('audio');
+      if (code === 'invalid_audio') throw new ChatMediaAttachmentUnsupportedTypeError('audio');
+      throw error;
     }
+    try { return await this.copyPreparedAudioToDraft(prepared, 'document_picker'); }
+    finally { await discardPreparedAudio(prepared); }
+  }
 
-    const copyFormat = resolveAudioCopyFormat(asset);
-    if (!copyFormat) {
+  /** The prepared file is borrowed. Only the copied draft belongs to the attachment lifecycle. */
+  public async copyPreparedAudioToDraft(prepared: PreparedAudio, source: 'document_picker' | 'microphone'): Promise<ChatMediaAttachmentDraft> {
+    if (prepared.channels !== 1 || !Number.isSafeInteger(prepared.sampleRate) || prepared.sampleRate < 8_000
+      || prepared.sampleRate > 48_000 || !Number.isSafeInteger(prepared.sampleCount) || prepared.sampleCount < 1
+      || prepared.sampleCount > prepared.sampleRate * 30 || prepared.sizeBytes !== 44 + prepared.sampleCount * 2
+      || !/^[a-f0-9]{64}$/u.test(prepared.sourceSha256) || prepared.identity.length > 2048) {
       throw new ChatMediaAttachmentUnsupportedTypeError('audio');
     }
-
-    const assetSize = normalizePositiveInteger(asset.size);
-    if (assetSize && assetSize > MAX_CHAT_AUDIO_ATTACHMENT_BYTES) {
-      throw new ChatMediaAttachmentTooLargeError('audio');
-    }
-
     const directory = await this.ensureBaseDirectory();
     const draftId = createDraftId(this.now(), this.random());
-    const fileName = `${draftId}.${copyFormat.extension}`;
+    const fileName = `${draftId}.wav`;
     const localUri = `${directory}${fileName}`;
-
     try {
-      await FileSystem.copyAsync({ from: sourceUri, to: localUri });
+      await FileSystem.copyAsync({ from: prepared.uri, to: localUri });
+      const copied = await FileSystem.getInfoAsync(localUri);
+      if (!copied.exists || copied.isDirectory || copied.size !== prepared.sizeBytes) throw new Error('Copied audio file is invalid.');
     } catch (error) {
       await this.deleteLocalUriQuietly(localUri, 'partial_audio_copy_cleanup');
       throw error;
     }
-
-    let copiedInfo: Awaited<ReturnType<typeof FileSystem.getInfoAsync>>;
-    try {
-      copiedInfo = await FileSystem.getInfoAsync(localUri);
-    } catch (error) {
-      await this.deleteLocalUriQuietly(localUri, 'unknown_size_audio_copy_cleanup');
-      console.warn('[ChatAttachmentStorage] Failed to inspect copied audio attachment', {
-        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
-        context: 'copied_audio_file_size_inspection',
-        ...getSanitizedErrorDetails(error),
-      });
-      throw new Error('Copied chat audio file size is unknown.');
-    }
-
-    const copiedSize = copiedInfo.exists ? normalizePositiveInteger(copiedInfo.size) : undefined;
-    if (!copiedSize) {
-      await this.deleteLocalUriQuietly(localUri, 'unknown_size_audio_copy_cleanup');
-      throw new Error('Copied chat audio file size is unknown.');
-    }
-
-    if (copiedSize > MAX_CHAT_AUDIO_ATTACHMENT_BYTES) {
-      await this.deleteLocalUriQuietly(localUri, 'oversized_audio_copy_cleanup');
-      throw new ChatMediaAttachmentTooLargeError('audio');
-    }
-
-    return {
-      id: draftId,
-      kind: 'audio',
-      pickerUri: sourceUri,
-      localUri,
-      pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
-      fileName,
-      displayName: readNonEmptyString(asset.name) ?? fileName,
-      mimeType: copyFormat.mimeType,
-      sizeBytes: copiedSize,
-      source: 'document_picker',
-      createdAt: this.now(),
-      copyStatus: 'copied',
-      audio: {
-        format: copyFormat.format,
-      },
-    };
+    return { id: draftId, kind: 'audio', pickerUri: prepared.uri, localUri, pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+      fileName, displayName: fileName, mimeType: 'audio/wav', sizeBytes: prepared.sizeBytes, source,
+      createdAt: this.now(), copyStatus: 'copied', audio: { format: 'wav', durationMs: Math.ceil(prepared.durationMs),
+        sampleRate: prepared.sampleRate, channels: 1, sampleCount: prepared.sampleCount,
+        sourceSha256: prepared.sourceSha256, preparationIdentity: prepared.identity } };
   }
 
   public async discardDrafts(drafts: readonly AttachmentDraft[]): Promise<void> {

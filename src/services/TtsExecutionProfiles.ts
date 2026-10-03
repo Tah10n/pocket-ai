@@ -19,6 +19,13 @@ export interface TtsExecutionProfile {
   readonly promptKind: TTSCapabilities['promptKind'];
   readonly flow: TtsFlow;
   readonly languages: readonly string[];
+  readonly voiceModes?: readonly ('speakerless' | 'builtin' | 'reference')[];
+  /** Keys for the JS builtin table and offline phonemizer, separate from speech admission. */
+  readonly builtinLanguage?: string;
+  readonly phonemizerLanguage?: string;
+  readonly builtinVoices?: readonly string[];
+  readonly maxPromptTokens?: number;
+  readonly reference?: Readonly<{ sampleRate: number; maxSeconds: number; maxSamples: number; rows: number }>;
   readonly sampleRate: number;
   readonly samplesPerFrame: number;
   readonly codebooks?: number;
@@ -66,6 +73,40 @@ export const TTS_EXECUTION_PROFILES: readonly TtsExecutionProfile[] = Object.fre
     graphReserveBytes: 1536 * MiB,
     sampling: Object.freeze({ temperature: 1, top_k: 40, top_p: 0.9, penalty_repeat: 1 }),
   }),
+  Object.freeze({
+    id: 'neutts-nano-q4_k_m-neucodec-q8_0',
+    backbone: Object.freeze({ repository: 'BricksDisplay/NeuTTS-Nano-GGUF',
+      revision: '857e272b903daf826606567c9ceaef574bfa793b', filename: 'neutts-nano-q4_k_m.gguf',
+      sha256: '14049f27cd9fac6bc703d06bbfd2580ec6fdc2b23780533bb416ddaf236d993f', bytes: 209571776 }),
+    codec: Object.freeze({ repository: 'BricksDisplay/NeuTTS-Nano-GGUF',
+      revision: '857e272b903daf826606567c9ceaef574bfa793b', filename: 'codec-q8_0.gguf',
+      sha256: '9972d7cabd38582f0425ba898abffc6f92166154ce046a4f392654dbdad5fafa', bytes: 341719168 }),
+    family: 'neutts' as const, promptKind: 'neutts' as const, flow: 'tokens' as const,
+    languages: Object.freeze(['en']), voiceModes: Object.freeze(['builtin'] as const),
+    builtinLanguage: 'en-us', phonemizerLanguage: 'en-us', builtinVoices: Object.freeze(['default', 'dave', 'jo']),
+    // Jo has 653 immutable reference codes. This new profile's allowance includes builtin
+    // reference overhead; existing profiles retain the 512-token admission unchanged.
+    maxPromptTokens: 1536, sampleRate: 24000, samplesPerFrame: 480,
+    codebooks: 1, codebookSize: 65536, generationSteps: 801, maxFrames: 800,
+    contextTokens: 4096, hiddenDimension: 1024, layers: 32, graphReserveBytes: 768 * MiB,
+    sampling: Object.freeze({ temperature: 1, top_k: 50, top_p: 1, penalty_repeat: 1 }),
+  }),
+  Object.freeze({
+    id: 'qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0',
+    backbone: Object.freeze({ repository: 'BricksDisplay/Qwen3-TTS-12Hz-0.6B-GGUF',
+      revision: 'f585ae3ca470e59ef9405d6317a6f11bc6c7ca1f', filename: 'qwen3-tts-0.6b-q4_k_m.gguf',
+      sha256: 'e3ba7aed5d7147dea8745da98218f2a57d5ca5b4ee408ac2146bead0b4c62f30', bytes: 396700064 }),
+    codec: Object.freeze({ repository: 'BricksDisplay/Qwen3-TTS-12Hz-0.6B-GGUF',
+      revision: 'f585ae3ca470e59ef9405d6317a6f11bc6c7ca1f', filename: 'codec-q8_0.gguf',
+      sha256: 'c10e65ef981e8452c841b008892f35e1dca9cf18abd47843acad4316d5bb9b8c', bytes: 1278191520 }),
+    family: 'qwen3_tts' as const, promptKind: 'qwen3_tts' as const, flow: 'talker_embd' as const,
+    languages: Object.freeze(['en']), voiceModes: Object.freeze(['speakerless', 'reference'] as const),
+    reference: Object.freeze({ sampleRate: 24000, maxSeconds: 8, maxSamples: 192000, rows: 1 }),
+    sampleRate: 24000, samplesPerFrame: 1920, codebooks: 16, codebookSize: 2048,
+    generationSteps: 201, maxFrames: 200, contextTokens: 4096, hiddenDimension: 1024,
+    layers: 28, graphReserveBytes: 1536 * MiB,
+    sampling: Object.freeze({ temperature: 0.9, top_k: 50, top_p: 1, penalty_repeat: 1.05 }),
+  }),
 ]);
 
 export function getTtsExecutionProfile(backboneSha: unknown, codecSha: unknown): TtsExecutionProfile | null {
@@ -88,8 +129,12 @@ export function estimateTtsPeakBytes(profile: TtsExecutionProfile): number {
   // This is deliberately low-confidence; unknown artifact pairs receive no estimate/admission.
   const kvAndHiddens = profile.contextTokens * profile.hiddenDimension * profile.layers * 8;
   const payload = TTS_LIMITS.pcmSamples * (4 + 8 + 2 + 8) + 16 * MiB;
+  // Saved materialization/preparation can overlap A and is admitted separately. During
+  // TTS, account for retained PCM + JSON/F32 bridge copies and ECAPA/bake workspace too.
+  // The profile graph reserve still covers full codec/LM working graphs and possible F32 weights.
+  const reference = profile.reference ? profile.reference.maxSamples * 64 + 64 * MiB : 0;
   return Math.ceil(profile.backbone.bytes * 2 + profile.codec.bytes * 4
-    + profile.graphReserveBytes + kvAndHiddens + payload + 256 * MiB);
+    + profile.graphReserveBytes + kvAndHiddens + payload + reference + 256 * MiB);
 }
 
 export function getTtsProfileIdentity(profile: TtsExecutionProfile, runtimeIdentity: unknown): string {

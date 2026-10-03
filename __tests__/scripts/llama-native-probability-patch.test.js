@@ -3,7 +3,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { sync: globSync } = require('glob');
 const {
-  AFTER, AFTER_SHA256, BEFORE, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION,
+  AFTER, AFTER_SHA256, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION,
   hashSource, patchLlamaBridge, SOURCE_PATCHES, PARAMS_SOURCE, PARAMS_AFTER_SHA256, applyReplacements,
   CLOCK_SOURCE, CLOCK_BEFORE_SHA256, CLOCK_AFTER_SHA256, CLOCK_BEFORE, CLOCK_AFTER, CLOCK_PREVIOUS_SHA256, CLOCK_PRIVACY_REPLACEMENTS,
   GRAMMAR_SOURCE, GRAMMAR_BEFORE_SHA256, GRAMMAR_AFTER_SHA256,
@@ -51,6 +51,23 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(completion).not.toContain('ss << token');
     expect(completion).toContain('LOG_INFO("prompt token count: %zu", num_prompt_tokens);');
     expect(patchLlamaBridge(root).status).toBe('already-applied');
+  });
+
+  it('migrates the accepted JSI source and exposes only an actual successful native lazy-speaker receipt', () => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === SOURCE);
+    const migration = patch.intermediates.find(entry => entry.sha256 === '4f4c6254c3cefecabe19110efd18dd6d70078083a88b29adf1e73ab083a667a1');
+    let previous = applyReplacements(fs.readFileSync(sourcePath, 'utf8'), patch.replacements);
+    for (const [before, after] of [...migration.replacements].reverse()) previous = previous.replace(after, before);
+    expect(hashSource(previous)).toBe(migration.sha256);
+    fs.writeFileSync(sourcePath, previous);
+    patchLlamaBridge(root);
+    const updated = fs.readFileSync(sourcePath, 'utf8');
+    expect(updated).toContain('ctx->tts_wrapper->getSpeaker(speakerId)');
+    expect(updated).toContain('formatted_speaker == nullptr || !formatted_speaker->baked');
+    expect(updated).toContain('formatted_speaker->rows <= 0');
+    expect(updated).toContain('"Reference speaker encoding failed"');
+    expect(updated).toContain('res.setProperty(rt, "speakerRows", jsi::Value((double) speaker_rows))');
+    expect(hashSource(updated)).toBe(AFTER_SHA256);
   });
 
   it.each([COMPLETION_SOURCE, SAMPLING_SOURCE])('migrates the exact accepted stage 3 privacy source: %s', source => {
@@ -110,6 +127,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     ['cpp/rn-completion.cpp', '014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc'],
     ['cpp/rn-tts.cpp', '147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f'],
     ['cpp/rn-tts.cpp', '30c41e9ee214171f20ab11191317954c7f13d3bc3c8508d4f14901d27f05abe0'],
+    ['cpp/rn-tts.cpp', 'ac3acbe44c5a84b60144f79105cbd6902af0e3548a5f3ac53c4a9e1ce2546ad3'],
   ])('upgrades the exact accepted pre-TTS privacy source: %s', (source, previousHash) => {
     const patch = SOURCE_PATCHES.find(entry => entry.source === source);
     const migration = patch.intermediates.find(entry => entry.sha256 === previousHash);
@@ -122,6 +140,17 @@ describe('pinned serial sampling and template clock corrections', () => {
     patchLlamaBridge(root);
     expect(hashSource(fs.readFileSync(file, 'utf8'))).toBe(patch.afterSha256);
     expect(patchLlamaBridge(root).status).toBe('already-applied');
+  });
+
+  it('destroys registry speakers and pending selection before fallback context codec teardown', () => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn/cpp/rn-tts.cpp'), 'utf8');
+    const destructor = source.slice(source.indexOf('llama_rn_context_tts::~llama_rn_context_tts() {'));
+    expect(destructor.indexOf('speakers.clear();')).toBeGreaterThan(0);
+    expect(destructor.indexOf('pending_speaker_id = -1;')).toBeGreaterThan(destructor.indexOf('speakers.clear();'));
+    for (const release of ['audio_lm_free(', 'codec_lm_state_free(', 'codec_lm_free(', 'codec_free(', 'codec_model_free(']) {
+      expect(destructor.indexOf('speakers.clear();')).toBeLessThan(destructor.indexOf(release));
+    }
   });
 
   it('bounds token/latent frames before native copies, transpose and codec graph calls', () => {
@@ -213,7 +242,11 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(hashSource(original)).toBe(BEFORE_SHA256);
     expect(patchLlamaBridge(root)).toEqual({ status: 'applied', sources: Object.fromEntries(SOURCE_PATCHES.map((p) => [p.source, p.afterSha256])) });
     const patched = fs.readFileSync(sourcePath, 'utf8');
-    expect(patched.replace(AFTER, BEFORE)).toBe(original);
+    let reversed = patched;
+    for (const [before, after] of [...SOURCE_PATCHES.find(entry => entry.source === SOURCE).replacements].reverse()) {
+      reversed = reversed.replace(after, before);
+    }
+    expect(reversed).toBe(original);
     expect(patched).toContain(`throwIfContextBusy(ctx);\n${AFTER}\n                parseCompletionParams`);
     expect(patchLlamaBridge(root)).toEqual({ status: 'already-applied', sources: Object.fromEntries(SOURCE_PATCHES.map((p) => [p.source, p.afterSha256])) });
     expect(fs.readFileSync(sourcePath, 'utf8')).toBe(patched);

@@ -1,6 +1,7 @@
 import type { AudioPlayer, AudioStatus } from 'expo-audio';
 import type { File } from 'expo-file-system';
 import { TTS_LIMITS, TtsError, type TtsErrorCode } from '../types/tts';
+import { acquireAudioSession, type AudioSessionLease } from './AudioSessionCoordinator';
 
 export interface TtsPlaybackState {
   readonly phase: 'ready' | 'starting' | 'playing' | 'paused' | 'stopped' | 'error';
@@ -89,6 +90,9 @@ export class TtsPlaybackController {
   private generation = 0;
   private desiredPlaying = false;
   private file: File | null = null;
+  private ownsFile = true;
+  private readonly sessionOwner = Symbol('audio-preview');
+  private sessionLease: AudioSessionLease | null = null;
   private clipReady = false;
   private owned: OwnedPlayer | null = null;
   private isClipCurrent: (() => boolean) | null = null;
@@ -129,7 +133,7 @@ export class TtsPlaybackController {
   private async disposePlayer(): Promise<void> {
     this.cancelLoading();
     const owned = this.owned;
-    if (!owned) return;
+    if (!owned) { this.sessionLease?.release(); this.sessionLease = null; return; }
     owned.disposing = true;
     try {
       if (!owned.paused) { owned.player.pause(); owned.paused = true; }
@@ -137,14 +141,16 @@ export class TtsPlaybackController {
       if (!owned.disposed) { await owned.player.disposeAsync(); owned.disposed = true; }
       if (!owned.released) { owned.player.release(); owned.released = true; }
       if (this.owned === owned) this.owned = null;
+      this.sessionLease?.release();
+      this.sessionLease = null;
     } catch { throw new TtsError('release_failed'); }
   }
   private async clearOwned(releaseClaim = true): Promise<void> {
     await this.disposePlayer();
     if (this.file) {
       try {
-        if (this.file.exists) this.file.delete();
-        if (this.file.exists) throw new TtsError('storage_failed');
+        if (this.ownsFile && this.file.exists) this.file.delete();
+        if (this.ownsFile && this.file.exists) throw new TtsError('storage_failed');
         this.file = null;
         this.clipReady = false;
       } catch { throw new TtsError('storage_failed'); }
@@ -177,6 +183,7 @@ export class TtsPlaybackController {
         const directory = new fs.Directory(fs.Paths.cache, 'tts-clips');
         directory.create({ intermediates: true, idempotent: true });
         const file = new fs.File(directory, CLIP_NAME);
+        this.ownsFile = true;
         this.file = file; // Track even a partial write so failed cleanup stays visible.
         try {
           file.create();
@@ -197,6 +204,26 @@ export class TtsPlaybackController {
     });
   }
 
+  /** Preview a finalized managed source without taking ownership of its bytes. */
+  async setBorrowedClip(uri: string, metadata: { sampleRate: number; sampleCount: number }, isCurrent: () => boolean): Promise<void> {
+    if (!uri.startsWith('file://') || !Number.isSafeInteger(metadata.sampleRate) || metadata.sampleRate < 8000
+      || metadata.sampleRate > 48000 || !Number.isSafeInteger(metadata.sampleCount) || metadata.sampleCount < 1
+      || metadata.sampleCount > metadata.sampleRate * 30) throw new TtsError('payload_invalid');
+    const generation = this.invalidate();
+    return this.enqueue(async () => {
+      await this.clearOwned();
+      if (generation !== this.generation || !isCurrent()) return;
+      const fs = await loadFileSystem();
+      const source = new fs.File(uri);
+      if (!source.exists || source.size !== 44 + metadata.sampleCount * 2) throw new TtsError('storage_failed');
+      this.ownsFile = false;
+      this.file = source;
+      this.clipReady = true;
+      this.isClipCurrent = isCurrent;
+      this.publish({ phase: 'ready', position: 0, duration: metadata.sampleCount / metadata.sampleRate });
+    });
+  }
+
   private async ensurePlayer(generation: number): Promise<AudioPlayer | null> {
     if (this.owned) {
       if (this.owned.disposing || this.owned.disposed || this.owned.released) throw new TtsError('release_failed');
@@ -205,10 +232,12 @@ export class TtsPlaybackController {
     if (!this.file || !this.clipReady || !this.current(generation)) return null;
     const audio = await loadAudio();
     if (!this.current(generation)) return null;
+    this.sessionLease = await acquireAudioSession(this.sessionOwner, () => this.stop());
+    if (!this.current(generation)) { this.sessionLease.release(); this.sessionLease = null; return null; }
     await audio.setAudioModeAsync({ interruptionMode: 'doNotMix', allowsRecording: false,
       shouldPlayInBackground: false, allowsBackgroundRecording: false,
       shouldRouteThroughEarpiece: false, playsInSilentMode: true });
-    if (!this.current(generation)) return null;
+    if (!this.current(generation)) { this.sessionLease.release(); this.sessionLease = null; return null; }
     const player = audio.createAudioPlayer(this.file, { updateInterval: 200, downloadFirst: false, keepAudioSessionActive: false });
     const owned: OwnedPlayer = { player, subscription: null, paused: false, disposed: false, released: false,
       observedPlaying: false, requestId: 0, disposing: false };

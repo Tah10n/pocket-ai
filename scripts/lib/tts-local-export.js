@@ -48,7 +48,7 @@ function resolveExternalTtsDirectory(value, publicRoot) {
 
 /** Own the exact new file immediately; a failed write must not leave an unrecorded partial clip. */
 function exportLocalTtsClip(directory, id, bytes, step) {
-  if (!/^(tokens|continuous_embd)-(1|2|retry)$/u.test(id)) throw new Error('Invalid TTS clip identity.');
+  if (!/^(?:(tokens|continuous_embd)-(1|2|retry)|recorded|neu-jo|qwen-r1-eager|qwen-r2-lazy|qwen-no-reference|qwen-saved-cold)$/u.test(id)) throw new Error('Invalid TTS clip identity.');
   const receipt = validateTtsWav(bytes, step);
   const filename = `${id}.wav`;
   const target = path.join(directory, filename);

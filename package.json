@@ -157,6 +157,7 @@
     "llama.rn": "0.13.0-rc.3",
     "nativewind": "^4.2.6",
     "pako": "^3.0.1",
+    "phonemize": "2.0.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "react-i18next": "^17.0.12",

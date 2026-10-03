@@ -47,6 +47,10 @@ const EMBEDDED_BUNDLE_INPUTS = [
   // Imported by AndroidQaDocumentRetrieval.ts; fixed corpus/profile changes invalidate the tested bundle.
   "docs/validation/llama-rn-stage5/retrieval-fixtures.json",
   "docs/validation/llama-rn-stage6/tts-fixtures.json",
+  // Stage 7 controlled audio identity and voice profiles are imported by its QA surface.
+  "docs/validation/llama-rn-stage7/audio-input-fixtures.json",
+  "docs/validation/llama-rn-stage7/tts-fixtures.json",
+  "docs/validation/llama-rn-stage7/synthetic-inputs.json",
   "app",
   "src",
   "components",

@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "runtimeVersion": "0.13.0-rc.3",
+  "selectionStatus": "source_verified_native_not_run",
+  "audioInput": {
+    "repository": "ggml-org/ultravox-v0_5-llama-3_2-1b-GGUF",
+    "revision": "5390c7c41cbd6f261f7f205fc0c5ae61bbdca650",
+    "backbone": {
+      "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+      "bytes": 807694464,
+      "sha256": "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83"
+    },
+    "projector": {
+      "filename": "mmproj-ultravox-v0_5-llama-3_2-1b-f16.gguf",
+      "bytes": 1371123616,
+      "sha256": "b34dde1835752949d6b960528269af93c92fec91c61ea0534fcc73f96c1ed8b2"
+    },
+    "sourceCard": "https://huggingface.co/fixie-ai/ultravox-v0_5-llama-3_2-1b",
+    "licenseNotice": "Conversion and Ultravox cards declare MIT; the underlying Llama 3.2 model retains its separate community license. Weights are local evaluation fixtures and are not redistributed.",
+    "input": { "format": "wav", "sampleRate": 16000, "channels": 1, "bitsPerSample": 16, "maximumSeconds": 30 },
+    "backend": "cpu",
+    "uniqueWeightBytes": 2178818080,
+    "memoryPolicy": "Use the existing model/projector memory admission and validate actual runtime audio support. Weight size is not a peak-memory estimate or device-fit receipt.",
+    "nativeVerification": "not_run"
+  },
+  "referencePolicy": {
+    "maximumSeconds": 8,
+    "maximumSourceBytes": 2097152,
+    "qwenReferenceSampleRate": 24000,
+    "maximumQwenSamples": 192000,
+    "referenceTranscript": "Qwen's pinned encoder does not consume refText; omit it. Neu builtin payload reference phones are handled separately.",
+    "provenance": "Two local Windows SAPI synthetic references and one controlled input clip are pinned in synthetic-inputs.json. No user voice or microphone is used; raw files are not published.",
+    "referenceConditioningVerification": "not_run"
+  }
+}

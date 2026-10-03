@@ -551,6 +551,29 @@ describe('ChatInputBar', () => {
     });
   });
 
+  it('shows a disabled explicit recorder with the model reason without starting a microphone', () => {
+    const record = jest.fn();
+    const view = render(<ChatInputBar onSendMessage={jest.fn()} onAttachAudio={jest.fn()} onRecordAudio={record}
+      audioAttachmentsSupported={false} audioAttachmentsEnabled={false}
+      audioAttachmentsDisabledReason="chat.attachments.audioModelUnsupported" />);
+    fireEvent.press(view.getByTestId('chat-attach-menu-button'));
+    expect(view.getByTestId('chat-record-audio-button').props.accessibilityState.disabled).toBe(true);
+    expect(view.getByText('chat.attachments.audioModelUnsupported')).toBeTruthy();
+    fireEvent.press(view.getByTestId('chat-record-audio-button'));
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it('opens the explicit recorder from the existing attachment menu when audio is ready', async () => {
+    const record = jest.fn(async () => undefined);
+    const view = render(<ChatInputBar onSendMessage={jest.fn()} onAttachAudio={jest.fn()} onRecordAudio={record}
+      audioAttachmentsSupported audioAttachmentsEnabled />);
+    expect(record).not.toHaveBeenCalled();
+    fireEvent.press(view.getByTestId('chat-attach-menu-button'));
+    fireEvent.press(view.getByTestId('chat-record-audio-button'));
+    await waitFor(() => expect(record).toHaveBeenCalledTimes(1));
+    expect(view.queryByTestId('chat-attachment-menu-sheet')).toBeNull();
+  });
+
   it('keeps supported-but-not-ready audio hints scoped to the audio menu action', () => {
     const { getByLabelText, getByTestId, getByText, queryByTestId, queryByText } = render(
       <ChatInputBar

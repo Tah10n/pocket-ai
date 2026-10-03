@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-10-01
+Last updated: 2026-10-03
 
 ## Summary
 
@@ -27,13 +27,34 @@ This document summarizes the current behavior of the app as configured in this r
 
 Auxiliary role selections, explicit companion source bindings, and local compatibility-check results stay in encrypted app storage. A selected role or installed companion does not establish native compatibility. Embedding/reranker load checks temporarily use the on-device runtime and restore a previously loaded chat model when one exists and its selection is still current; compatibility checks themselves do not upload chat content or enable a chat search mode or speech playback. Document search separately defaults to Keywords, with explicit Hybrid and optional independent local reranking. Hybrid prepares selected owned documents through Prepare or an ordinary document request; local reranking can run on Keywords without an embedding index.
 
-Experimental [local speech](local-tts.md) requires an explicit editable-text preview or completed-assistant action. Synthesis and playback stay on-device and do not add audio or latent arrays to chat history. Playback stores one unencrypted app-private temporary WAV, at most 1,536,044 bytes, and requires confirmed player disposal before deletion. Editing/changing the source, closing/leaving Chat, backgrounding or private-data reset invalidates speech and clears that clip after native drain; foregrounding does not resume it. This flow requests no microphone, recording or background-playback capability. Native and speech-content acceptance are recorded separately.
+Experimental [local speech](local-tts.md) requires an explicit editable-text preview or completed-assistant action. Synthesis, the supported offline phonemizer and playback stay on-device and do not add audio or latent arrays to chat history. Playback stores one unencrypted app-private temporary WAV, at most 1,536,044 bytes, and requires confirmed player disposal before deletion. Editing/changing the source, closing/leaving Chat, backgrounding or private-data reset invalidates speech and clears that clip after native drain; foregrounding does not resume it. Choosing a builtin voice or opening voice controls does not request microphone access or start synthesis.
+
+Recording starts only after explicit Record and the immediately preceding system microphone request.
+It can create a chat attachment or a temporary voice reference; neither is sent automatically.
+Capture, sample preview and generated speech share one session, with background recording/playback
+and automatic resume disabled. A voice reference requires explicit confirmation of ownership or
+permission. This confirmation is not identity verification or a guarantee of rights.
+
+References default to temporary app-private sources and are removed after owners drain. Explicit
+Save voice stores the original source in the existing encrypted private store, in bounded shards,
+plus a small name/language/consent configuration. The library permits four voices, at most 2 MiB
+and eight seconds each, and at most 8 MiB of original audio in total. Handles, speaker embeddings,
+reference PCM and native snapshots are never persisted. Cold opening restores the choice without
+recording, preparing or synthesizing. Delete invalidates selection immediately and waits for
+active leases/native drain before deleting its owned source; borrowed chat attachments are retained.
+
+Native preprocessing and synthesis temporarily need unencrypted files in app-private cache
+directories `audio-reference/`, `audio-preparation/` and `tts-clips/`. iOS caches are excluded from
+backup, Android auto-backup is disabled, and cold-start/private-reset reconciliation covers the
+reserved files. These temporary bytes and ordinary chat attachment files are not separately
+encrypted. Native and speech-content/reference-conditioning acceptance are recorded separately.
 
 ## Chat attachments
 
 When a user adds an attachment to a chat:
 
 - The app uses system picker flows so the user can choose files to attach. Depending on the attachment kind and platform, this may use the photo-library picker or document picker. On Android API 32 and lower, the app keeps the legacy read-only media permission available for gallery-picker compatibility; it is capped to those older OS versions.
+- Explicit audio recording requests the microphone just before capture. Stop/finalization, bounded local decoding and an explicit Attach action precede sending. The original temporary recording and its prepared draft are removed only after the relevant native/file owners drain.
 - Selected files are copied into app-managed local storage under `Documents/chat-attachments/` so the conversation can reopen the attachment later.
 - Chat history stores attachment metadata needed to render and manage the attachment, such as its local file reference, media type, dimensions or duration when available, file size, processor metadata, and the draft, message, or conversation it belongs to.
 - Raw attachment files are local app-managed files. This document does not claim those attachment bytes are separately encrypted beyond the device and platform storage protections in use.
@@ -86,6 +107,7 @@ Users can manage local data directly in the app:
 - unload the active model
 - clear persisted chat history, including active-response recovery artifacts and derived document indexes
 - discard attachment drafts and delete messages or conversations, which attempts to remove their associated local attachment files when cleanup runs
+- explicitly save, select or delete local reference voices; deletion clears owned originals/configuration after active use drains
 - reset settings
 - reset private app storage, including a best-effort cleanup of local chat attachments
 - manage retention for older conversations
@@ -118,10 +140,11 @@ For the release configuration currently committed here:
 - Android permissions include:
   - `INTERNET` (Hugging Face catalog and model downloads)
   - `VIBRATE` (UI haptics)
+  - `RECORD_AUDIO` (explicit bounded chat or voice-reference recording)
   - `POST_NOTIFICATIONS` (Android 13+ notifications for download/inference status)
   - `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_DATA_SYNC` (keep long-running downloads/inference alive in the background via a foreground service)
   - `READ_EXTERNAL_STORAGE` with `android:maxSdkVersion="32"` (legacy Android gallery-picker compatibility for selected media)
-- Android gallery attachment support is configured for picker-based selection only. The app blocks merged `CAMERA`, `RECORD_AUDIO`, and `WRITE_EXTERNAL_STORAGE` permissions from the Android manifest; it does not request camera capture, microphone capture, write storage, or audio-recording permissions for attachments.
+- Android gallery attachment support is configured for picker-based selection only. The app blocks merged `CAMERA` and `WRITE_EXTERNAL_STORAGE` permissions. Microphone permission is present for explicit recording; no microphone foreground service, background recording/playback, always-listening or hidden automatic restart is enabled. iOS provides a localized `NSMicrophoneUsageDescription` for the same explicit action.
 
 ## Scope note
 

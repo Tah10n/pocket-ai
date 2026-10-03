@@ -10,7 +10,7 @@ import { validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { encodeMonoPcmWav, TtsWavError } from '../utils/ttsWav';
 import { prepareSpeechText, TtsTextError } from '../utils/ttsText';
-import { TTS_LIMITS, TtsError, type TtsErrorCode, type TtsPhase, type TtsObservation } from '../types/tts';
+import { TTS_LIMITS, TtsError, type TtsErrorCode, type TtsPhase, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
 import { getAuxiliarySelection, validateAuxiliaryFile } from './AuxiliaryModelService';
 import { registry } from './LocalStorageRegistry';
 import { getSettings, subscribeSettings } from './SettingsStore';
@@ -26,15 +26,21 @@ import { getTtsExecutionProfile, getTtsInitParameters, estimateTtsPeakBytes, get
   type TtsExecutionProfile } from './TtsExecutionProfiles';
 import { synthesizeTtsOnContext, type TtsPcmResult } from './TtsSynthesisRuntime';
 import { TtsPlaybackController, cleanupColdTtsClips } from './TtsPlayback';
+import { referenceVoiceStore, type ReferenceVoiceLease } from './ReferenceVoiceStore';
+import { prepareManagedAudio, readPreparedReferencePcm, discardPreparedAudio, AudioPreparationError, type PreparedAudio } from './AudioPreparationService';
+import { LOCAL_PHONEMIZER_IDENTITY } from './TtsPhonemizer';
 
 export interface TtsRequest {
   /** Exact text already shown in the preview. No chat protocol or hidden channels. */
   text: string;
   language: string;
+  voice?: TtsVoiceSelection;
   source?: { threadId: string; messageId: string };
   isTextCurrent?: () => boolean;
   /** Stable text/language ownership for exact-A restore after closing the preview. */
   isRestoreCurrent?: () => boolean;
+  /** Voice changes block stale speech publication without changing exact-A restoration. */
+  isVoiceCurrent?: () => boolean;
   playAfterSynthesis?: boolean;
   observe?: (event: TtsObservation) => void;
 }
@@ -81,10 +87,12 @@ export function resolveTtsBinding(): TtsBinding {
 }
 
 export function getTtsSelectionStatus(): { profileId?: string; modelName?: string; languages?: readonly string[];
+  voiceModes?: readonly ('speakerless' | 'builtin' | 'reference')[]; builtinVoices?: readonly string[];
   requiredBytes?: number; errorCode?: TtsErrorCode } {
   try {
     const binding = resolveTtsBinding();
     return { profileId: binding.profile.id, modelName: binding.model.name, languages: binding.profile.languages,
+      voiceModes: binding.profile.voiceModes ?? ['speakerless'], builtinVoices: binding.profile.builtinVoices,
       requiredBytes: estimateTtsPeakBytes(binding.profile) };
   } catch (error) {
     return { errorCode: error instanceof TtsError ? error.code : 'files_missing' };
@@ -220,6 +228,10 @@ export class TtsService {
     this.playbackGeneration = null;
     let clipInstalled = false;
     let selectionInvalidated = false;
+    let voiceInvalidated = false;
+    let referenceLease: ReferenceVoiceLease | undefined;
+    let preparedReference: PreparedAudio | undefined;
+    let referenceSamples: number[] | undefined;
     try {
       await this.playback.clear();
       assertPrivateStorageWritable();
@@ -227,6 +239,26 @@ export class TtsService {
       const exactText = prepareSpeechText(request.text, { structured: true }).text;
       if (!exactText || exactText.length > TTS_LIMITS.textCharacters) throw new TtsError('input_too_large');
       const binding = resolveTtsBinding();
+      const voice: TtsVoiceSelection = request.voice ?? { kind: 'speakerless' };
+      // A builtin name must be explicitly selected; never synthesize a phantom default.
+      if (!['speakerless', 'builtin', 'reference'].includes(voice.kind)
+        || !(binding.profile.voiceModes ?? ['speakerless']).includes(voice.kind)) throw new TtsError('voice_unavailable');
+      let referenceUri: string | undefined;
+      let referenceSha: string | undefined;
+      if (voice.kind === 'reference') {
+        const ref = voice.source;
+        referenceSha = ref.sourceSha256;
+        if (normalizeSha256Digest(referenceSha) !== referenceSha) throw new TtsError('reference_invalid');
+        if (ref.kind === 'temporary') {
+          if (ref.consent !== true) throw new TtsError('consent_required');
+          if (!binding.profile.reference || !Number.isFinite(ref.durationMs) || ref.durationMs < 200
+            || ref.durationMs > binding.profile.reference.maxSeconds * 1000) throw new TtsError('reference_invalid');
+          referenceUri = ref.sourceUri;
+        } else {
+          referenceLease = referenceVoiceStore.acquire(ref.voiceId);
+          if (referenceLease.voice.sourceSha256 !== ref.sourceSha256) throw new TtsError('reference_invalid');
+        }
+      }
       const selectedChat = captureChatSelection(request.source);
       const previousId = llmEngineService.getState().activeModelId;
       const previous = previousId ? registry.getModel(previousId) : undefined;
@@ -244,20 +276,35 @@ export class TtsService {
           return true;
         } catch { return false; }
       };
+      const voiceCurrent = () => {
+        if (voiceInvalidated) return false;
+        try {
+          if (request.isVoiceCurrent?.() === false) return false;
+          if (voice.kind === 'reference' && voice.source.kind === 'saved') {
+            const ref = voice.source;
+            const voices = referenceVoiceStore.getState();
+            return voices.selectedVoiceId === ref.voiceId && voices.voices.some(item => item.id === ref.voiceId
+              && item.sourceSha256 === ref.sourceSha256);
+          }
+          return true;
+        } catch { return false; }
+      };
       const publicationCurrent = () => {
         try {
           return generation === this.generation && !controller.signal.aborted
-            && selectionCurrent() && request.isTextCurrent?.() !== false;
+            && selectionCurrent() && voiceCurrent() && request.isTextCurrent?.() !== false;
         } catch { return false; }
       };
       const check = () => {
-        if (!selectionCurrent()) throw new TtsError('selection_changed');
+        if (!selectionCurrent() || !voiceCurrent()) throw new TtsError('selection_changed');
         if (controller.signal.aborted) throw new TtsError('cancelled');
         if (!publicationCurrent()) throw new TtsError('selection_changed');
       };
       const invalidateIfChanged = () => {
-        if (selectionCurrent()) return;
-        selectionInvalidated = true;
+        const sameSelection = selectionCurrent(), sameVoice = voiceCurrent();
+        if (sameSelection && sameVoice) return;
+        if (!sameSelection) selectionInvalidated = true;
+        if (!sameVoice) voiceInvalidated = true;
         controller.abort();
         this.playback.cancelStart();
         this.publish({ ...this.state, phase: 'stopping' });
@@ -265,8 +312,32 @@ export class TtsService {
         if (!this.drain) void this.cancelAndClear().catch(() => this.publish({ phase: 'error', errorCode: 'storage_failed' }));
       };
       this.unsubscriptions = [subscribeSettings(invalidateIfChanged), useChatStore.subscribe(invalidateIfChanged),
-        registry.subscribeModels(invalidateIfChanged)];
+        registry.subscribeModels(invalidateIfChanged), ...(voice.kind === 'reference' ? [referenceVoiceStore.subscribe(invalidateIfChanged)] : [])];
       check();
+      if ((referenceUri || referenceLease) && referenceSha) {
+        // A may still be loaded during preprocessing. Admit the bounded native working
+        // area plus PCM/JSON bridge copies independently before starting the decoder.
+        const memory = await getSystemMemorySnapshot();
+        check();
+        const available = memory ? resolveConservativeAvailableMemoryBudget(memory, { strictFreeCap: true }) : null;
+        if (available === null) throw new TtsError('memory_unknown');
+        const preparationBytes = 64 * 1024 * 1024 + binding.profile.reference!.maxSamples * 32;
+        if (memory?.lowMemory || available < preparationBytes) throw new TtsError('memory_insufficient');
+        // Admit before decrypting a saved source as well as before codec preprocessing.
+        if (referenceLease) referenceUri = (await referenceLease.materialize()).uri;
+        check();
+        if (!referenceUri) throw new TtsError('reference_invalid');
+        preparedReference = await prepareManagedAudio({ sourceUri: referenceUri, purpose: 'reference',
+          sampleRate: binding.profile.reference!.sampleRate, signal: controller.signal, assertCurrent: check });
+        check();
+        if (preparedReference.sourceSha256 !== referenceSha) throw new TtsError('reference_invalid');
+        referenceSamples = await readPreparedReferencePcm(preparedReference);
+        check();
+        // Derivative is not needed after bounded PCM validation. Native ownership comes later.
+        await discardPreparedAudio(preparedReference);
+        preparedReference = undefined;
+        check();
+      }
       this.publish({ phase: 'checking', profileId: binding.profile.id,
         requiredBytes: estimateTtsPeakBytes(binding.profile), memoryConfidence: 'low' });
       const callbackDrains = new Set<Promise<unknown>>();
@@ -295,9 +366,14 @@ export class TtsService {
             },
           }, context => {
             this.executionIdentity = getTtsProfileIdentity(binding.profile,
-              ['llama.rn/0.13.0-rc.3', getLlamaBuildInfo(), LLAMA_SOURCE_PATCH_SHA256]);
+              ['llama.rn/0.13.0-rc.3', getLlamaBuildInfo(), LLAMA_SOURCE_PATCH_SHA256,
+                binding.profile.phonemizerLanguage ? LOCAL_PHONEMIZER_IDENTITY : null,
+                voice.kind, 'voice' in voice ? voice.voice : referenceSha ?? null,
+                voice.kind === 'reference' ? voice.bake ?? 'eager' : null]);
             const native = synthesizeTtsOnContext(context, binding.profile, {
               text: exactText, language: request.language, codecPath: binding.codecPath, signal: controller.signal,
+              voice,
+              ...(referenceSamples ? { referenceAudio: { samples: referenceSamples, sampleRate: binding.profile.reference!.sampleRate } } : {}),
               assertCurrent: check, observe: request.observe,
               onPhase: phase => this.publish({ ...this.state, phase: controller.signal.aborted ? 'stopping' : phase }),
             });
@@ -349,6 +425,8 @@ export class TtsService {
         : llmEngineService.getState().diagnostics?.contextRecoveryStatus === 'failed'
           || (error as { code?: string })?.code === 'engine_recovery_required' ? 'release_failed'
         : error instanceof TtsError ? error.code
+        : error instanceof AudioPreparationError ? (error.code === 'cleanup_failed' ? 'storage_failed'
+          : error.code === 'cancelled' ? 'cancelled' : 'reference_invalid')
         : error instanceof TtsTextError ? 'payload_invalid'
         : error instanceof TtsWavError ? 'decode_failed'
         : selectionInvalidated ? 'selection_changed'
@@ -358,6 +436,16 @@ export class TtsService {
         ...(!playbackCleanupFailed ? { sampleCount: undefined, sampleRate: undefined, position: 0, duration: 0 } : {}),
         phase: code === 'cancelled' || code === 'selection_changed' ? 'stopped' : 'error', errorCode: code });
       throw new TtsError(code);
+    } finally {
+      if (referenceSamples) referenceSamples.length = 0;
+      let cleanupFailed = false;
+      if (preparedReference) { try { await discardPreparedAudio(preparedReference); } catch { cleanupFailed = true; } }
+      if (referenceLease) { try { await referenceLease.release(); } catch { cleanupFailed = true; } }
+      if (cleanupFailed) {
+        try { await this.playback.clear(); } catch { /* Same fail-closed storage error. */ }
+        this.publish({ ...this.state, phase: 'error', errorCode: 'storage_failed', clipAvailable: false });
+        throw new TtsError('storage_failed');
+      }
     }
   }
 

@@ -14,6 +14,45 @@ const EXTENDED_UNC_PATH = String.raw`\\?\UNC\server\share\folder\file.gguf`;
 const EXTENDED_UNC_PATH_WITH_SPACES_NO_EXTENSION = String.raw`\\?\UNC\server\shared models\Users\Alice Smith\cache folder`;
 
 describe('ErrorReportSanitizer', () => {
+  it('removes private reference content and source identities from nested and serialized error contexts', () => {
+    const privateFields = {
+      refText: 'My private reference transcript',
+      sourceSha256: 'a'.repeat(64),
+      preparationIdentity: 'private-source:24khz:profile',
+      referenceIdentity: 'reference-owner-unique',
+      voiceId: 'voice-private-selection',
+      phonemes: 'private phoneme sequence',
+      tokenSequences: [12, 98, 456],
+      refAudio: [0.1, -0.2],
+      referenceAudio: { samples: [0.3, -0.4], sampleRate: 24000 },
+      speakerEmbedding: [0.8, 0.9],
+    };
+    const context = sanitizeErrorReportContext({
+      phase: 'baking', sampleRate: 24000,
+      nested: { ...privateFields, rows: 1 },
+      request: JSON.stringify({ ...privateFields, baked: true }),
+      preparedAudio: { identity: 'private-sha256-profile', sampleRate: 24000 },
+    });
+    expect(context).toEqual({ phase: 'baking', sampleRate: 24000, nested: { rows: 1 }, request: '{"baked":true}', preparedAudio: { sampleRate: 24000 } });
+    const report = sanitizeErrorForReport({ message: 'speaker failed', details: privateFields, cause: { ...privateFields, code: 'bake_failed' } });
+    expect(report.details).toBeUndefined();
+    expect(report.cause).toEqual({ code: 'bake_failed' });
+    expect(sanitizeErrorReportString(privateFields.refText, 'ref_text')).toBe('[redacted-payload]');
+  });
+
+  it('redacts labeled and truncated native audio payloads while retaining stack locations', () => {
+    for (const label of ['refText', 'ref_text', 'sourceSha256', 'preparationIdentity', 'referenceIdentity', 'phonemes', 'refAudio', 'selectedVoiceId']) {
+      const sensitive = 'private-reference-payload';
+      const report = sanitizeErrorForReport({
+        message: `native failed: ${label}=${sensitive}`,
+        stack: `Error: failed {"${label}":"${sensitive}\n    at bake (runtime.js:12:3)`,
+      }, { includeStack: true });
+      expect(report.message).toContain('[redacted-payload]');
+      expect(report.stack).toContain('at bake (runtime.js:12:3)');
+      expect(JSON.stringify(report)).not.toContain(sensitive);
+    }
+  });
+
   it('redacts Windows UNC and extended paths in strings without redacting safe URLs or model ids', () => {
     const value = [
       `standard ${UNC_PATH}`,

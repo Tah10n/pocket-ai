@@ -42,6 +42,8 @@ import { ChatHeader } from '@/components/ui/ChatHeader';
 import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
 import { TtsPreviewSheet, getTtsQaPlaybackMarker } from '@/components/ui/TtsPreviewSheet';
+import { AudioRecordingSheet } from '@/components/ui/AudioRecordingSheet';
+import { AndroidQaAudioStage7Panel } from '@/components/ui/AndroidQaAudioStage7Panel';
 import { ttsService } from '@/services/TtsService';
 import { getAndroidQaTtsEvidence, subscribeAndroidQaTts, runAndroidQaTts, runAndroidQaTtsPlayback, continueAndroidQaTts } from '@/services/AndroidQaTts';
 import { prepareSpeechText, type PreparedSpeechText } from '@/utils/ttsText';
@@ -1489,7 +1491,17 @@ const ChatScreenContent = () => {
         audioEnabled: audioAttachmentsEnabled,
         audioDisabledReason: audioAttachmentsDisabledReason,
         ownerKey: mediaAttachmentOwnerKey,
+        onAudioCleanupFailure: onSpeechCleanupFailure,
     });
+    const [recordingOwner, setRecordingOwner] = useState<string | null>(null);
+    useEffect(() => {
+        if (!isScreenFocused || (recordingOwner && recordingOwner !== mediaAttachmentOwnerKey)) setRecordingOwner(null);
+    }, [isScreenFocused, mediaAttachmentOwnerKey, recordingOwner]);
+    const openAudioRecording = useCallback(() => {
+        if (audioAttachmentsEnabled && !speechCleanupFailed.current && !speechCleanupPending) {
+            setRecordingOwner(mediaAttachmentOwnerKey);
+        }
+    }, [audioAttachmentsEnabled, mediaAttachmentOwnerKey, speechCleanupPending]);
     const retainedRegenerateAttachments = pendingRegenerateMessage?.attachments ?? [];
     const canSendRetainedRegenerateAttachments = retainedRegenerateAttachments.length > 0
         && !isInputDisabled
@@ -3783,6 +3795,7 @@ const ChatScreenContent = () => {
                                 onAttachImages={imageAttachmentDrafts.attachImages}
                                 onAttachDocuments={handleAttachDocuments}
                                 onAttachAudio={mediaAttachmentDrafts.attachAudio}
+                                onRecordAudio={openAudioRecording}
                                 onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
                                 onRemoveDocumentAttachmentDraft={documentAttachmentDrafts.removeDraft}
                                 onRemoveMediaAttachmentDraft={mediaAttachmentDrafts.removeDraft}
@@ -3830,6 +3843,7 @@ const ChatScreenContent = () => {
                                 onAttachImages={imageAttachmentDrafts.attachImages}
                                 onAttachDocuments={handleAttachDocuments}
                                 onAttachAudio={mediaAttachmentDrafts.attachAudio}
+                                onRecordAudio={openAudioRecording}
                                 onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
                                 onRemoveDocumentAttachmentDraft={documentAttachmentDrafts.removeDraft}
                                 onRemoveMediaAttachmentDraft={mediaAttachmentDrafts.removeDraft}
@@ -3924,6 +3938,7 @@ const ChatScreenContent = () => {
                 onCancelDiagnostics={() => diagnosticAbortRef.current?.abort()}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
             />
+            <AndroidQaAudioStage7Panel />
             {speechPreview ? <TtsPreviewSheet key={speechPreview.id}
                 initialText={speechPreview.text} reviewReason={speechPreview.reason} source={speechPreview.source}
                 isPreviewCurrent={isSpeechPreviewCurrent} onClose={closeSpeechPreview}
@@ -3932,6 +3947,10 @@ const ChatScreenContent = () => {
                     closeSpeechPreview();
                     router.navigate('/(tabs)/models');
                 }} /> : null}
+            {recordingOwner ? <AudioRecordingSheet key={recordingOwner} ownerKey={recordingOwner} purpose="chat"
+                isCurrent={() => isScreenFocused && recordingOwner === mediaAttachmentOwnerKey && audioAttachmentsEnabled}
+                onAttach={(prepared, _source, options) => mediaAttachmentDrafts.attachRecordedAudio(prepared, options)}
+                onClose={() => setRecordingOwner(null)} onCleanupFailure={onSpeechCleanupFailure} /> : null}
             <ErrorReportSheet
                 {...errorReportSheetProps}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}

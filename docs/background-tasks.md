@@ -2,6 +2,8 @@
 
 Pocket AI supports long-running model downloads and on-device generation while the app is backgrounded. The implementation is intentionally conservative because Android and iOS have strict background-execution rules.
 
+Experimental [local speech](local-tts.md) has foreground-only synthesis/playback ownership. Backgrounding invalidates its request, waits for native drain and clears its temporary player/clip. It does not use the inference foreground service or resume speech when the app returns to the foreground. The Expo audio configuration disables background playback and recording.
+
 ## Android
 
 ### Foreground service

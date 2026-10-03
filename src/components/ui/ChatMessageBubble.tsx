@@ -43,6 +43,8 @@ export interface ChatMessageBubbleProps {
   errorCode?: string;
   canDelete?: boolean;
   canRegenerate?: boolean;
+  canSpeak?: boolean;
+  onSpeak?: (messageId: string) => void;
   onDelete?: (messageId: string) => void;
   onRegenerate?: (messageId: string) => void;
   onLayout?: (event: LayoutChangeEvent) => void;
@@ -157,6 +159,8 @@ function areChatMessageBubblePropsEqual(prev: ChatMessageBubbleProps, next: Chat
     && prev.errorCode === next.errorCode
     && prev.canDelete === next.canDelete
     && prev.canRegenerate === next.canRegenerate
+    && prev.canSpeak === next.canSpeak
+    && prev.onSpeak === next.onSpeak
     && prev.onDelete === next.onDelete
     && prev.onRegenerate === next.onRegenerate
     && prev.onLayout === next.onLayout
@@ -206,6 +210,8 @@ const ChatMessageBubbleComponent = ({
   errorCode,
   canDelete = false,
   canRegenerate = false,
+  canSpeak = false,
+  onSpeak,
   onDelete,
   onRegenerate,
   onLayout,
@@ -691,6 +697,10 @@ const ChatMessageBubbleComponent = ({
                 void handleCopy();
               }}
             />
+          ) : null}
+          {!isUser && assistantMessageState === 'complete' && canSpeak && onSpeak && hasCopyableContent ? (
+            <IconActionButton testID={`speak-message-${id}`} iconName="volume-up"
+              label={t('tts.speakAnswer')} onPress={() => onSpeak(id)} />
           ) : null}
           {canRegenerate && onRegenerate ? (
             <IconActionButton

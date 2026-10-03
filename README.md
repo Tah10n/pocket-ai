@@ -67,6 +67,9 @@
 - MTP speculative decoding for compatible GGUF models, including embedded MTP models and Gemma models that publish a separate MTP draft GGUF
 - RAM-aware safety checks that block loading models that won't fit
 - Context window bounded by model metadata and estimated device RAM headroom
+- Experimental [local speech](docs/local-tts.md) with an editable preview and explicit
+  synthesize/play/pause/stop/replay controls; exact English/Mandarin profiles require
+  separate device and speech-content verification
 
 ### Chat & History
 
@@ -205,6 +208,17 @@ The [Stage 5 acceptance report](docs/llama-rn-013-stage5-acceptance.md) records 
 Android CPU native protocol, including cold index reuse and deletion after another restart,
 on its exact source/APK. Ordinary EN/RU control captures and measured touch bounds are reported separately, with explicit capture and answer-quality limits.
 
+The explicit TTS pack adds token and continuous speech scenarios. Provide an absolute
+local clip directory outside this checkout and published artifacts for independent local
+ASR; the runner does not upload speech. BlueMagpie audio and weights must remain in local
+evaluation. See [Local speech](docs/local-tts.md#native-build-and-verification) and the
+[Stage 6 acceptance worksheet](docs/validation/llama-rn-stage6/acceptance.md).
+
+```powershell
+$env:POCKET_AI_TTS_AUDIO_OUTPUT_DIR = 'D:\LocalSpeechQa'
+node scripts/android-scenarios.js --emulator --pack tts --apk-variant release --isolated-qa-install --fail-on-skip
+```
+
 The document pack uses checked-in synthetic fixtures, requires a loaded local model, and
 verifies exact source/build/install provenance. See
 [Document QA and Benchmarks](docs/document-qa-benchmarks.md) for its safe isolated-install
@@ -241,6 +255,7 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 | [Multimodal Attachments](docs/multimodal-attachments.md) | Local attachment lifecycle, runtime media contracts, and privacy boundaries |
 | [Document Processing](docs/document-processing.md) | Offline formats, Keywords/Hybrid search, encrypted derived indexes, native architecture, limits, and maintenance |
 | [Local Tools](docs/local-tools.md) | Per-chat functions, permissions, execution limits and compatibility |
+| [Local Speech](docs/local-tts.md) | Experimental TTS profiles, preview/player, limits, privacy and separate device/content verification |
 | [Model Parameters](docs/model-parameters.md) | Generation settings, load profiles, and chat snapshot behavior |
 | [Runtime Performance](docs/runtime-performance.md) | Bounded streaming, persistence, model-load, catalog, cache-scan, and tracing contracts |
 | [Android Build Guide](docs/android-build.md) | Deterministic Android release builds, signing, provenance, and current-head QA |

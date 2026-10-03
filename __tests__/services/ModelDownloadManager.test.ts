@@ -3,6 +3,7 @@ jest.mock('../../src/services/ModelCatalogService', () => ({ modelCatalogService
 import {
   getModelDownloadManager,
   runWithIdleModelDownloads,
+  ModelFileLeaseBusyError,
   resetModelDownloadManagerForPrivateStorageReset,
   stopModelDownloadManagerForPrivateStorageBlocked,
 } from '../../src/services/ModelDownloadManager';
@@ -313,6 +314,33 @@ describe('ModelDownloadManager Basic', () => {
     await expect(runWithIdleModelDownloads(remove)).rejects.toMatchObject({ code: 'action_failed' });
     expect(remove).not.toHaveBeenCalled();
     (modelDownloadManager as any).activeJob = null;
+  });
+
+  it('distinguishes an actual held file lease from ordinary action failures', async () => {
+    const mutate = jest.fn(async () => undefined);
+    await runWithIdleModelDownloads(async () => {
+      await expect(runWithIdleModelDownloads(mutate)).rejects.toBeInstanceOf(ModelFileLeaseBusyError);
+      await expect(runWithIdleModelDownloads(mutate)).rejects.toMatchObject({ code: 'action_failed' });
+    });
+    expect(mutate).not.toHaveBeenCalled();
+    await expect(runWithIdleModelDownloads(async () => 'available')).resolves.toBe('available');
+  });
+
+  it('optionally waits for the exact cancelled job callback after queue removal', async () => {
+    let settleJob!: () => void;
+    const settled = new Promise<void>(resolve => { settleJob = resolve; });
+    (modelDownloadManager as any).activeJob = { modelId: mockModel.id, jobToken: 99,
+      resumable: null, verificationCount: 1, settled };
+    useDownloadStore.setState({ queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.VERIFYING }],
+      activeDownloadId: mockModel.id });
+    let completed = false;
+    const cancellation = modelDownloadManager.cancelDownload(mockModel.id, { waitForDrain: true }).then(() => { completed = true; });
+    for (let index = 0; index < 20; index += 1) await Promise.resolve();
+    expect(completed).toBe(false);
+    expect(useDownloadStore.getState().queue.some(item => item.id === mockModel.id)).toBe(false);
+    (modelDownloadManager as any).activeJob = null;
+    settleJob(); await cancellation;
+    expect(completed).toBe(true);
   });
 
   it('holds newly queued downloads until asynchronous deletion finishes and unlocks after failure', async () => {

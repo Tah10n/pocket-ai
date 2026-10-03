@@ -9,6 +9,13 @@ import { useModelsStore } from '../../src/store/modelsStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
 import * as chatSession from '../../src/hooks/useChatSession';
+import { ttsService } from '../../src/services/TtsService';
+import { llmEngineService } from '../../src/services/LLMEngineService';
+import { documentSessionContextCache } from '../../src/services/DocumentSessionContextCache';
+
+jest.mock('../../src/services/TtsService', () => ({
+  ttsService: { cancelAndClear: jest.fn(async () => undefined) },
+}));
 
 jest.mock('expo-secure-store', () => ({
   isAvailableAsync: jest.fn(async () => true),
@@ -39,6 +46,7 @@ function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
 describe('PrivateStorageRecovery', () => {
   beforeEach(() => {
     jest.restoreAllMocks();
+    jest.mocked(ttsService.cancelAndClear).mockReset().mockResolvedValue(undefined);
     jest.spyOn(registry, 'preserveExistingModelFilesForPrivateStorageReset').mockResolvedValue([]);
     jest.spyOn(chatAttachmentStorageService, 'deleteAllAttachmentFilesForPrivateStorageReset').mockResolvedValue(undefined);
     useChatStore.setState({ threads: {}, activeThreadId: null });
@@ -192,5 +200,54 @@ describe('PrivateStorageRecovery', () => {
     );
     expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('file:///private/chat-attachments/delete-me.jpg');
     warnSpy.mockRestore();
+  });
+
+  it('invalidates restoration before TTS drain and awaits speech plus cache cleanup before wiping private storage', async () => {
+    let finishSpeech!: () => void;
+    let finishCache!: () => void;
+    const speechDrain = new Promise<void>(resolve => { finishSpeech = resolve; });
+    const cacheDrain = new Promise<void>(resolve => { finishCache = resolve; });
+    let restoreAllowed = true;
+    const invalidate = jest.spyOn(llmEngineService, 'invalidateAuxiliaryContextOperation')
+      .mockImplementation(() => { restoreAllowed = false; });
+    jest.mocked(ttsService.cancelAndClear).mockImplementationOnce(async () => {
+      await speechDrain;
+      expect(restoreAllowed).toBe(false);
+    });
+    const clearCache = jest.spyOn(documentSessionContextCache, 'clearAll').mockReturnValueOnce(cacheDrain);
+    const unload = jest.spyOn(llmEngineService, 'unload').mockResolvedValue(undefined);
+    const load = jest.spyOn(llmEngineService, 'load');
+    const wipe = jest.spyOn(privateStorage, 'resetPrivateAppStorageAfterConfirmation');
+    const work = resetPrivateAppStorageAndRuntimeStateAfterConfirmation();
+    try {
+      expect(invalidate).toHaveBeenCalledTimes(1);
+      expect(invalidate.mock.invocationCallOrder[0]).toBeLessThan(
+        jest.mocked(ttsService.cancelAndClear).mock.invocationCallOrder[0],
+      );
+      expect(clearCache).not.toHaveBeenCalled();
+      expect(unload).not.toHaveBeenCalled();
+      expect(wipe).not.toHaveBeenCalled();
+      finishSpeech();
+      for (let i = 0; i < 120 && !clearCache.mock.calls.length; i++) await Promise.resolve();
+      expect(clearCache).toHaveBeenCalledTimes(1);
+      expect(unload).not.toHaveBeenCalled();
+      expect(wipe).not.toHaveBeenCalled();
+      finishCache();
+      await expect(work).resolves.toMatchObject({ status: 'ready' });
+      expect(clearCache.mock.invocationCallOrder[0]).toBeLessThan(unload.mock.invocationCallOrder[0]);
+      expect(unload.mock.invocationCallOrder[0]).toBeLessThan(wipe.mock.invocationCallOrder[0]);
+      expect(load).not.toHaveBeenCalled();
+    } finally {
+      finishSpeech(); finishCache();
+      await work.catch(() => undefined);
+    }
+  });
+
+  it('does not wipe private storage when speech cleanup rejects', async () => {
+    const wipe = jest.spyOn(privateStorage, 'resetPrivateAppStorageAfterConfirmation');
+    jest.mocked(ttsService.cancelAndClear).mockRejectedValueOnce(new Error('speech cleanup failed'));
+    await expect(resetPrivateAppStorageAndRuntimeStateAfterConfirmation()).rejects.toThrow('speech cleanup failed');
+    expect(wipe).not.toHaveBeenCalled();
+    expect(registry.preserveExistingModelFilesForPrivateStorageReset).not.toHaveBeenCalled();
   });
 });

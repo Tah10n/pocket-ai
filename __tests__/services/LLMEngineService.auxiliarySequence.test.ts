@@ -1,6 +1,6 @@
 import type { LlamaContext } from 'llama.rn';
 import { initLlama, releaseAllLlama } from 'llama.rn';
-import { llmEngineService, type AuxiliaryContextRequest } from '../../src/services/LLMEngineService';
+import { AuxiliaryContextCleanupError, llmEngineService, type AuxiliaryContextRequest } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { EngineStatus, LifecycleStatus, type EngineState, type ModelMetadata } from '../../src/types/models';
 import type { ModelLoadParameters } from '../../src/services/SettingsStore';
@@ -318,6 +318,67 @@ it('restores A after a settled native failure before returning the failure to a 
   expect(events.at(-1)).toBe('restore:a');
   lease.assertCurrent();
   expect(receipt).toHaveBeenCalledTimes(1);
+});
+
+it('retains the initial native failure and cleanup cause while failed release quarantines ownership', async () => {
+  const operationError = Object.freeze(new Error('native operation failed'));
+  const releaseError = new Error('native release failed');
+  const b = context('b');
+  jest.mocked(b.release).mockRejectedValue(releaseError);
+  jest.mocked(initLlama).mockResolvedValueOnce(b);
+
+  const error = await llmEngineService.runWithAuxiliarySequence({ isCurrent: () => true },
+    sequence => sequence.withContext(phase('b'), async () => { throw operationError; }))
+    .catch(failure => failure as AuxiliaryContextCleanupError);
+
+  expect(error).toBeInstanceOf(AuxiliaryContextCleanupError);
+  expect(error).toMatchObject({ code: 'engine_recovery_required', cause: operationError, operationError });
+  expect(error.operationError).toBe(operationError);
+  expect(error.cleanupError).toBe(service.orphanedContextReleaseError);
+  expect(error.cleanupError).toMatchObject({ code: 'engine_recovery_required', cause: releaseError });
+  expect(restore).not.toHaveBeenCalled();
+  expect(() => llmEngineService.assertModelResourcesIdle(['/models/independent.gguf']))
+    .toThrow(service.orphanedContextReleaseError!);
+  await expect(llmEngineService.runWithAuxiliarySequence({ isCurrent: () => true },
+    sequence => sequence.withContext(phase('c'), async () => 1)))
+    .rejects.toBe(service.orphanedContextReleaseError);
+  expect(initLlama).toHaveBeenCalledTimes(1);
+});
+
+it('Stop cannot mask a primary failure plus unconfirmed native teardown with cancellation', async () => {
+  const operationError = Object.freeze(new Error('original native operation failure'));
+  const releaseError = Object.freeze(new Error('native context release failure'));
+  const pending = deferred<void>();
+  const abort = new AbortController();
+  const b = context('b');
+  jest.mocked(b.release).mockRejectedValue(releaseError);
+  jest.mocked(initLlama).mockResolvedValueOnce(b);
+  let started = false;
+  const transaction = llmEngineService.runWithAuxiliarySequence({ signal: abort.signal,
+    isCurrent: () => !abort.signal.aborted, isSelectionCurrent: () => true },
+  sequence => sequence.withContext({ ...phase('b'), signal: abort.signal }, async () => {
+    started = true;
+    await pending.promise;
+    throw operationError;
+  }));
+  const failure = transaction.catch(error => error as AuxiliaryContextCleanupError);
+  try {
+    await until(() => started);
+    abort.abort();
+    await llmEngineService.stopCompletion();
+    expect(events).not.toContain('release:b');
+    pending.resolve();
+    const error = await failure;
+    expect(error).toBeInstanceOf(AuxiliaryContextCleanupError);
+    expect(error).toMatchObject({ code: 'engine_recovery_required', operationError, cause: operationError });
+    expect(error.operationError).toBe(operationError);
+    expect(error.cleanupError).toBe(service.orphanedContextReleaseError);
+    expect(error.cleanupError).toMatchObject({ code: 'engine_recovery_required', cause: releaseError });
+    expect(restore).not.toHaveBeenCalled();
+    expect(() => llmEngineService.assertModelResourcesIdle(['/models/independent.gguf']))
+      .toThrow(service.orphanedContextReleaseError!);
+    expect(initLlama).toHaveBeenCalledTimes(1);
+  } finally { pending.resolve(); await failure; }
 });
 
 it('a restore observer failure aborts continuation without claiming that the verified restore failed', async () => {

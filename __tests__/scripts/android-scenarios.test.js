@@ -619,6 +619,22 @@ android {
 });
 
 describe('android-scenarios smoke bootstrap args', () => {
+  it('enables app-private clip verification only for explicitly isolated TTS acceptance', () => {
+    const env = {};
+    configureScenarioBuildEnvironment({ pack: 'tts', apkVariant: 'release', isolatedQaInstall: true }, true, env);
+    expect(env).toMatchObject({ POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1', EXPO_PUBLIC_ANDROID_QA: '1',
+      EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1', POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: 'true' });
+    expect(() => configureScenarioBuildEnvironment({ pack: 'tts', apkVariant: 'release' }, true, {}))
+      .toThrow(ScenarioPreconditionFailureError);
+    const nativeEnv = {};
+    configureScenarioBuildEnvironment({ pack: 'native', apkVariant: 'release', isolatedQaInstall: true }, true, nativeEnv);
+    expect(nativeEnv.POCKET_AI_QA_PRIVATE_FILE_ACCESS).toBeUndefined();
+    const playbackEnv = {};
+    configureScenarioBuildEnvironment({ scenario: 'runtime-local-tts-playback', apkVariant: 'release', isolatedQaInstall: true }, true, playbackEnv);
+    expect(playbackEnv).toMatchObject({ POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1', EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1' });
+    expect(() => configureScenarioBuildEnvironment({ scenario: 'runtime-local-tts-playback', apkVariant: 'release' }, true, {}))
+      .toThrow(ScenarioPreconditionFailureError);
+  });
   it('configures release and the QA seam before current-head launch, and rejects debug', () => {
     const releaseEnv = {};
     expect(configureScenarioBuildEnvironment({ apkVariant: 'release' }, true, releaseEnv)).toEqual({
@@ -4648,6 +4664,9 @@ describe('android-scenarios pack selection', () => {
         'runtime-local-tools',
         'runtime-document-retrieval',
         'runtime-document-index-publication',
+        'runtime-local-tts-tokens',
+        'runtime-local-tts-continuous',
+        'runtime-local-tts-playback',
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));
@@ -4665,6 +4684,19 @@ describe('android-scenarios pack selection', () => {
     expect(selectedIds).not.toContain('native-glass-theme-matrix');
     expect(selectedIds).not.toContain('foreground-service-notification-states');
     expect(selectedIds).not.toEqual(expect.arrayContaining(BRANCH_REGENERATION_SCENARIOS));
+  });
+
+  it('keeps real TTS downloads and private ASR exports in the explicit isolated local pack', () => {
+    const selected = selectScenarios(scenarios, parseCliOptions(['--pack', 'tts', '--apk-variant', 'release', '--isolated-qa-install']));
+    expect(selected.map(item => item.id)).toEqual([
+      'runtime-inference-lifecycle', 'runtime-model-resources', 'runtime-stage3', 'runtime-local-tools',
+      'runtime-document-index-publication', 'runtime-local-tts-tokens', 'runtime-local-tts-continuous',
+    ]);
+    expect(selected.every(item => item.requiresCurrentHeadProvenance && item.requiresIsolatedQaInstall)).toBe(true);
+    for (const pack of ['all', 'native', 'runtime']) {
+      expect(selectScenarios(scenarios, parseCliOptions(['--pack', pack])).map(item => item.id))
+        .not.toEqual(expect.arrayContaining(['runtime-local-tts-tokens', 'runtime-local-tts-continuous']));
+    }
   });
 });
 

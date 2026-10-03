@@ -89,6 +89,125 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(fs.readFileSync(sourcePath, 'utf8')).toBe(original);
   });
 
+  it('redacts speech text and private backbone/codec paths from reachable TTS diagnostics', () => {
+    patchLlamaBridge(root);
+    const read = source => fs.readFileSync(path.join(root, 'node_modules/llama.rn', source), 'utf8');
+    const completion = read(COMPLETION_SOURCE);
+    expect(completion).not.toContain('chatterbox_text.substr(0,40)');
+    expect(completion).toContain('LOG_INFO("Chatterbox prefill: entering block, n_past=%d", n_past);');
+    const tts = read('cpp/rn-tts.cpp');
+    expect(tts).not.toContain('alm_err.empty() ? "(no error)" : alm_err.c_str()');
+    expect(tts).toContain('LOG_WARNING("audio_lm_init failed (non-fatal)");');
+    const llama = read('cpp/rn-llama.cpp');
+    expect(llama).not.toContain('LOG_ERROR("unable to load model: %s"');
+    expect(llama).not.toContain('LOG_ERROR("unable to initialize context for model: %s"');
+    expect(llama).toContain('LOG_ERROR("unable to load model");');
+    expect(llama).toContain('LOG_ERROR("unable to initialize context for model");');
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+  });
+
+  it.each([
+    ['cpp/rn-completion.cpp', '014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc'],
+    ['cpp/rn-tts.cpp', '147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f'],
+    ['cpp/rn-tts.cpp', '30c41e9ee214171f20ab11191317954c7f13d3bc3c8508d4f14901d27f05abe0'],
+  ])('upgrades the exact accepted pre-TTS privacy source: %s', (source, previousHash) => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === source);
+    const migration = patch.intermediates.find(entry => entry.sha256 === previousHash);
+    const file = path.join(root, 'node_modules/llama.rn', source);
+    let previous = applyReplacements(fs.readFileSync(file, 'utf8'), patch.replacements);
+    for (const [before, after] of [...migration.replacements].reverse()) previous = previous.replace(after, before);
+    expect(hashSource(previous)).toBe(previousHash);
+    fs.writeFileSync(file, previous);
+    expect(() => patchLlamaBridge(root, { check: true })).toThrow(/patch is missing/u);
+    patchLlamaBridge(root);
+    expect(hashSource(fs.readFileSync(file, 'utf8'))).toBe(patch.afterSha256);
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+  });
+
+  it('bounds token/latent frames before native copies, transpose and codec graph calls', () => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn/cpp/rn-tts.cpp'), 'utf8');
+    expect(source).toContain('static constexpr size_t RN_TTS_MAX_PCM_SAMPLES = 768000;');
+    expect(source).toContain('static constexpr size_t RN_TTS_MAX_AUDIO_ELEMENTS = 768000;');
+    expect(source).toContain('static_cast<size_t>(sample_rate) * 16');
+    expect(source).toContain('const int32_t hop = codec_model_hop_size(model);');
+    expect(source).toContain('n_frames > sample_limit / static_cast<size_t>(hop)');
+    expect(source).toContain('n_tokens % static_cast<size_t>(n_codebooks) != 0');
+    const token = source.slice(source.indexOf('std::vector<float> llama_rn_context_tts::decodeAudioTokens'),
+      source.indexOf('std::vector<float> llama_rn_context_tts::decodeAudioEmbeddings'));
+    const tokenGuard = token.indexOf('rn_tts_validate_token_shape(codec_model, tokens.size(), bounded_codebooks);');
+    expect(tokenGuard).toBeGreaterThan(-1);
+    expect(tokenGuard).toBeLessThan(token.indexOf('std::vector<llama_token> tokens_audio = tokens;'));
+    expect(tokenGuard).toBeLessThan(token.indexOf('audio_lm_decode_audio(audio_lm_ctx, &pcm_out)'));
+    expect(tokenGuard).toBeLessThan(token.indexOf('codec_decode(codec_ctx, &token_buffer, &pcm, decode_params)'));
+    const accumulated = token.slice(token.indexOf('if (used_alm_path)'));
+    expect(accumulated.indexOf('rn_tts_validate_token_shape(codec_model, audio_tokens.size(), bounded_codebooks);'))
+      .toBeLessThan(accumulated.indexOf('audio_lm_decode_audio(audio_lm_ctx, &pcm_out)'));
+    const continuous = source.slice(source.indexOf('std::vector<float> llama_rn_context_tts::decodeAudioEmbeddings'));
+    const transpose = continuous.indexOf('std::vector<float> chan_major');
+    for (const guard of [
+      'embeddings.size() > RN_TTS_MAX_AUDIO_ELEMENTS',
+      'embedding_dim != codec_model_latent_dim(codec_model)',
+      'embeddings.size() % static_cast<size_t>(embedding_dim) != 0',
+      'rn_tts_validate_decode_frames(codec_model, embeddings.size() / static_cast<size_t>(embedding_dim));',
+      'std::any_of(embeddings.begin(), embeddings.end()',
+    ]) {
+      expect(continuous.indexOf(guard)).toBeGreaterThan(-1);
+      expect(continuous.indexOf(guard)).toBeLessThan(transpose);
+    }
+    expect(transpose).toBeLessThan(continuous.indexOf('codec_decode_quantized_representation('));
+  });
+
+  it('validates bounded finite mono PCM before output vectors and releases codec buffers even on rejection', () => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn/cpp/rn-tts.cpp'), 'utf8');
+    const validation = source.slice(source.indexOf('static void rn_tts_validate_pcm('),
+      source.indexOf('static int codec_decode_n_q_for_profile('));
+    expect(validation).toContain('data == nullptr || n_samples == 0 || n_samples > rn_tts_pcm_sample_limit(model)');
+    expect(validation).toContain('sample_rate != codec_model_sample_rate(model) || n_channels != 1');
+    expect(validation).toContain('std::any_of(data, data + n_samples, [](float value) { return !std::isfinite(value); })');
+    expect(validation).toContain('~pcm_release_guard() { codec_pcm_buffer_free(&pcm); }');
+    expect(validation.indexOf('rn_tts_validate_pcm(model, pcm.data')).toBeLessThan(validation.indexOf('return std::vector<float>(pcm.data'));
+    expect(source.match(/return rn_tts_take_pcm\(codec_model, pcm\);/gu)).toHaveLength(2);
+    expect(source.match(/rn_tts_validate_pcm\(codec_model, pcm_out\.pcm\.data\(\)/gu)).toHaveLength(2);
+    expect(validation).not.toContain('std::clamp');
+    expect(validation).not.toContain('std::fill');
+  });
+
+  it.each(['pristine', 'applied'])('rejects unknown %s TTS bounds source before writing any guarded file', state => {
+    if (state === 'applied') patchLlamaBridge(root);
+    const before = fs.readFileSync(sourcePath);
+    const file = path.join(root, 'node_modules/llama.rn/cpp/rn-tts.cpp');
+    fs.appendFileSync(file, '\n// unreviewed TTS decode drift\n');
+    const drifted = fs.readFileSync(file);
+    expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch: cpp\/rn-tts\.cpp/u);
+    expect(fs.readFileSync(sourcePath)).toEqual(before);
+    expect(fs.readFileSync(file)).toEqual(drifted);
+  });
+
+  it.each(['pristine', 'applied'])('preflights unknown %s backbone privacy source before every write', state => {
+    if (state === 'applied') patchLlamaBridge(root);
+    const bridge = fs.readFileSync(sourcePath);
+    const file = path.join(root, 'node_modules/llama.rn/cpp/rn-llama.cpp');
+    fs.appendFileSync(file, '\n// unknown backbone source\n');
+    const drifted = fs.readFileSync(file);
+    expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch: cpp\/rn-llama\.cpp/u);
+    expect(fs.readFileSync(sourcePath)).toEqual(bridge);
+    expect(fs.readFileSync(file)).toEqual(drifted);
+  });
+
+  it('rejects unknown installed source while constructing protected test fixtures', () => {
+    const installed = path.resolve(__dirname, '../../node_modules/llama.rn/cpp/rn-llama.cpp');
+    const read = fs.readFileSync;
+    const spy = jest.spyOn(fs, 'readFileSync').mockImplementation((file, ...args) => path.resolve(String(file)) === installed
+      ? read(file, ...args) + '\n// unknown installed source\n' : read(file, ...args));
+    try {
+      expect(() => copyLlamaPatchSources(root, { pristine: true })).toThrow(/Unknown installed llama.rn fixture source: cpp\/rn-llama\.cpp/u);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('makes precisely one native reset after rewind and is idempotent', () => {
     const original = fs.readFileSync(sourcePath, 'utf8');
     expect(hashSource(original)).toBe(BEFORE_SHA256);
@@ -548,7 +667,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     const projectRoot = path.resolve(__dirname, '../..');
     const relative = 'patches/llama-rn-0.13.0-rc.3.js';
     const packageConfig = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
-    expect(packageConfig.scripts.postinstall).toBe(`node ./${relative}`);
+    expect(packageConfig.scripts.postinstall).toBe(`node ./${relative} && node ./patches/expo-audio-55.0.18.js`);
     fs.mkdirSync(path.join(root, 'patches'));
     fs.copyFileSync(path.join(projectRoot, relative), path.join(root, relative));
     const before = collectPrebuildInputState(root);

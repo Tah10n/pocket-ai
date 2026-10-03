@@ -17,9 +17,10 @@ import { getLlamaBuildInfo } from './LlamaRuntimeAdapter';
 import { DOCUMENT_RETRIEVAL_LIMITS as LIMITS, DocumentRetrievalError } from '../types/documentRetrieval';
 import { validateDocumentVector } from './DocumentIndexStore';
 import { isAndroidQaDocumentIndexObservationActive, recordAndroidQaDocumentIndexNativeOperation } from './AndroidQaDocumentIndexObservation';
+import { LLAMA_SOURCE_PATCH_SHA256 } from './LlamaSourcePatchIdentity';
 
 // Identifies the guarded source patch shipped with this implementation, not package BuildInfo alone.
-export const DOCUMENT_RETRIEVAL_SOURCE_PATCH_SHA256 = '5093423b44e29c70a6757c61a59bfa986af7f7909b8e63c9333359bda1253cf4';
+export const DOCUMENT_RETRIEVAL_SOURCE_PATCH_SHA256 = LLAMA_SOURCE_PATCH_SHA256;
 
 export interface RetrievalRuntimeBinding {
   modelId: string;

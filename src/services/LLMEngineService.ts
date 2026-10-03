@@ -424,6 +424,15 @@ export interface AuxiliaryContextSequence {
   withContext: <T>(request: AuxiliaryContextRequest, operation: (context: LlamaContext) => Promise<T>) => Promise<T>;
 }
 
+/** Keeps the initial failure recoverable when native cleanup also fails closed. */
+export class AuxiliaryContextCleanupError extends AppError {
+  constructor(readonly operationError: unknown, readonly cleanupError: unknown) {
+    super('engine_recovery_required', 'The auxiliary operation failed and its native context could not be released.', {
+      cause: operationError,
+    });
+  }
+}
+
 type AuxiliaryOperationOwner = { modelId: string; cancelled: boolean; isCurrent?: () => boolean };
 
 function auxiliaryLoadProfileIdentity(profile: ModelLoadParameters | null): string {
@@ -3965,6 +3974,8 @@ class LLMEngineService {
             }
           };
           const work = (async () => {
+            let phaseOperationFailed = false;
+            let phaseOperationError: unknown;
             try {
               assertPhaseCurrent();
               await phase.beforeInit?.();
@@ -3998,10 +4009,17 @@ class LLMEngineService {
               if (nativeOperationError) throw nativeOperationError;
               assertPhaseCurrent();
               return value;
+            } catch (error) {
+              phaseOperationFailed = true;
+              phaseOperationError = error;
+              throw error;
             } finally {
               try {
                 if (auxiliaryContext) await this.releaseNativeContextsConfirmed(auxiliaryContext);
                 else if (initStarted && !this.orphanedContextReleaseError) await this.releaseNativeContextsConfirmed();
+              } catch (cleanupError) {
+                if (phaseOperationFailed) throw new AuxiliaryContextCleanupError(phaseOperationError, cleanupError);
+                throw cleanupError;
               } finally { phaseActive = false; }
             }
           })();
@@ -4068,6 +4086,8 @@ class LLMEngineService {
           }
         }
         if (restorationReceipt && isCurrent()) request.onRestored?.(restorationReceipt);
+        // Stop must not replace an unconfirmed native teardown failure with cancellation.
+        if (operationError instanceof AppError && operationError.code === 'engine_recovery_required') throw operationError;
         assertCurrent();
         if (operationError) throw operationError;
         return result;
@@ -6750,12 +6770,14 @@ class LLMEngineService {
   private async releaseNativeContextsConfirmed(context?: LlamaContext): Promise<void> {
     this.assertNoOrphanedContextReleasePending();
     let releaseFailed = false;
+    let releaseError: unknown;
     const rawRelease = (context ? releaseLlamaContext(context) : releaseAllLlamaContexts())
-      .catch(() => { releaseFailed = true; });
+      .catch(error => { releaseFailed = true; releaseError = error; });
     const outcome = await this.waitForUnloadPromise(rawRelease, CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS);
     if (outcome === 'timed_out' || releaseFailed) {
       throw this.recordOrphanedContextReleaseTerminalError({
         message: DETACHED_CONTEXT_RELEASE_FAILURE_MESSAGE,
+        cause: releaseError,
         reason: 'release_failed',
       });
     }

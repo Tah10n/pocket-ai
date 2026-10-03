@@ -688,6 +688,83 @@ describe('Android build content provenance', () => {
     }
   });
 
+  it('records QA private-file access and invalidates both build and prebuild reuse when opt-in changes', () => {
+    const projectRoot = createProject();
+    const gradleArgs = ['-PpocketAiApplicationId=com.github.tah10n.pocketai.qa'];
+    const env = { NODE_ENV: 'production', EXPO_PUBLIC_ANDROID_QA: '1',
+      POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: 'true', POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1' };
+    const options = { variant: 'release', gradleArgs, env,
+      userGradlePropertiesPath: path.join(projectRoot, 'isolated-gradle/gradle.properties') };
+    try {
+      const enabled = collectAndroidEffectiveBuildContext(projectRoot, options);
+      expect(enabled).toMatchObject({ qaPrivateFileAccess: true,
+        applicationId: { value: 'com.github.tah10n.pocketai.qa', isolatedQa: true }, signing: { mode: 'debug-fallback' } });
+      expect(() => assertAndroidBuildOverrideContract(projectRoot, options)).not.toThrow();
+      const disabledOptions = { ...options, env: { ...env, POCKET_AI_QA_PRIVATE_FILE_ACCESS: '0' } };
+      expect(collectAndroidEffectiveBuildContext(projectRoot, disabledOptions).qaPrivateFileAccess).toBe(false);
+      const toolchains = { node: 'fixture' }; const git = { head: 'fixture' };
+      const before = collectBuildProvenance(projectRoot, { ...disabledOptions, toolchains, git });
+      const after = collectBuildProvenance(projectRoot, { ...options, toolchains, git });
+      expect(before.buildContext.qaPrivateFileAccess).toBe(false);
+      expect(after.buildContext.qaPrivateFileAccess).toBe(true);
+      expect(after.embeddedBundle).toBe(true);
+      expect(after.digest).not.toBe(before.digest);
+      expect(collectPrebuildInputState(projectRoot, options).digest)
+        .not.toBe(collectPrebuildInputState(projectRoot, disabledOptions).digest);
+      expect(collectAndroidEffectiveBuildContext(projectRoot, { variant: 'release', env: {} }).qaPrivateFileAccess).toBe(false);
+    } finally { fs.rmSync(projectRoot, { force: true, recursive: true }); }
+  });
+
+  it.each([
+    ['production package', {}, [], 'release'],
+    ['foreign qa package', {}, ['-PpocketAiApplicationId=com.other.app.qa'], 'release'],
+    ['QA controls absent', { EXPO_PUBLIC_ANDROID_QA: undefined }, undefined, 'release'],
+    ['QA controls non-exact', { EXPO_PUBLIC_ANDROID_QA: 'true' }, undefined, 'release'],
+    ['debug signing absent', { POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: undefined }, undefined, 'release'],
+    ['debug signing overridden', {}, ['-PpocketAiApplicationId=com.github.tah10n.pocketai.qa', '-PpocketAiAllowDebugReleaseSigning=false'], 'release'],
+    ['shipping mode', { POCKET_AI_SHIPPING_BUILD: '1' }, undefined, 'release'],
+    ['debug variant', {}, undefined, 'debug'],
+    ['malformed opt-in', { POCKET_AI_QA_PRIVATE_FILE_ACCESS: 'true' }, undefined, 'release'],
+  ])('rejects QA private-file access for %s before accepting provenance', (_label, patch, args, variant) => {
+    const projectRoot = createProject();
+    const options = { variant, env: { NODE_ENV: 'production', EXPO_PUBLIC_ANDROID_QA: '1',
+      POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: 'true', POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1', ...patch },
+      gradleArgs: args ?? ['-PpocketAiApplicationId=com.github.tah10n.pocketai.qa'],
+      userGradlePropertiesPath: path.join(projectRoot, 'isolated-gradle/gradle.properties') };
+    try {
+      expect(() => collectAndroidEffectiveBuildContext(projectRoot, options)).toThrow(/QA private-file access|POCKET_AI_QA_PRIVATE_FILE_ACCESS/);
+      expect(() => collectBuildProvenance(projectRoot, { ...options, toolchains: {}, git: {} }))
+        .toThrow(/QA private-file access|POCKET_AI_QA_PRIVATE_FILE_ACCESS/);
+    } finally { fs.rmSync(projectRoot, { force: true, recursive: true }); }
+  });
+
+  it('rejects upload-signed QA private-file access even when debug fallback was explicitly allowed', () => {
+    const projectRoot = createProject();
+    const storeFile = path.join(projectRoot, 'upload.keystore');
+    fs.writeFileSync(storeFile, 'fixture signing identity');
+    try {
+      const options = { variant: 'release', gradleArgs: ['-PpocketAiApplicationId=com.github.tah10n.pocketai.qa'],
+        env: { EXPO_PUBLIC_ANDROID_QA: '1', POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1', POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: 'true',
+          POCKET_AI_UPLOAD_STORE_FILE: storeFile, POCKET_AI_UPLOAD_STORE_PASSWORD: 'fixture',
+          POCKET_AI_UPLOAD_KEY_ALIAS: 'fixture', POCKET_AI_UPLOAD_KEY_PASSWORD: 'fixture' } };
+      expect(() => collectAndroidEffectiveBuildContext(projectRoot, options)).toThrow(/local debug-fallback release signing/);
+      expect(() => assertAndroidBuildOverrideContract(projectRoot, options)).toThrow(/local debug-fallback release signing/);
+    } finally { fs.rmSync(projectRoot, { force: true, recursive: true }); }
+  });
+
+  it('rejects shipping private-file access from process or dotenv and respects an explicit disabled override', () => {
+    const projectRoot = createProject();
+    try {
+      expect(() => createAndroidShippingBuildEnvironment(projectRoot,
+        { NODE_ENV: 'production', POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1' })).toThrow(/reject POCKET_AI_QA_PRIVATE_FILE_ACCESS/);
+      fs.writeFileSync(path.join(projectRoot, '.env.production'), 'POCKET_AI_QA_PRIVATE_FILE_ACCESS=1\n');
+      expect(() => createAndroidShippingBuildEnvironment(projectRoot,
+        { NODE_ENV: 'production' })).toThrow(/reject POCKET_AI_QA_PRIVATE_FILE_ACCESS/);
+      expect(createAndroidShippingBuildEnvironment(projectRoot,
+        { NODE_ENV: 'production', POCKET_AI_QA_PRIVATE_FILE_ACCESS: '0' }).POCKET_AI_QA_PRIVATE_FILE_ACCESS).toBe('0');
+    } finally { fs.rmSync(projectRoot, { force: true, recursive: true }); }
+  });
+
   it('invalidates build provenance for effective Gradle version and plugin environment changes', () => {
     const projectRoot = createProject();
 

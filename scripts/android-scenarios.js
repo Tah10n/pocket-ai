@@ -3,6 +3,9 @@ const { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, sanitizeLocalT
   sanitizeLocalToolsRecoveryEvidence, waitForLocalToolsRecoveryEvidence } = require("./lib/local-tools-evidence");
 const { sanitizeDocumentRetrievalEvidence, waitForDocumentRetrievalEvidence } = require("./lib/document-retrieval-evidence");
 const { sanitizeDocumentIndexPublicationEvidence, waitForDocumentIndexPublicationEvidence } = require("./lib/document-index-publication-evidence");
+const { sanitizeTtsEvidence, validateTtsEvidence, validateTtsPlaybackEvidence } = require("./lib/tts-evidence");
+const { createTtsPublicSnapshotReader, getTtsControlTap, runTtsPublicControls } = require("./lib/tts-public-controls");
+const { resolveExternalTtsDirectory, exportLocalTtsClip, assertTtsPrivateFileAccess } = require("./lib/tts-local-export");
 
 const fs = require("fs");
 const path = require("path");
@@ -114,6 +117,7 @@ const SCENARIO_PACK_SCENARIOS = {
   inference: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools"],
   retrieval: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval"],
   "retrieval-publication": ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-index-publication"],
+  tts: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-index-publication", "runtime-local-tts-tokens", "runtime-local-tts-continuous"],
   "document-benchmark": DOCUMENT_BENCHMARK_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
@@ -3126,6 +3130,22 @@ function buildScenarios() {
         }
       },
     },
+    ...["tokens", "continuous_embd"].map(flow => ({
+      id: flow === "tokens" ? "runtime-local-tts-tokens" : "runtime-local-tts-continuous",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: `Synthesize/decode ${flow}, exercise playback and restore A with LoRA; retain synthetic clips only for local independent ASR.`,
+      run: ctx => runTtsAcceptanceScenario(ctx, flow),
+    })),
+    {
+      id: "runtime-local-tts-playback",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: "Synthesize one token-TTS clip, use its rendered playback controls, clear on background, and generate with restored A and LoRA.",
+      run: ctx => runTtsPlaybackAcceptanceScenario(ctx),
+    },
     {
       id: "runtime-stage3",
       tier: "critical",
@@ -5640,6 +5660,268 @@ const INFERENCE_SMOKE_FAILURE_CODES = new Set(["actual_backend", "backend_discov
   "operation_failed", "runtime_policy", "stop_not_during_generation", "timeout", "unload_incomplete",
   "verified_model_missing"]);
 
+async function runTtsAcceptanceScenario(ctx, flow) {
+  const audioOutput = process.env.POCKET_AI_TTS_AUDIO_OUTPUT_DIR;
+  if (!audioOutput || !path.isAbsolute(audioOutput)) {
+    throw new Error("TTS acceptance requires an explicit local POCKET_AI_TTS_AUDIO_OUTPUT_DIR for independent ASR; speech is never uploaded by this scenario.");
+  }
+  const targetDirectory = resolveExternalTtsDirectory(audioOutput, projectRoot);
+  const adbPath = resolveAdbPath();
+  assertTtsPrivateFileAccess(adbPath, ctx.serial, appPackageName);
+  const evidencePath = path.join(artifactsRoot, `tts-${flow}-evidence.json`);
+  const exports = [];
+  const copied = new Set();
+  try {
+    await goToHome(ctx);
+    await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+    const actionId = flow === "tokens" ? "chat-qa-run-tts-tokens" : "chat-qa-run-tts-continuous";
+    const action = await waitForResourceId(adbPath, ctx.serial, actionId, { timeoutMs: 180000, visibleOnly: true });
+    if (!action.bounds) throw new Error("TTS QA action is not tappable.");
+    tapBounds(adbPath, ctx.serial, action.bounds);
+    const deadline = Date.now() + 3600000;
+    while (Date.now() < deadline) {
+      const snapshot = createUiSnapshot(adbPath, ctx.serial);
+      const node = findResourceIdInSnapshot(snapshot, "chat-qa-tts-evidence");
+      let observed; try { observed = node ? JSON.parse(node.contentDesc || node.text) : null; } catch { observed = null; }
+      if (!observed) { await delay(1500); continue; }
+      const safe = sanitizeTtsEvidence(observed);
+      fs.writeFileSync(evidencePath, `${JSON.stringify({ ...safe, localClipExports: exports }, null, 2)}\n`);
+      if (safe.status === "failed") throw new Error(`Native TTS failed: phase=${safe.phase}, code=${safe.failureCode || "unknown"}.`);
+      if (safe.phase === "awaiting_clip_copy" && safe.clipId && !copied.has(safe.clipId)) {
+        const step = safe.steps.find(item => item.id === safe.clipId);
+        if (!step || step.flow !== flow) throw new Error("Clip has no matching native decode receipt.");
+        const command = spawnSync(adbPath, ["-s", ctx.serial, "exec-out", "run-as", appPackageName,
+          "cat", "cache/tts-clips/clip.wav"], { cwd: projectRoot, encoding: null, timeout: 30000,
+          maxBuffer: 1600000, stdio: ["ignore", "pipe", "pipe"] });
+        if (command.error || command.status !== 0) throw new Error("Could not read isolated QA clip for local content verification.");
+        const receipt = exportLocalTtsClip(targetDirectory, safe.clipId, command.stdout, step);
+        exports.push({ ...receipt, copyPid: command.pid });
+        copied.add(safe.clipId);
+        ctx.captureScreenshot(`tts-${safe.clipId}-playback.png`);
+        const next = await waitForResourceId(adbPath, ctx.serial, "chat-qa-continue-tts-clip", { timeoutMs: 30000, visibleOnly: true });
+        if (!next.bounds) throw new Error("TTS clip continuation is not tappable.");
+        tapBounds(adbPath, ctx.serial, next.bounds);
+      }
+      if (safe.status === "native_passed") {
+        validateTtsEvidence(safe, flow);
+        if (copied.size !== 3) throw new Error("Local ASR clips are incomplete.");
+        const publicControls = await runTtsPublicControlsAndColdRestart(ctx);
+        const details = { ...safe, publicControls, localClipExports: exports };
+        fs.writeFileSync(evidencePath, `${JSON.stringify(details, null, 2)}\n`);
+        return { details };
+      }
+      await delay(1500);
+    }
+    throw new Error("Native TTS acceptance timed out; isolated app teardown is required.");
+  } catch (error) { forceStopScenarioApp(adbPath, ctx.serial); throw error; }
+}
+
+async function runTtsPlaybackAcceptanceScenario(ctx) {
+  const adbPath = resolveAdbPath();
+  assertTtsPrivateFileAccess(adbPath, ctx.serial, appPackageName);
+  const evidencePath = path.join(artifactsRoot, 'tts-playback-start-evidence.json');
+  const readNative = () => {
+    const node = findResourceIdInSnapshot(createUiSnapshot(adbPath, ctx.serial), 'chat-qa-tts-evidence');
+    let observed; try { observed = node ? JSON.parse(node.contentDesc || node.text) : null; } catch { return null; }
+    return observed ? sanitizeTtsEvidence(observed) : null;
+  };
+  const waitNative = async predicate => {
+    const deadline = Date.now() + 600000;
+    while (Date.now() < deadline) {
+      const native = readNative();
+      if (native) {
+        fs.writeFileSync(evidencePath, `${JSON.stringify({ native }, null, 2)}\n`);
+        if (native.status === 'failed') throw new Error(`Native TTS playback acceptance failed: code=${native.failureCode || 'unknown'}.`);
+        if (predicate(native)) return native;
+      }
+      await delay(1000);
+    }
+    throw new Error('Single-clip TTS acceptance deadline expired; isolated teardown required.');
+  };
+  const readClipHash = () => {
+    const result = spawnSync(adbPath, ['-s', ctx.serial, 'shell', 'run-as', appPackageName,
+      'sha256sum', 'cache/tts-clips/clip.wav'], { timeout: 15000, encoding: 'utf8', maxBuffer: 4096 });
+    const digest = /^([a-f0-9]{64})\s/u.exec(result.stdout || '')?.[1];
+    if (result.error || result.status !== 0 || !digest) throw new Error('Could not verify the retained private clip identity.');
+    return digest;
+  };
+  const rawSnapshot = () => {
+    const snapshot = createUiSnapshot(adbPath, ctx.serial);
+    const marker = findResourceIdInSnapshot(snapshot, 'chat-qa-tts-playback-state');
+    let state; try { state = marker ? JSON.parse(marker.contentDesc || marker.text) : null; } catch { state = null; }
+    return { state, viewport: snapshot.viewportBounds, controls: Object.fromEntries(
+      ['tts-play', 'tts-pause', 'tts-replay', 'tts-stop'].map(id => [id,
+        findResourceIdInSnapshot(snapshot, id, { visibleOnly: true })])),
+      previewOpen: Boolean(findResourceIdInSnapshot(snapshot, 'tts-preview-sheet', { visibleOnly: true })) };
+  };
+  const readSnapshot = createTtsPublicSnapshotReader({ readSnapshot: rawSnapshot,
+    bringControlsIntoView: () => scrollTtsPublicControlsIntoView(ctx) });
+  const tap = point => runChecked(adbPath, ['-s', ctx.serial, 'shell', 'input', 'tap', `${point.x}`, `${point.y}`], { stdio: 'ignore' });
+  const fastCapture = name => {
+    const result = spawnSync(adbPath, ['-s', ctx.serial, 'exec-out', 'screencap', '-p'], {
+      timeout: 1000, maxBuffer: 20 * 1024 * 1024,
+    });
+    if (result.error || result.status !== 0 || !isCompletePngBuffer(result.stdout)) throw new Error('TTS playback screenshot failed.');
+    fs.writeFileSync(path.join(artifactsRoot, name), result.stdout);
+  };
+  try {
+    await goToHome(ctx);
+    await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+    await tapVisibleResource(ctx, 'chat-qa-run-tts-playback', { timeoutMs: 180000 });
+    const prepared = await waitNative(native => native.phase === 'awaiting_public_controls');
+    if (prepared.mode !== 'playback_start' || prepared.synthesisCount !== 1) throw new Error('Expected exactly one real synthesis.');
+    const before = readClipHash();
+    await tapVisibleResource(ctx, 'chat-qa-open-tts-preview', { timeoutMs: 30000 });
+    await waitForResourceId(adbPath, ctx.serial, 'tts-exact-preview', { timeoutMs: 30000, visibleOnly: true });
+    await scrollTtsPublicControlsIntoView(ctx);
+    const ready = rawSnapshot();
+    if (ready.state?.phase !== 'ready' || ready.state.errorCode) throw new Error('Generated clip is not ready for explicit Play.');
+    tap(getTtsControlTap(ready.controls['tts-play'], ready.viewport));
+    const publicControls = await runTtsPublicControls({ readSnapshot, tap, captureScreenshot: fastCapture, delay,
+      initialTimeoutMs: 30000, settleTimeoutMs: 30000,
+      isTransientObservationError: error => /^Failed to dump Android UI hierarchy /u.test(error?.message ?? '') });
+    const after = readClipHash();
+    if (before !== after) throw new Error('Playback controls changed the private clip.');
+    const stopped = await readSnapshot();
+    tap(getTtsControlTap(stopped.controls['tts-replay'], stopped.viewport));
+    await delay(Math.min(400, Math.floor(stopped.state.duration * 1000 / 4)));
+    fastCapture('tts-playback-before-background.png');
+    await ctx.pressHome();
+    ctx.captureScreenshot('tts-playback-background.png');
+    await relaunchScenarioApp(ctx);
+    const deadline = Date.now() + 30000;
+    let cleared;
+    while (Date.now() < deadline) {
+      const snapshot = rawSnapshot();
+      if (snapshot.state?.phase === null && !snapshot.state.sampleCount && !snapshot.state.position
+        && !snapshot.state.errorCode && !snapshot.previewOpen) { cleared = snapshot; break; }
+      await delay(250);
+    }
+    if (!cleared || appPrivatePathExists(adbPath, ctx.serial, 'cache/tts-clips/clip.wav')) {
+      throw new Error('Background did not remove the clip and close the preview.');
+    }
+    await delay(1500);
+    const returned = rawSnapshot();
+    if (returned.state?.phase !== null || returned.state.sampleCount || returned.state.position || returned.state.errorCode) {
+      throw new Error('Background return resumed playback.');
+    }
+    ctx.captureScreenshot('tts-playback-background-return.png');
+    await tapVisibleResource(ctx, 'chat-qa-continue-tts-playback', { timeoutMs: 30000 });
+    const native = await waitNative(value => value.status === 'native_passed');
+    const details = validateTtsPlaybackEvidence({ native, publicControls, sameClip: { before, after },
+      background: { playingObserved: true, clipRemoved: true, previewClosed: true, noAutoplay: true } });
+    // Source/APK/build identities are verified by the enclosing current-head runner.
+    details.expoAudioPatchSha256 = require('crypto').createHash('sha256').update(fs.readFileSync(
+      path.join(projectRoot, 'patches/expo-audio-55.0.18.js'), 'utf8').replace(/\r\n/gu, '\n')).digest('hex');
+    fs.writeFileSync(evidencePath, `${JSON.stringify(details, null, 2)}\n`);
+    return { details };
+  } catch (error) { forceStopScenarioApp(adbPath, ctx.serial); throw error; }
+}
+
+async function scrollTtsPublicControlsIntoView(ctx, options = {}) {
+  const adbPath = options.adbPath ?? resolveAdbPath();
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const now = options.now ?? Date.now;
+  const deadline = now() + 20000;
+  const swipe = options.swipe ?? (async gesture => {
+    runChecked(adbPath, ['-s', ctx.serial, 'shell', 'input', 'swipe',
+      `${gesture.startX}`, `${gesture.startY}`, `${gesture.endX}`, `${gesture.endY}`, '250']);
+    await delay(900);
+  });
+  const contains = (outer, inner) => outer && inner && outer.left >= 0 && outer.top >= 0
+    && outer.right > outer.left && outer.bottom > outer.top
+    && ['left', 'top', 'right', 'bottom'].every(key => Number.isSafeInteger(outer[key]) && Number.isSafeInteger(inner[key]))
+    && inner.left >= outer.left && inner.top >= outer.top
+    && inner.right <= outer.right && inner.bottom <= outer.bottom
+    && inner.right > inner.left && inner.bottom > inner.top;
+  for (let attempt = 0; attempt <= 4 && now() < deadline; attempt += 1) {
+    const snapshot = await createSnapshot(adbPath, ctx.serial);
+    const marker = findResourceIdInSnapshot(snapshot, 'chat-qa-tts-playback-state');
+    let state; try { state = JSON.parse(marker?.contentDesc || marker?.text); } catch { state = null; }
+    if (!['ready', 'paused', 'stopped'].includes(state?.phase) || state.errorCode
+      || !Number.isSafeInteger(state.sampleCount) || state.sampleCount < 1 || state.sampleCount > 768000) {
+      throw new Error('TTS controls scrolling requires a static generated clip.');
+    }
+    const sheet = findResourceIdInSnapshot(snapshot, 'tts-preview-sheet', { visibleOnly: true });
+    if (!contains(snapshot.viewportBounds, sheet?.bounds)) throw new Error('TTS Modal viewport is missing or clipped.');
+    const views = snapshot.nodes.filter(node => /ScrollView$/u.test(node.className)
+      && node.enabled && contains(sheet.bounds, node.bounds));
+    if (views.length !== 1 || !contains(snapshot.viewportBounds, views[0].bounds)
+      || views[0].bounds.right - views[0].bounds.left < 100
+      || views[0].bounds.bottom - views[0].bounds.top < 200) {
+      throw new Error('TTS Modal scroll viewport is missing, ambiguous, or clipped.');
+    }
+    const b = views[0].bounds;
+    const controls = ['tts-play', 'tts-replay', 'tts-stop'].map(id => findResourceIdInSnapshot(snapshot, id));
+    if (controls.every(node => node?.enabled && node.clickable && contains(b, node.bounds))) return snapshot;
+    if (attempt === 4) break;
+    const inset = Math.floor((b.bottom - b.top) / 4);
+    const centerX = Math.floor((b.left + b.right) / 2);
+    await swipe({ startX: centerX, endX: centerX,
+      startY: b.bottom - inset, endY: b.top + inset });
+  }
+  throw new Error('TTS controls remain outside the observed Modal scroll viewport.');
+}
+
+async function runTtsPublicControlsAndColdRestart(ctx) {
+  const adbPath = resolveAdbPath();
+  await tapVisibleResource(ctx, 'chat-qa-open-tts-preview', { timeoutMs: 30000 });
+  await waitForResourceId(adbPath, ctx.serial, 'tts-exact-preview', { timeoutMs: 30000, visibleOnly: true });
+  await tapVisibleResource(ctx, 'tts-synthesize', { timeoutMs: 30000, allowScroll: true });
+  const readSnapshot = createTtsPublicSnapshotReader({
+    readSnapshot: () => {
+      const snapshot = createUiSnapshot(adbPath, ctx.serial);
+      const marker = findResourceIdInSnapshot(snapshot, 'chat-qa-tts-playback-state');
+      let state; try { state = marker ? JSON.parse(marker.contentDesc || marker.text) : null; } catch { state = null; }
+      return { state, viewport: snapshot.viewportBounds, controls: Object.fromEntries(
+        ['tts-play', 'tts-pause', 'tts-replay', 'tts-stop'].map(id => [id,
+          findResourceIdInSnapshot(snapshot, id, { visibleOnly: true })])) };
+    },
+    bringControlsIntoView: () => scrollTtsPublicControlsIntoView(ctx),
+  });
+  const publicControls = await runTtsPublicControls({
+    readSnapshot, delay,
+    isTransientObservationError: error => /^Failed to dump Android UI hierarchy /u.test(error?.message ?? ''),
+    tap: point => runChecked(adbPath, ['-s', ctx.serial, 'shell', 'input', 'tap', `${point.x}`, `${point.y}`], {
+      stdio: 'ignore',
+    }),
+    captureScreenshot: name => {
+      // No hierarchy/idle wait or remote-file retries may consume this short playing window.
+      const result = spawnSync(adbPath, ['-s', ctx.serial, 'exec-out', 'screencap', '-p'], {
+        timeout: 1000, maxBuffer: 20 * 1024 * 1024,
+      });
+      if (result.error || result.status !== 0 || !isCompletePngBuffer(result.stdout)) {
+        throw new Error('Direct TTS playback screenshot failed.');
+      }
+      fs.writeFileSync(path.join(artifactsRoot, name), result.stdout);
+    },
+  });
+  const waitForState = async (predicate, timeoutMs = 30000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const { state } = await readSnapshot();
+      if (state?.errorCode) throw new Error(`Public TTS controls failed: ${state.errorCode}.`);
+      if (state && predicate(state)) return state;
+      await delay(250);
+    }
+    throw new Error('Public TTS player did not settle in the requested state.');
+  };
+  ctx.captureScreenshot('tts-public-controls.png');
+  if (!appPrivatePathExists(adbPath, ctx.serial, 'cache/tts-clips/clip.wav')) {
+    throw new Error('Cold restart did not begin with the real retained clip.');
+  }
+  forceStopScenarioApp(adbPath, ctx.serial);
+  await relaunchScenarioApp(ctx);
+  await goToHome(ctx);
+  await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+  await waitForState(state => state.phase === null && !state.sampleCount && !state.position);
+  await delay(1500);
+  if (appPrivatePathExists(adbPath, ctx.serial, 'cache/tts-clips/clip.wav')) throw new Error('Cold launch retained the plaintext clip.');
+  await waitForState(state => state.phase === null && !state.sampleCount && !state.position);
+  ctx.captureScreenshot('tts-cold-launch.png');
+  return { ...publicControls, coldRestart: 'passed', coldAutoplay: false, coldClipRemoved: true };
+}
+
 function sanitizeInferenceSmokeEvidence(evidence) {
   const numericFields = ["callbacks", "outputCharacters", "tokensPredicted", "tokensEvaluated",
     "inputMessages", "loadedGpuLayers", "discoveredDeviceCount"];
@@ -5727,11 +6009,15 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
       );
     }
     env.EXPO_PUBLIC_ANDROID_QA = "1";
-    if (["documents", "inference", "retrieval", "retrieval-publication"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval", "runtime-document-index-publication"].includes(options.scenario)) {
+    if (["documents", "inference", "retrieval", "retrieval-publication", "tts"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval", "runtime-document-index-publication", "runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback"].includes(options.scenario)) {
       env.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS = "1";
     }
     env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
       env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING || "true";
+    if (options.pack === "tts" || ["runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback"].includes(options.scenario)) {
+      if (!options.isolatedQaInstall) throw new ScenarioPreconditionFailureError("Private speech verification requires --isolated-qa-install.");
+      env.POCKET_AI_QA_PRIVATE_FILE_ACCESS = "1";
+    }
   }
   return {
     androidQaEvidence: env.EXPO_PUBLIC_ANDROID_QA === "1",
@@ -7017,6 +7303,9 @@ function selectScenarios(scenarios, options) {
       "runtime-local-tools",
       "runtime-document-retrieval",
       "runtime-document-index-publication",
+      "runtime-local-tts-tokens",
+      "runtime-local-tts-continuous",
+      "runtime-local-tts-playback",
       "native-glass-theme-matrix",
       "foreground-service-notification-states",
     ]);
@@ -11292,6 +11581,7 @@ module.exports = {
   resolveSelectedBottomTabDestination,
   pickClosestNodePair,
   selectScenarios,
+  scrollTtsPublicControlsIntoView,
   scrollToResourceId,
   parseCliOptions,
   readAndroidProcessRssBytes,

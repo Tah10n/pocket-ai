@@ -176,6 +176,39 @@ function parseBuildGradleDefaults(buildGradle, {
   };
 }
 
+const QA_PRIVATE_FILE_ACCESS_TAG = 'pocket-ai-qa-private-file-access';
+const QA_PRIVATE_FILE_ACCESS_BLOCK = `// @generated begin ${QA_PRIVATE_FILE_ACCESS_TAG} - expo prebuild (DO NOT MODIFY)
+// Local isolated QA only: run-as can copy generated clips while Release still embeds JS/native libraries.
+// React Native's debuggableVariants remains unchanged, and Expo uses ReactBuildConfig.DEBUG for dev support.
+def pocketAiQaPrivateFileAccessValue = System.getenv("POCKET_AI_QA_PRIVATE_FILE_ACCESS")
+if (pocketAiQaPrivateFileAccessValue != null && !(pocketAiQaPrivateFileAccessValue in ["0", "1"])) {
+    throw new GradleException("POCKET_AI_QA_PRIVATE_FILE_ACCESS must be exactly 0 or 1.")
+}
+def pocketAiQaPrivateFileAccessEnabled = pocketAiQaPrivateFileAccessValue == "1"
+if (pocketAiQaPrivateFileAccessEnabled && (
+    appApplicationId != pocketAiIsolatedQaApplicationId ||
+    System.getenv("EXPO_PUBLIC_ANDROID_QA") != "1" ||
+    !allowDebugReleaseSigning || hasReleaseSigning ||
+    (System.getenv("POCKET_AI_SHIPPING_BUILD") ?: "").toLowerCase() in ["1", "true", "yes", "y"]
+)) {
+    throw new GradleException("QA private-file access requires the isolated .qa package, EXPO_PUBLIC_ANDROID_QA=1 and local debug-fallback release signing; shipping builds are forbidden.")
+}
+if (pocketAiQaPrivateFileAccessEnabled && project.extensions.getByType(com.facebook.react.ReactExtension).debuggableVariants.get().any { it.equalsIgnoreCase("release") }) {
+    throw new GradleException("QA private-file access must retain the embedded Release JavaScript bundle.")
+}
+android.buildTypes.getByName("release").debuggable = pocketAiQaPrivateFileAccessEnabled
+gradle.taskGraph.whenReady {
+    if (android.buildTypes.getByName("release").debuggable != pocketAiQaPrivateFileAccessEnabled) {
+        throw new GradleException("Release debuggable must match the guarded QA private-file access mode.")
+    }
+}
+// @generated end ${QA_PRIVATE_FILE_ACCESS_TAG}`;
+
+function applyQaPrivateFileAccessConfig(contents) {
+  const previousBlock = new RegExp(`\\n?// @generated begin ${QA_PRIVATE_FILE_ACCESS_TAG}[^\\r\\n]*\\r?\\n[\\s\\S]*?// @generated end ${QA_PRIVATE_FILE_ACCESS_TAG}\\r?\\n?`, 'g');
+  return `${contents.replace(previousBlock, '').trimEnd()}\n\n${QA_PRIVATE_FILE_ACCESS_BLOCK}\n`;
+}
+
 function applyBuildGradleReleaseConfig(buildGradle, configDefaults) {
   let contents = buildGradle;
 
@@ -253,6 +286,8 @@ function applyBuildGradleReleaseConfig(buildGradle, configDefaults) {
       console.warn('[withAndroidReleaseConfig] Could not find `signingConfigs {` in app/build.gradle.');
     }
   }
+
+  contents = applyQaPrivateFileAccessConfig(contents);
 
   if (contents.includes('signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug')) {
     return contents;

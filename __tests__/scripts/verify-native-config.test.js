@@ -81,6 +81,7 @@ function createProject() {
     '<plist><dict>',
     '<key>CFBundleIdentifier</key><string>com.github.tah10n.pocketai</string>',
     '<key>CFBundleVersion</key><string>1</string>',
+    '<key>NSMicrophoneUsageDescription</key><string>Record only after tapping Record.</string>',
     '</dict></plist>',
   ].join(''));
   fs.writeFileSync(
@@ -112,6 +113,7 @@ function createProject() {
     '<manifest>',
     '<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />',
     '<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />',
+    '<uses-permission android:name="android.permission.RECORD_AUDIO" />',
     '<application>',
     '<service android:name="com.asterinet.react.bgactions.RNBackgroundActionsTask" android:foregroundServiceType="dataSync" />',
     '</application>',
@@ -129,7 +131,7 @@ function addGuardedAudio(root) {
   writeJson(packageFile, packageConfig);
   const configFile = path.join(root, 'app.json');
   const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
-  config.expo.plugins.push(['expo-audio', { microphonePermission: false, recordAudioAndroid: false,
+  config.expo.plugins.push(['expo-audio', { microphonePermission: 'Record only after tapping Record.', recordAudioAndroid: true,
     enableBackgroundRecording: false, enableBackgroundPlayback: false }]);
   writeJson(configFile, config);
   const lockFile = path.join(root, 'package-lock.json');
@@ -287,7 +289,7 @@ describe('native configuration contract', () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('rejects native audio source drift even when versions and playback-only permissions are correct', () => {
+  it('rejects native audio source drift even when versions and explicit-recording permissions are correct', () => {
     const root = createProject();
     try {
       const audioRoot = addGuardedAudio(root);
@@ -346,7 +348,7 @@ describe('native configuration contract', () => {
       fs.writeFileSync(appConfigPath, JSON.stringify({ expo: { updates: { enabled: false }, ios: { infoPlist: {} }, plugins: ['./plugins/withLlamaSourceBuild'] } }));
       fs.writeFileSync(
         path.join(root, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'),
-        '<manifest><application /></manifest>',
+        '<manifest><uses-permission android:name="android.permission.RECORD_AUDIO" /><application /></manifest>',
       );
       expect(() => run(['--require-android'], root)).toThrow(/FOREGROUND_SERVICE/);
     } finally {

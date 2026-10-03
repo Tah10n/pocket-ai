@@ -3,7 +3,6 @@ const { mergeContents } = require('@expo/config-plugins/build/utils/generateCode
 
 const BLOCKED_PERMISSIONS = new Set([
   'android.permission.CAMERA',
-  'android.permission.RECORD_AUDIO',
   'android.permission.WRITE_EXTERNAL_STORAGE',
   'android.permission.SYSTEM_ALERT_WINDOW',
 ]);

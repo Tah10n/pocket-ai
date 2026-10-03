@@ -616,6 +616,21 @@ for (const upgrade of admissionUpgrades) {
   }
 }
 
+// Stage 7 composes the recorder opt-in contract with every already accepted
+// player transform. Both the accepted Stage 6 bytes and older known player
+// bytes can migrate; unknown bytes are still rejected before any write.
+for (const recorder of require('./expo-audio-recorder-55.0.18')) {
+  const previous = patches.find(patch => patch.file === recorder.file);
+  if (!previous) { patches.push(recorder); continue; }
+  const transform = previous.transform;
+  const upgrade = previous.upgrade;
+  previous.acceptedAfter = previous.after;
+  previous.recorderUpgrade = recorder.transform;
+  previous.after = recorder.after;
+  previous.transform = text => recorder.transform(transform(text));
+  if (upgrade) previous.upgrade = text => recorder.transform(upgrade(text));
+}
+
 function prepare(packageRoot) {
   const metadata = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
   if (metadata.version !== VERSION) throw new Error(`expo-audio patch requires ${VERSION}; refusing changed version`);
@@ -626,8 +641,9 @@ function prepare(packageRoot) {
     const original = normalize(fs.readFileSync(target, 'utf8'));
     const originalHash = hash(original);
     if (originalHash === patch.after) return { target, text: original, changed: false, file: patch.file };
-    if (originalHash !== patch.before && originalHash !== patch.legacyAfter) throw new Error(`expo-audio patch source hash mismatch: ${patch.file}`);
-    const updated = originalHash === patch.legacyAfter ? patch.upgrade(original) : patch.transform(original);
+    if (originalHash !== patch.before && originalHash !== patch.legacyAfter && originalHash !== patch.acceptedAfter) throw new Error(`expo-audio patch source hash mismatch: ${patch.file}`);
+    const updated = originalHash === patch.acceptedAfter ? patch.recorderUpgrade(original)
+      : originalHash === patch.legacyAfter ? patch.upgrade(original) : patch.transform(original);
     if (hash(updated) !== patch.after) throw new Error(`expo-audio patch result hash mismatch: ${patch.file}`);
     return { target, text: updated, changed: true, file: patch.file };
   });

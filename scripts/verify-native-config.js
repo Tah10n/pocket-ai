@@ -68,10 +68,10 @@ function assertSourceConfig(root = projectRoot) {
     const plugin = appConfig.expo?.plugins?.find(entry => Array.isArray(entry) && entry[0] === 'expo-audio');
     const options = plugin?.[1];
     if (packageConfig.dependencies['expo-audio'] !== '55.0.18' || !options
-      || options.microphonePermission !== false || options.recordAudioAndroid !== false
+      || typeof options.microphonePermission !== 'string' || !options.microphonePermission.trim() || options.recordAudioAndroid !== true
       || options.enableBackgroundRecording !== false || options.enableBackgroundPlayback !== false
       || backgroundModes.includes('audio')) {
-      throw new Error('Local speech requires the pinned playback-only audio plugin without recording/background audio.');
+      throw new Error('Local audio requires the pinned explicit-recording plugin with microphone permission and without background audio.');
     }
     assertExpoAudioSourceBuild(packageConfig);
   }
@@ -209,9 +209,9 @@ function assertIosGeneratedConfig(root = projectRoot) {
   if (/UIBackgroundModes[\s\S]{0,500}<string>processing<\/string>/u.test(plist)) {
     throw new Error('Generated Info.plist still declares unsupported background processing.');
   }
-  if (/<key>NSMicrophoneUsageDescription<\/key>/u.test(plist)
+  if (!/<key>NSMicrophoneUsageDescription<\/key>\s*<string>[^<]+<\/string>/u.test(plist)
     || /<key>UIBackgroundModes<\/key>\s*<array>[\s\S]*?<string>audio<\/string>[\s\S]*?<\/array>/u.test(plist)) {
-    throw new Error('Generated playback-only Info.plist must not request microphone/background audio.');
+    throw new Error('Generated Info.plist must include explicit microphone usage and forbid background audio.');
   }
   if (!/<key>CFBundleIdentifier<\/key>/u.test(plist)) {
     throw new Error('Generated Info.plist is missing CFBundleIdentifier.');
@@ -261,9 +261,11 @@ function assertAndroidGeneratedConfig(root = projectRoot) {
   );
   const grantedPermissions = [...manifest.matchAll(/<uses-permission\b[^>]*>/gu)]
     .filter(match => !/tools:node="remove"/u.test(match[0])).map(match => match[0]);
-  if (grantedPermissions.some(permission => /android\.permission\.(?:RECORD_AUDIO|FOREGROUND_SERVICE_MEDIA_PLAYBACK|FOREGROUND_SERVICE_MICROPHONE)/u.test(permission))
-    || /<service\b[^>]*expo\.modules\.audio\.service\.AudioForegroundService/u.test(manifest)) {
-    throw new Error('Generated playback-only Android manifest must not grant recording/background audio services.');
+  if (!grantedPermissions.some(permission => /android\.permission\.RECORD_AUDIO/u.test(permission))
+    || grantedPermissions.some(permission => /android\.permission\.(?:FOREGROUND_SERVICE_MEDIA_PLAYBACK|FOREGROUND_SERVICE_MICROPHONE)/u.test(permission))
+    || [...manifest.matchAll(/<service\b[^>]*>/gu)].some(match => !/tools:node="remove"/u.test(match[0])
+      && /expo\.modules\.audio\.service\.(?:AudioForegroundService|AudioRecordingService|AudioControlsService)/u.test(match[0]))) {
+    throw new Error('Generated Android manifest must grant explicit recording and forbid background audio services.');
   }
 
   for (const permission of [

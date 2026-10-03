@@ -48,6 +48,18 @@ const CHAT_PAYLOAD_CONTAINER_KEYS = new Set([
   'requestmessages',
 ]);
 
+// Reference transcripts, PCM and stable source identities are private content even when
+// included in a native error or a serialized request rather than a chat message.
+const PRIVATE_AUDIO_KEYS = new Set([
+  'refaudio', 'referenceaudio', 'reftext', 'referencetext', 'referencetranscript', 'transcript',
+  'phonemes', 'phonemetext', 'phonemeoutput', 'phonemetokens', 'phonemizedtext', 'tokensequence', 'tokensequences',
+  'pcm', 'referencepcm', 'audiosamples', 'speakerembedding', 'speakerembeddings',
+  'sourcesha256', 'referencesha256', 'referencesourcesha256', 'preparationidentity', 'referenceidentity', 'referenceid',
+  'voiceid', 'selectedvoiceid', 'savedvoiceid',
+]);
+const PRIVATE_AUDIO_LABEL = '(?:ref[_-]?audio|ref[_-]?text|reference[_-]?(?:audio|text|transcript|pcm|identity|id|(?:source[_-]?)?sha256)|transcript|phonemes|phoneme[_-]?(?:text|output|tokens)|phonemized[_-]?text|token[_-]?sequences?|pcm|audio[_-]?samples|speaker[_-]?embeddings?|source[_-]?sha256|preparation[_-]?identity|(?:selected|saved)?voice[_-]?id)';
+const LABELED_PRIVATE_AUDIO_PATTERN = new RegExp(`\\b(${PRIVATE_AUDIO_LABEL})\\b(['"]?\\s*[:=]\\s*)[\\s\\S]*?(?=(?:\\r?\\n\\s+(?:at|at async)\\s+|\\r?\\nCaused by:|\\r?\\n[A-Za-z]*Error:)|$)`, 'giu');
+
 const MODEL_CONTEXT_HASHED_KEYS = new Set([
   'author',
   'id',
@@ -251,6 +263,8 @@ function isInputAudioPayloadKey(key: string | undefined, parentKey: string | und
 function shouldDropKey(key: string | undefined, value: unknown, state: SanitizeState): boolean {
   const normalizedKey = normalizeKey(key);
   return DROP_KEYS.has(normalizedKey)
+    || PRIVATE_AUDIO_KEYS.has(normalizedKey)
+    || (normalizedKey === 'identity' && ['preparedaudio', 'preparedreference', 'audiopreparation', 'reference'].includes(normalizeKey(state.parentKey)))
     || isChatPayloadContainerKey(key)
     || isInputAudioPayloadKey(key, state.parentKey)
     || normalizedKey.includes('base64')
@@ -314,6 +328,7 @@ function trySanitizeJsonPayloadString(value: string, key?: string): string | nul
 }
 
 export function sanitizeErrorReportString(value: string, key?: string): string {
+  if (PRIVATE_AUDIO_KEYS.has(normalizeKey(key))) return REDACTED_PAYLOAD;
   const withRedactedTokens = value
     .replace(DATA_IMAGE_URI_PATTERN, REDACTED_PAYLOAD)
     .replace(LABELED_SENSITIVE_PAYLOAD_PATTERN, (_match, label: string, separator: string) => `${label}${separator}${REDACTED_PAYLOAD}`)
@@ -338,6 +353,7 @@ export function sanitizeErrorReportString(value: string, key?: string): string {
     .replace(QUOTED_CHAT_TEXT_KEY_UNTERMINATED_PATTERN, (_match, keyQuote: string, label: string, separator: string, valueQuote: string) => `${keyQuote}${label}${keyQuote}${separator}${valueQuote}${REDACTED_TOKEN}`);
 
   return withRedactedChatText
+    .replace(LABELED_PRIVATE_AUDIO_PATTERN, (_match, label: string, separator: string) => `${label}${separator}${REDACTED_PAYLOAD}`)
     .replace(FILE_URI_PATTERN, REDACTED_FILE_URI)
     .replace(PICKER_URI_PATTERN, REDACTED_URI)
     .replace(WINDOWS_EXTENDED_PATH_WITH_SPACES_PATTERN, REDACTED_PATH)

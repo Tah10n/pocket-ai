@@ -1,9 +1,18 @@
-export type TtsFlow = 'tokens' | 'continuous_embd';
+// rc.3 returns talker_embd for Qwen3 even though its public formatter type omits it.
+export type TtsFlow = 'tokens' | 'continuous_embd' | 'talker_embd';
+export type TtsReferenceSource =
+  | { readonly kind: 'temporary'; readonly sourceUri: string; readonly sourceSha256: string;
+      readonly durationMs: number; readonly consent: true }
+  | { readonly kind: 'saved'; readonly voiceId: string; readonly sourceSha256: string };
+export type TtsVoiceSelection = { readonly kind: 'speakerless' }
+  | { readonly kind: 'builtin'; readonly voice: string }
+  | { readonly kind: 'reference'; readonly source: TtsReferenceSource; readonly bake?: 'lazy' | 'eager' };
 export type TtsPhase = 'checking' | 'loading' | 'synthesizing' | 'decoding' | 'releasing' | 'restoring'
   | 'ready' | 'starting' | 'playing' | 'paused' | 'stopping' | 'stopped' | 'error';
 export type TtsErrorCode = 'selection_missing' | 'selection_changed' | 'files_missing' | 'integrity_failed'
   | 'profile_unverified' | 'codec_incompatible' | 'prerequisite_missing' | 'voice_unavailable'
-  | 'language_unsupported' | 'memory_unknown' | 'memory_insufficient' | 'busy' | 'cancelled'
+  | 'language_unsupported' | 'phonemizer_failed' | 'reference_invalid' | 'consent_required'
+  | 'memory_unknown' | 'memory_insufficient' | 'busy' | 'cancelled'
   | 'input_too_large' | 'generation_incomplete' | 'payload_invalid' | 'decode_failed'
   | 'audio_focus_failed' | 'audio_focus_delayed' | 'playback_start_timeout'
   | 'native_failed' | 'release_failed' | 'restore_failed' | 'storage_failed' | 'playback_failed';
@@ -31,7 +40,8 @@ export const TTS_LIMITS = Object.freeze({
 });
 
 export interface TtsObservation {
-  operation: 'vocoder_init' | 'completion' | 'completion_stop' | 'decode' | 'vocoder_release';
+  operation: 'vocoder_init' | 'speaker_create' | 'speaker_bake' | 'speaker_release'
+    | 'phonemizer' | 'formatter' | 'completion' | 'completion_stop' | 'decode' | 'vocoder_release';
   phase: 'started' | 'settled';
   flow?: TtsFlow;
   elementCount?: number;
@@ -41,4 +51,7 @@ export interface TtsObservation {
   tokensEvaluated?: number;
   interrupted?: boolean;
   stoppedEos?: boolean;
+  speakerRows?: number;
+  speakerBaked?: boolean;
+  elapsedMs?: number;
 }

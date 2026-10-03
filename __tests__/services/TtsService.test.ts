@@ -19,6 +19,8 @@ import { useDownloadStore } from '../../src/store/downloadStore';
 import { bindManagedCompanion } from '../../src/utils/modelArtifacts';
 import { TtsCleanupError, TtsError } from '../../src/types/tts';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type EngineState, type ModelMetadata } from '../../src/types/models';
+import * as audioPreparation from '../../src/services/AudioPreparationService';
+import { referenceVoiceStore, type ReferenceVoiceLease } from '../../src/services/ReferenceVoiceStore';
 
 jest.mock('../../src/services/LLMEngineService', () => ({ llmEngineService: {
   getState: jest.fn(), hasAuxiliaryContextOperation: jest.fn(() => false),
@@ -83,6 +85,7 @@ const engine = jest.mocked(llmEngineService);
 const synthesize = jest.mocked(synthesizeTtsOnContext);
 const tokensProfile = TTS_EXECUTION_PROFILES.find(profile => profile.flow === 'tokens')!;
 const continuousProfile = TTS_EXECUTION_PROFILES.find(profile => profile.flow === 'continuous_embd')!;
+const qwenProfile = TTS_EXECUTION_PROFILES.find(profile => profile.family === 'qwen3_tts')!;
 const chatId = 'chat/a';
 let service: TtsService;
 let playback: jest.Mocked<TtsPlaybackController>;
@@ -224,6 +227,110 @@ afterEach(async () => {
   await cleanup.catch(() => undefined);
 });
 
+function chooseReference() {
+  registry.saveModels([chatModel(), ttsModel(qwenProfile)]);
+  choose(qwenProfile);
+  jest.mocked(FileSystem.getInfoAsync).mockImplementation(async uri => ({ exists: true, isDirectory: false,
+    uri: String(uri), size: qwenProfile.codec.bytes, modificationTime: 1 }));
+  jest.mocked(RNFS.hash).mockResolvedValue(qwenProfile.codec.sha256);
+  const prepared = { uri: 'file:///test-cache/audio-preparation/reference.wav', sourceSha256: 'c'.repeat(64),
+    identity: 'bounded reference', sampleRate: 24000, channels: 1 as const, sampleCount: 4800, durationMs: 200, sizeBytes: 9644 };
+  const prepare = jest.spyOn(audioPreparation, 'prepareManagedAudio').mockResolvedValue(prepared);
+  const read = jest.spyOn(audioPreparation, 'readPreparedReferencePcm').mockResolvedValue(Array(4800).fill(0.25));
+  const discard = jest.spyOn(audioPreparation, 'discardPreparedAudio').mockResolvedValue(undefined);
+  const voice = { kind: 'reference' as const, bake: 'lazy' as const, source: { kind: 'temporary' as const,
+    sourceUri: 'file:///reference-source.wav', sourceSha256: 'c'.repeat(64), durationMs: 200, consent: true as const } };
+  return { voice, prepare, prepared, read, discard };
+}
+
+it('prepares and checks the immutable reference at profile rate before createSpeaker and drops derivative/PCM', async () => {
+  const { voice, prepare, read, discard } = chooseReference();
+  await service.start({ text: 'Hello.', language: 'en', voice, playAfterSynthesis: false });
+  expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ sourceUri: voice.source.sourceUri,
+    sampleRate: 24000, purpose: 'reference', assertCurrent: expect.any(Function) }));
+  expect(discard.mock.invocationCallOrder[0]).toBeLessThan(synthesize.mock.invocationCallOrder[0]);
+  expect(synthesize).toHaveBeenCalledWith(context, qwenProfile, expect.objectContaining({ voice,
+    referenceAudio: { sampleRate: 24000, samples: [] } })); // Same private array emptied after actual context drain.
+  expect((await read.mock.results[0].value).length).toBe(0);
+  expect(service.getExecutionIdentity()).toContain('lazy');
+  expect(engine.getState().activeModelId).toBe(chatId);
+});
+
+it('rejects missing permission and mutated original hash before allocating a speaker or native TTS context', async () => {
+  const { voice, prepare, prepared, read, discard } = chooseReference();
+  await expect(service.start({ text: 'Hello.', language: 'en', voice: { ...voice,
+    source: { ...voice.source, consent: false } as unknown as typeof voice.source } })).rejects.toMatchObject({ code: 'consent_required' });
+  expect(prepare).not.toHaveBeenCalled();
+  prepare.mockResolvedValue({ ...prepared, sourceSha256: 'd'.repeat(64) });
+  await expect(service.start({ text: 'Hello.', language: 'en', voice })).rejects.toMatchObject({ code: 'reference_invalid' });
+  expect(read).not.toHaveBeenCalled(); expect(discard).toHaveBeenCalledTimes(1);
+  expect(initContext).not.toHaveBeenCalled(); expect(synthesize).not.toHaveBeenCalled();
+});
+
+it('waits for late native preparation and deletes its derivative before stop resolves', async () => {
+  const { voice, prepare, prepared, discard } = chooseReference();
+  const gate = deferred<typeof prepared>(); prepare.mockReturnValue(gate.promise);
+  const work = service.start({ text: 'Hello.', language: 'en', voice });
+  const rejected = expect(work).rejects.toMatchObject({ code: 'cancelled' });
+  await until(() => prepare.mock.calls.length > 0);
+  let stopped = false; const stop = service.stop().then(() => { stopped = true; });
+  await Promise.resolve(); expect(stopped).toBe(false); expect(discard).not.toHaveBeenCalled();
+  gate.resolve(prepared); await rejected; await stop;
+  expect(discard).toHaveBeenCalledWith(prepared); expect(synthesize).not.toHaveBeenCalled();
+});
+
+it('admits reference preparation before decrypting a saved source while A is loaded', async () => {
+  const { prepare } = chooseReference();
+  const voice = { id: 'saved-voice', name: 'Saved', sourceSha256: 'c'.repeat(64), durationMs: 200,
+    sourceBytes: 9644, sourceMimeType: 'audio/wav' as const, createdAt: 1, consentRecordedAt: 1 };
+  jest.spyOn(referenceVoiceStore, 'getState').mockReturnValue({ voices: [voice], selectedVoiceId: voice.id });
+  const lease: ReferenceVoiceLease = { voice, isCurrent: () => true,
+    materialize: jest.fn(async () => ({ uri: 'file:///saved-materialized.wav', release: jest.fn(async () => undefined) })),
+    release: jest.fn(async () => undefined) };
+  jest.spyOn(referenceVoiceStore, 'acquire').mockReturnValue(lease);
+  jest.mocked(getSystemMemorySnapshot).mockResolvedValue({ availableBytes: 1024, freeBytes: 1024,
+    thresholdBytes: 0, lowMemory: false } as never);
+  await expect(service.start({ text: 'Hello.', language: 'en', voice: { kind: 'reference',
+    source: { kind: 'saved', voiceId: voice.id, sourceSha256: voice.sourceSha256 } } }))
+    .rejects.toMatchObject({ code: 'memory_insufficient' });
+  expect(lease.materialize).not.toHaveBeenCalled();
+  expect(lease.release).toHaveBeenCalledTimes(1);
+  expect(prepare).not.toHaveBeenCalled(); expect(initContext).not.toHaveBeenCalled();
+  expect(engine.getState().activeModelId).toBe(chatId);
+});
+
+it.each(['deletion', 'reselection'] as const)('releases a saved source lease after native drain on %s and restores unchanged A', async change => {
+  const { prepare, discard } = chooseReference();
+  updateSettings({ modelLoadParamsByModelId: { [chatId]: { ...getSettings().modelLoadParamsByModelId?.[chatId],
+    loraAdapters: [{ artifactId: 'chat-adapter', artifactIdentity: 'adapter-bytes', baseModelIdentity: 'chat-bytes', scale: 0.5, sizeBytes: 1024 }] } } });
+  const unchangedChatProfile = getSettings().modelLoadParamsByModelId?.[chatId];
+  const voice = { id: 'saved-voice', name: 'Saved', sourceSha256: 'c'.repeat(64), durationMs: 200,
+    sourceBytes: 9644, sourceMimeType: 'audio/wav' as const, createdAt: 1, consentRecordedAt: 1 };
+  let voiceState = { voices: [voice], selectedVoiceId: voice.id as string | null };
+  let changed: () => void = () => undefined;
+  jest.spyOn(referenceVoiceStore, 'getState').mockImplementation(() => voiceState);
+  jest.spyOn(referenceVoiceStore, 'subscribe').mockImplementation(listener => { changed = listener; return () => undefined; });
+  const lease: ReferenceVoiceLease = { voice, isCurrent: () => voiceState.voices.length > 0,
+    materialize: jest.fn(async () => ({ uri: 'file:///saved-materialized.wav', release: jest.fn(async () => undefined) })),
+    release: jest.fn(async () => { events.push('reference-source-released'); }) };
+  jest.spyOn(referenceVoiceStore, 'acquire').mockReturnValue(lease);
+  const gate = deferred<TtsPcmResult>(); synthesize.mockReturnValue(gate.promise);
+  const work = service.start({ text: 'Hello.', language: 'en', voice: { kind: 'reference', bake: 'eager',
+    source: { kind: 'saved', voiceId: voice.id, sourceSha256: voice.sourceSha256 } } });
+  const rejected = expect(work).rejects.toMatchObject({ code: 'selection_changed' });
+  await until(() => synthesize.mock.calls.length > 0);
+  voiceState = change === 'deletion' ? { voices: [], selectedVoiceId: null }
+    : { voices: [voice], selectedVoiceId: 'replacement-voice' };
+  changed();
+  expect(lease.release).not.toHaveBeenCalled();
+  gate.resolve(pcm(qwenProfile)); await rejected;
+  expect(prepare).toHaveBeenCalled(); expect(discard).toHaveBeenCalled();
+  expect(events.indexOf('context-released')).toBeLessThan(events.indexOf('reference-source-released'));
+  expect(playback.setClip).not.toHaveBeenCalled(); expect(restoreA).toHaveBeenCalledTimes(1);
+  expect(engine.getState().activeModelId).toBe(chatId);
+  expect(getSettings().modelLoadParamsByModelId?.[chatId]).toEqual(unchangedChatProfile);
+});
+
 it('requires an explicit selection and never falls back to the active chat model', async () => {
   expect(getTtsSelectionStatus()).toEqual({ errorCode: 'selection_missing' });
   await expect(service.start({ text: 'Hello.', language: 'en' })).rejects.toMatchObject({ code: 'selection_missing' });
@@ -288,7 +395,7 @@ it('rejects a selection changed while the file digest is still pending', async (
   expect(resolveTtsBinding().profile.id).toBe(continuousProfile.id);
 });
 
-it.each(TTS_EXECUTION_PROFILES)('uses a fresh isolated native profile for $flow without writing history or running chat tools', async profile => {
+it.each(TTS_EXECUTION_PROFILES.filter(profile => !profile.voiceModes))('uses a fresh isolated native profile for $flow without writing history or running chat tools', async profile => {
   const source = createAssistantSource();
   choose(profile);
   const settings = getSettings();

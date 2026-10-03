@@ -6,9 +6,37 @@ const path = require('node:path');
 const VERSION = '0.13.0-rc.3';
 const SOURCE = 'cpp/jsi/RNLlamaJSI.cpp';
 const BEFORE_SHA256 = '2534ba08430259ba417e21483ebcea3cd0e01508cb40689ae7aed284212ea8c1';
-const AFTER_SHA256 = '4f4c6254c3cefecabe19110efd18dd6d70078083a88b29adf1e73ab083a667a1';
+const SPEAKER_RECEIPT_PREVIOUS_SHA256 = '4f4c6254c3cefecabe19110efd18dd6d70078083a88b29adf1e73ab083a667a1';
+const AFTER_SHA256 = '37086c38c42f9f91e2947bd486d845da421d7b848318d9287f52950373065017';
 const BEFORE = '                ctx->completion->rewind();\n';
 const AFTER = `${BEFORE}                ctx->completion->generated_token_probs.clear();\n`;
+const SPEAKER_RECEIPT_REPLACEMENTS = [[
+  `                        auto audio_result = ctx->tts_wrapper->getFormattedAudioCompletion(ctx, speakerJsonStr, textToSpeak, speakerId);
+                        return [audio_result](jsi::Runtime& rt) {`,
+  `                        auto audio_result = ctx->tts_wrapper->getFormattedAudioCompletion(ctx, speakerJsonStr, textToSpeak, speakerId);
+                        // The formatter may lazily bake a registry speaker. Report the actual
+                        // native receipt and reject failed encoding before completion can use
+                        // a null x-vector and silently synthesize without conditioning.
+                        const rnllama::rn_speaker * formatted_speaker = speakerId >= 0
+                            ? ctx->tts_wrapper->getSpeaker(speakerId) : nullptr;
+                        if (speakerId >= 0 && (formatted_speaker == nullptr || !formatted_speaker->baked
+                            || formatted_speaker->rows <= 0)) {
+                            throw std::runtime_error("Reference speaker encoding failed");
+                        }
+                        const int speaker_rows = formatted_speaker ? formatted_speaker->rows : 0;
+                        const bool speaker_baked = formatted_speaker && formatted_speaker->baked;
+                        return [audio_result, speakerId, speaker_rows, speaker_baked](jsi::Runtime& rt) {`,
+], [
+  `                            res.setProperty(rt, "flow", jsi::String::createFromUtf8(rt, audio_result.flow));
+                            return res;`,
+  `                            res.setProperty(rt, "flow", jsi::String::createFromUtf8(rt, audio_result.flow));
+                            if (speakerId >= 0) {
+                                res.setProperty(rt, "speakerId", jsi::Value((double) speakerId));
+                                res.setProperty(rt, "speakerRows", jsi::Value((double) speaker_rows));
+                                res.setProperty(rt, "speakerBaked", speaker_baked);
+                            }
+                            return res;`,
+]];
 const PARAMS_SOURCE = 'cpp/jsi/JSIParams.cpp';
 const PARAMS_BEFORE_SHA256 = '07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475';
 const PARAMS_AFTER_SHA256 = '6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5';
@@ -285,7 +313,12 @@ const SAMPLING_PRIVACY_REPLACEMENTS = [
 const TTS_SOURCE = 'cpp/rn-tts.cpp';
 const TTS_BEFORE_SHA256 = '2e02fd6d1acaeac7a7f321baeb6ea99dac4503ba78b70439ee2c9de8effe488c';
 const TTS_PRIVACY_SHA256 = '30c41e9ee214171f20ab11191317954c7f13d3bc3c8508d4f14901d27f05abe0';
-const TTS_AFTER_SHA256 = 'ac3acbe44c5a84b60144f79105cbd6902af0e3548a5f3ac53c4a9e1ce2546ad3';
+const TTS_SPEAKER_PREVIOUS_SHA256 = 'ac3acbe44c5a84b60144f79105cbd6902af0e3548a5f3ac53c4a9e1ce2546ad3';
+const TTS_AFTER_SHA256 = 'dc55dac2ee2da8d49f4a04c2a82f647b4d0ee9e37e3da271dbf9d90ae8129fdb';
+const TTS_SPEAKER_REPLACEMENTS = [[
+  'llama_rn_context_tts::~llama_rn_context_tts() {\n',
+  'llama_rn_context_tts::~llama_rn_context_tts() {\n    // Speaker registry owns conditioning buffers; destroy them while codecs are live.\n    speakers.clear();\n    pending_speaker_id = -1;\n',
+]];
 const TTS_PRIVACY_REPLACEMENTS = [[
   "          LOG_WARNING(\"audio_lm_init failed (non-fatal): %s\",\n                      alm_err.empty() ? \"(no error)\" : alm_err.c_str());",
   "          LOG_WARNING(\"audio_lm_init failed (non-fatal)\");"
@@ -430,7 +463,9 @@ static int codec_decode_n_q_for_profile(const tts_model_profile &profile, ::code
   ],
 ];
 const SOURCE_PATCHES = [
-  { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256, replacements: [[BEFORE, AFTER]] },
+  { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256,
+    replacements: [[BEFORE, AFTER], ...SPEAKER_RECEIPT_REPLACEMENTS],
+    intermediates: [{ sha256: SPEAKER_RECEIPT_PREVIOUS_SHA256, replacements: SPEAKER_RECEIPT_REPLACEMENTS }] },
   { source: PARAMS_SOURCE, beforeSha256: PARAMS_BEFORE_SHA256, afterSha256: PARAMS_AFTER_SHA256, replacements: PARAMS_REPLACEMENTS },
   { source: CLOCK_SOURCE, beforeSha256: CLOCK_BEFORE_SHA256, afterSha256: CLOCK_AFTER_SHA256, replacements: [[CLOCK_BEFORE, CLOCK_AFTER], ...CLOCK_PRIVACY_REPLACEMENTS], intermediates: [{ sha256: CLOCK_PREVIOUS_SHA256, replacements: CLOCK_PRIVACY_REPLACEMENTS }] },
   { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, intermediates: [{ sha256: '014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc', replacements: CHATTERBOX_PRIVACY_REPLACEMENTS }, { sha256: 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d', replacements: COMPLETION_PRIVACY_REPLACEMENTS }, { sha256: 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058', replacements: [...PROMPT_TOKEN_PRIVACY_REPLACEMENTS, ...CHATTERBOX_PRIVACY_REPLACEMENTS] }], replacements: [...COMPLETION_REPLACEMENTS, ...COMPLETION_PRIVACY_REPLACEMENTS] },
@@ -459,10 +494,11 @@ const SOURCE_PATCHES = [
   {"source": "cpp/rn-slot-manager.h", "beforeSha256": "76b457c59ae574134094e203c38d411f1dc7243b6616c4fd13d32d3c80b88dce", "afterSha256": "882150b9bb69c8b4cb4da71b1433b42adf161caa256e6c7c4dc058731ead2c3e", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
   {"source": "cpp/rn-slot.h", "beforeSha256": "6c44d5d937212addb9e31ec629953937e77be26ba0427047190992e2bf2794d2", "afterSha256": "cd89f60afb06a0c819fac99f8f8a036c83826484e2a03276d7b151848151c7a0", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
   { source: TTS_SOURCE, beforeSha256: TTS_BEFORE_SHA256, afterSha256: TTS_AFTER_SHA256,
-    replacements: [["#include \"common.h\"", "#include \"common/common.h\""], ...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS],
+    replacements: [["#include \"common.h\"", "#include \"common/common.h\""], ...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS],
     intermediates: [
-      { sha256: '147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f', replacements: [...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS] },
-      { sha256: TTS_PRIVACY_SHA256, replacements: TTS_BOUNDS_REPLACEMENTS },
+      { sha256: '147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f', replacements: [...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS] },
+      { sha256: TTS_PRIVACY_SHA256, replacements: [...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS] },
+      { sha256: TTS_SPEAKER_PREVIOUS_SHA256, replacements: TTS_SPEAKER_REPLACEMENTS },
     ] },
   {"source": "cpp/ggml-cpu/arch/arm/quants.c", "beforeSha256": "edb15b62111d41fa68e8f4c069eb50a8ce1c2de8a9525a3cd02b1cd5aca7391b", "afterSha256": "bce5e39eaffbde886d74f822115b1f925ab5b40c6877aee8a3a3b90269fc2be6", "replacements": [["#define LM_GGML_COMMON_IMPL_C", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM) || defined(_M_ARM64))\n#define LM_GGML_COMMON_IMPL_C"], [");\n    }\n\n    *s = sumf;\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n\n", ");\n    }\n\n    *s = sumf;\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n\n\n#endif // compile-target CPU architecture\n"]]},
   {"source": "cpp/ggml-cpu/arch/arm/repack.cpp", "beforeSha256": "f36e53ebde15b39147eb77d444ebf5c494af7aefed096444256fdf2836722e98", "afterSha256": "c12d2f0ab327a04341868205b5b7d83ee08c55d6b38aa61bdb768e128004e6bf", "replacements": [["#define LM_GGML_COMMON_IMPL_CPP", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM) || defined(_M_ARM64))\n#define LM_GGML_COMMON_IMPL_CPP"], ["endif  // defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_MATMUL_INT8)\n    lm_ggml_gemm_q8_0_4x8_q8_0_generic(n, s, bs, vx, vy, nr, nc);\n}\n", "endif  // defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_MATMUL_INT8)\n    lm_ggml_gemm_q8_0_4x8_q8_0_generic(n, s, bs, vx, vy, nr, nc);\n}\n\n#endif // compile-target CPU architecture\n"]]},

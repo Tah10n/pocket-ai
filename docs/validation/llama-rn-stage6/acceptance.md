@@ -1,5 +1,7 @@
 # Stage 6 local speech acceptance
 
+This report retains the 2026-10-02 source/APK identities below. The later initial-Play fix and its new binary are documented separately in [Playback admission acceptance](playback-admission.md).
+
 On the fresh source/APK below, **both token and continuous synthesis, decode, playback, lifecycle and new independent ASR content passed**. Implementation-source CI, including the iOS simulator build, passed. Five independent native baselines on that unchanged APK passed; raw failed attempts retain their status. Fresh four-device-file hashes and ordinary no-A synthesis/background clear passed. The separate no-A clip has no content acceptance.
 
 See [usage](../../local-tts.md), [fixtures](tts-fixtures.json) and [sources](model-sources.md). File/admission, native, playback and content results are separate.

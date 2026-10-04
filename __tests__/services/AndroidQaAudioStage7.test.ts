@@ -9,6 +9,7 @@ import { LifecycleStatus, type ModelMetadata } from '../../src/types/models';
 import { AudioPreparationError } from '../../src/services/AudioPreparationService';
 import { sanitizeAudioStage7Evidence } from '../../scripts/lib/audio-stage7-evidence';
 import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
+import { TtsCleanupError, TtsError } from '../../src/types/tts';
 
 const mockStartRecording = jest.fn(); const mockStopRecording = jest.fn(); const mockClearRecording = jest.fn();
 const mockPrep = jest.fn(); const mockDiscard = jest.fn(); const mockPreviewPlay = jest.fn(); const mockPreviewStop = jest.fn();
@@ -222,6 +223,35 @@ it('refuses fixture/native activity outside the flagged isolated package', async
   mockCache = 'file:///data/user/0/app/cache/'; expect(isAndroidQaAudioStage7Enabled()).toBe(false);
   await runAndroidQaStage7Recording(); expect(mockStartRecording).not.toHaveBeenCalled();
 });
+it.each(['module_init', 'conversion', 'deadline', 'invalid_output'] as const)(
+  'publishes the finite phonemizer %s diagnostic through actual voices failure and host sanitization', async reason => {
+    const failure = new TtsError('phonemizer_failed', { reason, elapsedMs: 1001, moduleInitMs: 30 });
+    Object.assign(failure, { message: 'private input', uri: 'file:///private', phones: 'private IPA', native: 'private payload' });
+    mockTtsStart.mockRejectedValueOnce(new TtsCleanupError(failure));
+    await runAndroidQaStage7Voices();
+    const evidence = getAndroidQaAudioStage7Evidence();
+    expect(evidence).toMatchObject({ status: 'failed', failureCode: 'phonemizer_failed', steps: [],
+      phonemizerFailure: { reason, elapsedMs: 1001, moduleInitMs: 30 } });
+    const safe = sanitizeAudioStage7Evidence(evidence);
+    expect(safe).toMatchObject({ phonemizerFailure: evidence.phonemizerFailure });
+    expect(JSON.stringify(evidence)).not.toMatch(/private|IPA|payload|file:\/\/|"message"|"phones"/u);
+    expect(JSON.stringify(safe)).not.toMatch(/private|IPA|payload|file:\/\//u);
+    expect(mockTtsClear).toHaveBeenCalledTimes(1); expect(mockSave).not.toHaveBeenCalled();
+  },
+);
+it.each(['unknown', 'negative', 'inconsistent', 'other-code'])(
+  'rejects malformed phonemizer diagnostics in the actual QA consumer (%s)', async kind => {
+    const failure = new TtsError(kind === 'other-code' ? 'cancelled' : 'phonemizer_failed');
+    Object.assign(failure, { phonemizerFailure: { reason: kind === 'unknown' ? 'private' : 'deadline',
+      elapsedMs: kind === 'negative' ? -1 : 1, moduleInitMs: kind === 'inconsistent' ? 2 : 0, phones: 'private' } });
+    mockTtsStart.mockRejectedValueOnce(failure);
+    await runAndroidQaStage7Voices();
+    const evidence = getAndroidQaAudioStage7Evidence();
+    expect(evidence.phonemizerFailure).toBeUndefined();
+    expect(sanitizeAudioStage7Evidence(evidence)).not.toHaveProperty('phonemizerFailure');
+    expect(JSON.stringify(evidence)).not.toContain('private');
+  },
+);
 it('awaits actual controlled capture, preparation and real background draft before passing', async () => {
   const work = runAndroidQaStage7Recording(); await until('recording_awaiting_controlled_sound');
   expect(mockStopRecording).not.toHaveBeenCalled(); continueAndroidQaAudioStage7();

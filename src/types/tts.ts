@@ -17,15 +17,44 @@ export type TtsErrorCode = 'selection_missing' | 'selection_changed' | 'files_mi
   | 'audio_focus_failed' | 'audio_focus_delayed' | 'playback_start_timeout'
   | 'native_failed' | 'release_failed' | 'restore_failed' | 'storage_failed' | 'playback_failed';
 
+export type PhonemizerFailureReason = 'module_init' | 'conversion' | 'deadline' | 'invalid_output';
+export interface PhonemizerFailure {
+  readonly reason: PhonemizerFailureReason;
+  readonly elapsedMs?: number;
+  readonly moduleInitMs?: number;
+}
+/** Diagnostic bound only; this never changes the phonemizer's execution deadline. */
+export const PHONEMIZER_DIAGNOSTIC_MAX_MS = 300_000;
+export function sanitizePhonemizerFailure(value: unknown): PhonemizerFailure | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const source = value as Record<string, unknown>;
+  if (!['module_init', 'conversion', 'deadline', 'invalid_output'].includes(source.reason as string)) return undefined;
+  for (const key of ['elapsedMs', 'moduleInitMs']) {
+    if (source[key] !== undefined && (!Number.isSafeInteger(source[key])
+      || (source[key] as number) < 0 || (source[key] as number) > PHONEMIZER_DIAGNOSTIC_MAX_MS)) return undefined;
+  }
+  if (typeof source.elapsedMs === 'number' && typeof source.moduleInitMs === 'number'
+    && source.moduleInitMs > source.elapsedMs) return undefined;
+  return Object.freeze({ reason: source.reason as PhonemizerFailureReason,
+    ...(source.elapsedMs === undefined ? {} : { elapsedMs: source.elapsedMs as number }),
+    ...(source.moduleInitMs === undefined ? {} : { moduleInitMs: source.moduleInitMs as number }) });
+}
+
 /** Never exposes native error messages, input, audio payloads or private paths. */
 export class TtsError extends Error {
-  constructor(readonly code: TtsErrorCode) { super(code); this.name = 'TtsError'; }
+  readonly phonemizerFailure?: PhonemizerFailure;
+  constructor(readonly code: TtsErrorCode, phonemizerFailure?: PhonemizerFailure) {
+    super(code); this.name = 'TtsError';
+    if (code === 'phonemizer_failed') this.phonemizerFailure = sanitizePhonemizerFailure(phonemizerFailure);
+  }
 }
 
 /** Preserves a sanitized primary failure alongside a distinct codec cleanup failure. */
 export class TtsCleanupError extends TtsError {
   readonly cleanupError = new TtsError('release_failed');
-  constructor(readonly operationError: TtsError) { super(operationError.code); this.name = 'TtsCleanupError'; }
+  constructor(readonly operationError: TtsError) {
+    super(operationError.code, operationError.phonemizerFailure); this.name = 'TtsCleanupError';
+  }
 }
 
 export const TTS_LIMITS = Object.freeze({

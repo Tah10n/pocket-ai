@@ -597,6 +597,47 @@ it('preserves a sanitized primary runtime code when codec cleanup also failed', 
   expect(playback.setClip).not.toHaveBeenCalled();
 });
 
+it.each([false, true])('preserves phonemizer diagnostics through actual service catch (codec cleanup wrapper=%s)', async wrapped => {
+  choose();
+  const primary = new TtsError('phonemizer_failed', { reason: 'module_init', elapsedMs: 123, moduleInitMs: 123 });
+  const failure = wrapped ? new TtsCleanupError(primary) : primary;
+  Object.assign(failure, { native: 'private payload', cause: 'private cause', message: 'private message',
+    phonemizerFailure: { ...primary.phonemizerFailure, phones: 'private IPA' } });
+  synthesize.mockRejectedValueOnce(failure);
+  const error = await service.start({ text: 'Hello.', language: 'en' }).catch(value => value);
+  expect(error).toBeInstanceOf(TtsError); expect(error).not.toBeInstanceOf(TtsCleanupError);
+  expect(error).not.toBe(failure);
+  expect(error).toMatchObject({ name: 'TtsError', code: 'phonemizer_failed', message: 'phonemizer_failed',
+    phonemizerFailure: { reason: 'module_init', elapsedMs: 123, moduleInitMs: 123 } });
+  for (const field of ['native', 'cause', 'operationError', 'cleanupError']) expect(error).not.toHaveProperty(field);
+  expect(JSON.stringify(error)).not.toContain('private');
+  expect(service.getState()).toMatchObject({ phase: 'error', errorCode: 'phonemizer_failed' });
+  expect(restoreA).toHaveBeenCalledTimes(1); expect(playback.setClip).not.toHaveBeenCalled();
+});
+it('reconstructs the generic cancellation error at the service boundary', async () => {
+  choose(); const cancelled = Object.freeze(new TtsError('cancelled'));
+  synthesize.mockRejectedValueOnce(cancelled);
+  const error = await service.start({ text: 'Hello.', language: 'en' }).catch(value => value);
+  expect(error).toBeInstanceOf(TtsError); expect(error).not.toBe(cancelled);
+  expect(error).toMatchObject({ code: 'cancelled', message: 'cancelled' });
+  expect(service.getState()).toMatchObject({ phase: 'stopped', errorCode: 'cancelled' });
+});
+it.each(['storage', 'recovery', 'restore'] as const)('keeps %s failure above phonemizer diagnostics', async override => {
+  choose(); const primary = new TtsError('phonemizer_failed', { reason: 'deadline', elapsedMs: 1001, moduleInitMs: 8 });
+  if (override === 'storage') {
+    synthesize.mockRejectedValueOnce(primary);
+    playback.clear.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('private cleanup'));
+  } else if (override === 'recovery') {
+    engine.runWithAuxiliarySequence.mockRejectedValueOnce(Object.assign(new Error('private context'),
+      { code: 'engine_recovery_required', operationError: primary }));
+  } else engine.runWithAuxiliarySequence.mockImplementationOnce(async () => {
+    state = { ...state, auxiliaryRestoreError: 'private restore' }; throw primary;
+  });
+  const error = await service.start({ text: 'Hello.', language: 'en' }).catch(value => value);
+  expect(error).toMatchObject({ code: override === 'storage' ? 'storage_failed' : override === 'recovery' ? 'release_failed' : 'restore_failed' });
+  expect(error.phonemizerFailure).toBeUndefined(); expect(JSON.stringify(error)).not.toContain('private');
+});
+
 it('classifies frozen primary plus unconfirmed native release as recovery required without leaking either error', async () => {
   choose();
   const primary = Object.freeze(new Error('Private input and file:///private/model.gguf'));

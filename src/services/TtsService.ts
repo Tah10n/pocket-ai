@@ -435,7 +435,7 @@ export class TtsService {
       this.publish({ ...this.state, clipAvailable: false,
         ...(!playbackCleanupFailed ? { sampleCount: undefined, sampleRate: undefined, position: 0, duration: 0 } : {}),
         phase: code === 'cancelled' || code === 'selection_changed' ? 'stopped' : 'error', errorCode: code });
-      throw new TtsError(code);
+      throw new TtsError(code, error instanceof TtsError ? error.phonemizerFailure : undefined);
     } finally {
       if (referenceSamples) referenceSamples.length = 0;
       let cleanupFailed = false;

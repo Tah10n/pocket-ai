@@ -1,3 +1,4 @@
+const { it, expect, jest } = require('@jest/globals');
 const { sanitizeAudioStage7Evidence, validateAudioStage7Evidence, validateStage7MicInjectionReceipt } = require('../../scripts/lib/audio-stage7-evidence');
 const { buildScenarios, configureScenarioBuildEnvironment, validateScenarioExecutionOptions,
   grantStage7MicrophoneAfterExplicitRecord, parseUiSnapshot } = require('../../scripts/android-scenarios');
@@ -12,6 +13,25 @@ it('drops every source/transcript/phoneme/native-handle field from receipts', ()
   expect(safe).toMatchObject({ referenceConditioning: 'not_run', contentVerification: 'not_run',
     steps: [{ operations: ['speaker_create'], speakerRows: 1 }] });
   expect(JSON.stringify(safe)).not.toMatch(/private|speakerId|sourceUri|refText|phones|pcm/u);
+});
+it('retains only failed phonemizer diagnostics with finite reasons and bounded integer timings', () => {
+  const failure = { ...initial('voices'), status: 'failed', failureCode: 'phonemizer_failed',
+    phonemizerFailure: { reason: 'deadline', elapsedMs: 1001, moduleInitMs: 30, input: 'private', phones: 'private' } };
+  expect(sanitizeAudioStage7Evidence(failure).phonemizerFailure).toEqual({ reason: 'deadline', elapsedMs: 1001, moduleInitMs: 30 });
+  for (const reason of ['module_init', 'conversion', 'invalid_output']) {
+    expect(sanitizeAudioStage7Evidence({ ...failure, phonemizerFailure: { reason } }).phonemizerFailure).toEqual({ reason });
+  }
+  expect(JSON.stringify(sanitizeAudioStage7Evidence(failure))).not.toContain('private');
+  for (const value of [-1, 1.5, NaN, Infinity, 300001, '20', null]) {
+    for (const key of ['elapsedMs', 'moduleInitMs']) {
+      expect(sanitizeAudioStage7Evidence({ ...failure, phonemizerFailure: { reason: 'deadline', [key]: value } }).phonemizerFailure).toBeUndefined();
+    }
+  }
+  for (const phonemizerFailure of [{ reason: 'private' }, { reason: 'deadline', elapsedMs: 1, moduleInitMs: 2 }]) {
+    expect(sanitizeAudioStage7Evidence({ ...failure, phonemizerFailure }).phonemizerFailure).toBeUndefined();
+  }
+  expect(sanitizeAudioStage7Evidence({ ...failure, status: 'native_passed' }).phonemizerFailure).toBeUndefined();
+  expect(sanitizeAudioStage7Evidence({ ...failure, failureCode: 'storage_failed' }).phonemizerFailure).toBeUndefined();
 });
 it('refuses successful status without actual recorder lifecycle and finalized header receipts', () => {
   expect(() => validateAudioStage7Evidence(initial('recording'), 'recording')).toThrow();

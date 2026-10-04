@@ -44,6 +44,16 @@ function sanitizeAudioStage7Evidence(value) {
     backend: source.backend === 'cpu' ? 'cpu' : 'unknown', contentVerification: 'not_run', referenceConditioning: 'not_run', steps: [] };
   if (CLIPS.includes(source.clipId)) result.clipId = source.clipId;
   if (FAILURES.includes(source.failureCode)) result.failureCode = source.failureCode;
+  if (result.status === 'failed' && result.failureCode === 'phonemizer_failed') {
+    const failure = source.phonemizerFailure;
+    if (failure && ['module_init', 'conversion', 'deadline', 'invalid_output'].includes(failure.reason)
+      && ['elapsedMs', 'moduleInitMs'].every(key => failure[key] === undefined
+        || (Number.isSafeInteger(failure[key]) && failure[key] >= 0 && failure[key] <= 300_000))
+      && !(failure.moduleInitMs !== undefined && failure.elapsedMs !== undefined && failure.moduleInitMs > failure.elapsedMs)) {
+      result.phonemizerFailure = { reason: failure.reason };
+      for (const key of ['elapsedMs', 'moduleInitMs']) if (failure[key] !== undefined) result.phonemizerFailure[key] = failure[key];
+    }
+  }
   if (Array.isArray(source.steps)) result.steps = source.steps.slice(0, 24).flatMap(step => {
     if (!step || !IDS.includes(step.id)) return [];
     const safe = { id: step.id, status: step.status === 'passed' ? 'passed' : 'invalid' };

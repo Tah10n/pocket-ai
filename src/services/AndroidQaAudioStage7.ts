@@ -7,7 +7,7 @@ import { useChatStore } from '../store/chatStore';
 import { useDownloadStore } from '../store/downloadStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../types/models';
 import { DEFAULT_PRESET_SNAPSHOT } from '../types/chat';
-import { TtsError, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
+import { TtsError, sanitizePhonemizerFailure, type PhonemizerFailure, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
 import { getCompanionBindingIdentity, getCompanionSourceIdentity } from '../utils/modelArtifacts';
 import { getModelFileIdentity } from '../utils/modelRoles';
 import { audioRecordingService } from './AudioRecordingService';
@@ -41,6 +41,7 @@ export interface AndroidQaAudioStage7Step {
 export interface AndroidQaAudioStage7Evidence {
   schemaVersion: 1; status: 'idle' | 'running' | 'native_passed' | 'failed'; phase: string;
   mode?: Mode; clipId?: string; failureCode?: string; requiresForceStop: boolean;
+  phonemizerFailure?: PhonemizerFailure;
   steps: AndroidQaAudioStage7Step[]; runtimeVersion: '0.13.0-rc.3'; backend: 'cpu';
   contentVerification: 'not_run'; referenceConditioning: 'not_run';
 }
@@ -136,6 +137,8 @@ function run(mode: Mode, action: () => Promise<void>): Promise<void> {
   evidence = initial(); publish({ mode, status: 'running', phase: 'prepare' });
   active = action().then(() => publish({ status: 'native_passed', phase: 'complete' }), error => {
     publish({ status: 'failed', phase: 'complete', failureCode: safeFailureCode(error),
+      ...(error instanceof TtsError && error.code === 'phonemizer_failed'
+        ? { phonemizerFailure: sanitizePhonemizerFailure(error.phonemizerFailure) } : {}),
       requiresForceStop: llmEngineService.hasAuxiliaryContextOperation()
         || llmEngineService.hasActiveCompletion() || llmEngineService.getState().diagnostics?.contextRecoveryStatus === 'failed' });
   }).finally(() => { active = null; });

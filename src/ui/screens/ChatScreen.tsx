@@ -45,6 +45,7 @@ import { TtsPreviewSheet, getTtsQaPlaybackMarker } from '@/components/ui/TtsPrev
 import { AudioRecordingSheet } from '@/components/ui/AudioRecordingSheet';
 import { AndroidQaAudioStage7Panel } from '@/components/ui/AndroidQaAudioStage7Panel';
 import { ttsService } from '@/services/TtsService';
+import { getAndroidQaAudioStage7Evidence, isAndroidQaAudioStage7Enabled, subscribeAndroidQaAudioStage7 } from '@/services/AndroidQaAudioStage7';
 import { getAndroidQaTtsEvidence, subscribeAndroidQaTts, runAndroidQaTts, runAndroidQaTtsPlayback, continueAndroidQaTts } from '@/services/AndroidQaTts';
 import { prepareSpeechText, type PreparedSpeechText } from '@/utils/ttsText';
 import type { TtsErrorCode, TtsFlow } from '@/types/tts';
@@ -1099,7 +1100,15 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     );
 }
 
+function subscribeAndroidQaSpeechOwnership(listener: () => void): () => void {
+    const releaseTts = subscribeAndroidQaTts(listener);
+    const releaseStage7 = subscribeAndroidQaAudioStage7(listener);
+    return () => { releaseTts(); releaseStage7(); };
+}
+
 function isAndroidQaTtsBlockingPublicSpeech(): boolean {
+    const stage7 = getAndroidQaAudioStage7Evidence();
+    if (isAndroidQaAudioStage7Enabled() && (stage7.status === 'running' || stage7.requiresForceStop)) return true;
     if (!isAndroidQaGenerationEvidenceEnabled()) return false;
     const evidence = getAndroidQaTtsEvidence();
     return evidence.status === 'running' || evidence.phase === 'awaiting_clip_copy' || evidence.requiresForceStop;
@@ -1146,7 +1155,7 @@ const ChatScreenContent = () => {
     const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
     const tabBarHeight = useBottomTabBarHeight();
     const isScreenFocused = useIsFocused();
-    const isTtsQaBusy = useSyncExternalStore(subscribeAndroidQaTts,
+    const isTtsQaBusy = useSyncExternalStore(subscribeAndroidQaSpeechOwnership,
         isAndroidQaTtsBlockingPublicSpeech, isAndroidQaTtsBlockingPublicSpeech);
     const [speechPreview, setSpeechPreview] = useState<{
         id: number; text: string; reason?: PreparedSpeechText['reason'];

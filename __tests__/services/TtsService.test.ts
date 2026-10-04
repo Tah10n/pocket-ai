@@ -17,7 +17,7 @@ import { TtsPlaybackController } from '../../src/services/TtsPlayback';
 import { useChatStore } from '../../src/store/chatStore';
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { bindManagedCompanion } from '../../src/utils/modelArtifacts';
-import { TtsCleanupError, TtsError } from '../../src/types/tts';
+import { TtsCleanupError, TtsError, type TtsObservation } from '../../src/types/tts';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type EngineState, type ModelMetadata } from '../../src/types/models';
 import * as audioPreparation from '../../src/services/AudioPreparationService';
 import { referenceVoiceStore, type ReferenceVoiceLease } from '../../src/services/ReferenceVoiceStore';
@@ -929,4 +929,56 @@ describe('service + real playback controller initial admission', () => {
     expect(service.getState()).toMatchObject({ phase: 'error', errorCode: 'playback_start_timeout', clipAvailable: true });
     expect(mockClipFiles.size).toBe(1);
   });
+});
+
+it('maps the real auxiliary failure hook to one backbone stage without exposing the native error', async () => {
+  choose();
+  engine.runWithAuxiliarySequence.mockImplementationOnce(async request => {
+    request.observeFailure?.('backbone_init');
+    request.observeFailure?.('restore');
+    throw new Error('synthetic private init detail');
+  });
+  const observe = jest.fn();
+  await expect(service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false, observe }))
+    .rejects.toMatchObject({ code: 'native_failed' });
+  expect(observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure'))
+    .toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: 'tts_backbone_init' }]);
+  expect(synthesize).not.toHaveBeenCalled();
+  expect(JSON.stringify(observe.mock.calls)).not.toContain('private');
+});
+
+it('keeps the runtime first failure when later restoration changes the existing terminal error code', async () => {
+  choose();
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    options.observe?.({ operation: 'first_failure', phase: 'failed', failureStage: 'formatter' });
+    throw new TtsError('native_failed');
+  });
+  engine.runWithAuxiliarySequence.mockImplementationOnce(async (request, operation) => {
+    try { return await normalSequence(request, operation); }
+    finally {
+      request.observeFailure?.('restore');
+      state = { ...state, auxiliaryRestoreError: 'synthetic fixed restore failure' };
+      throw new Error('synthetic restore detail');
+    }
+  });
+  const observe = jest.fn();
+  await expect(service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false, observe }))
+    .rejects.toMatchObject({ code: 'restore_failed' });
+  expect(observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure'))
+    .toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: 'formatter' }]);
+  expect(releaseContext).toHaveBeenCalledTimes(1);
+  expect(restoreA).toHaveBeenCalledTimes(1);
+});
+
+it('contains request observer exceptions while preserving normal synthesis and A restoration', async () => {
+  choose();
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    options.observe?.({ operation: 'formatter', phase: 'settled' });
+    return pcm();
+  });
+  const observe = jest.fn((_event: TtsObservation) => { throw new Error('ignored diagnostic observer'); });
+  await expect(service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false, observe })).resolves.toBeUndefined();
+  expect(observe).toHaveBeenCalled();
+  expect(releaseContext).toHaveBeenCalledTimes(1);
+  expect(restoreA).toHaveBeenCalledTimes(1);
 });

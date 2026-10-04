@@ -34,6 +34,10 @@ const FAILURES = ['qa_operation_failed', 'host_continuation_timeout', 'isolated_
   'consent_required', 'memory_unknown', 'memory_insufficient', 'busy', 'cancelled', 'input_too_large', 'generation_incomplete',
   'payload_invalid', 'decode_failed', 'audio_focus_failed', 'audio_focus_delayed', 'playback_start_timeout', 'native_failed',
   'release_failed', 'restore_failed', 'storage_failed', 'playback_failed'];
+const FAILURE_STAGES = ['adapter_prepare', 'base_lora_load', 'tts_fixture_prepare', 'tts_admission', 'tts_setup', 'tts_detach',
+  'tts_backbone_init', 'vocoder_init', 'getTTSCapabilities', 'builtin_voice_lookup', 'phonemizer', 'speaker_create',
+  'speaker_bake', 'formatter', 'prompt_prepare', 'completion', 'completion_stop', 'decode', 'speaker_release',
+  'vocoder_release', 'context_release', 'restore', 'qa_voice_sequence'];
 function sanitizeAudioStage7Evidence(value) {
   const source = value && typeof value === 'object' ? value : {};
   const result = { schemaVersion: source.schemaVersion === 1 ? 1 : null,
@@ -44,6 +48,8 @@ function sanitizeAudioStage7Evidence(value) {
     backend: source.backend === 'cpu' ? 'cpu' : 'unknown', contentVerification: 'not_run', referenceConditioning: 'not_run', steps: [] };
   if (CLIPS.includes(source.clipId)) result.clipId = source.clipId;
   if (FAILURES.includes(source.failureCode)) result.failureCode = source.failureCode;
+  if (result.status === 'failed' && result.mode === 'voices'
+    && FAILURE_STAGES.includes(source.failureStage)) result.failureStage = source.failureStage;
   if (result.status === 'failed' && result.failureCode === 'phonemizer_failed') {
     const failure = source.phonemizerFailure;
     if (failure && ['module_init', 'conversion', 'deadline', 'invalid_output'].includes(failure.reason)

@@ -10,7 +10,7 @@ import { validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { encodeMonoPcmWav, TtsWavError } from '../utils/ttsWav';
 import { prepareSpeechText, TtsTextError } from '../utils/ttsText';
-import { TTS_LIMITS, TtsError, type TtsErrorCode, type TtsPhase, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
+import { TTS_LIMITS, TtsError, isTtsFailureStage, type TtsFailureStage, type TtsErrorCode, type TtsPhase, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
 import { getAuxiliarySelection, validateAuxiliaryFile } from './AuxiliaryModelService';
 import { registry } from './LocalStorageRegistry';
 import { getSettings, subscribeSettings } from './SettingsStore';
@@ -227,6 +227,17 @@ export class TtsService {
     this.executionIdentity = null;
     this.playbackGeneration = null;
     let clipInstalled = false;
+    let failureStage: TtsFailureStage = 'tts_admission';
+    let failureObserved = false;
+    const observe = (event: TtsObservation) => {
+      if (event.operation === 'first_failure') {
+        if (failureObserved || event.phase !== 'failed' || !isTtsFailureStage(event.failureStage)) return;
+        failureObserved = true;
+      }
+      try { request.observe?.(event); } catch { /* Diagnostics cannot alter synthesis or cleanup. */ }
+    };
+    const observeFailure = (stage: TtsFailureStage) =>
+      observe({ operation: 'first_failure', phase: 'failed', failureStage: stage });
     let selectionInvalidated = false;
     let voiceInvalidated = false;
     let referenceLease: ReferenceVoiceLease | undefined;
@@ -349,6 +360,16 @@ export class TtsService {
           return await llmEngineService.runWithAuxiliarySequence({ signal: controller.signal,
             isCurrent: publicationCurrent,
             isSelectionCurrent: selectionCurrent,
+            observeFailure: stage => {
+              switch (stage) {
+                case 'detach': observeFailure('tts_detach'); break;
+                case 'before_init': observeFailure('tts_admission'); break;
+                case 'backbone_init': observeFailure('tts_backbone_init'); break;
+                case 'native_callback': observeFailure(failureStage); break;
+                case 'context_release': observeFailure('context_release'); break;
+                case 'restore': observeFailure('restore'); break;
+              }
+            },
           }, sequence => sequence.withContext({ modelId: binding.model.id, signal: controller.signal,
             isCurrent: publicationCurrent,
             nativeDrainTimeoutMs: 600_000,
@@ -365,6 +386,7 @@ export class TtsService {
               this.publish({ ...this.state, phase: 'loading' });
             },
           }, context => {
+            failureStage = 'tts_setup';
             this.executionIdentity = getTtsProfileIdentity(binding.profile,
               ['llama.rn/0.13.0-rc.3', getLlamaBuildInfo(), LLAMA_SOURCE_PATCH_SHA256,
                 binding.profile.phonemizerLanguage ? LOCAL_PHONEMIZER_IDENTITY : null,
@@ -374,7 +396,7 @@ export class TtsService {
               text: exactText, language: request.language, codecPath: binding.codecPath, signal: controller.signal,
               voice,
               ...(referenceSamples ? { referenceAudio: { samples: referenceSamples, sampleRate: binding.profile.reference!.sampleRate } } : {}),
-              assertCurrent: check, observe: request.observe,
+              assertCurrent: check, observe,
               onPhase: phase => this.publish({ ...this.state, phase: controller.signal.aborted ? 'stopping' : phase }),
             });
             callbackDrains.add(native);
@@ -391,6 +413,7 @@ export class TtsService {
         }
       });
       check(); // runWithAuxiliarySequence has confirmed codec/context cleanup and exact A restore.
+      failureStage = 'tts_setup';
       const wav = encodeMonoPcmWav(result.samples, result.sampleRate, {
         maxSamples: TTS_LIMITS.pcmSamples, maxDurationSeconds: TTS_LIMITS.durationSeconds, maxBytes: TTS_LIMITS.wavBytes,
       });
@@ -409,6 +432,7 @@ export class TtsService {
         // Controller events alone publish Playing; Play acceptance is insufficient.
       }
     } catch (error) {
+      observeFailure(failureStage);
       // Admission failure already disposed the player. Keep the validated WAV
       // and selection guard for explicit retry without another synthesis.
       if (clipInstalled && generation === this.generation && !controller.signal.aborted && !selectionInvalidated

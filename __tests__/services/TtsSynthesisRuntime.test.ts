@@ -1,7 +1,7 @@
 import type { LlamaContext, LlamaSpeaker, NativeCompletionResult, TTSCapabilities } from 'llama.rn';
 import { synthesizeTtsOnContext, validateTtsAudioPayload, validateTtsCompletion } from '../../src/services/TtsSynthesisRuntime';
 import { TTS_EXECUTION_PROFILES, type TtsExecutionProfile } from '../../src/services/TtsExecutionProfiles';
-import { TTS_LIMITS, TtsError, type TtsPhase } from '../../src/types/tts';
+import { TTS_LIMITS, TtsError, type TtsObservation, type TtsPhase } from '../../src/types/tts';
 import { requireLlamaModule } from '../../src/services/llamaRnModule';
 import type { LlamaCompletionResult } from '../../src/services/LlamaRuntimeAdapter';
 
@@ -472,4 +472,71 @@ it('sanitizes an unexpected native failure and reports release failure when synt
   await expect(synthesizeTtsOnContext(context, tokensProfile, options())).rejects.toMatchObject({ code: 'native_failed', message: 'native_failed' });
   native.releaseVocoder.mockRejectedValueOnce(new Error('private native cleanup detail'));
   await expect(synthesizeTtsOnContext(context, tokensProfile, options())).rejects.toMatchObject({ code: 'release_failed', message: 'release_failed' });
+});
+
+it.each([
+  ['initVocoder', 'vocoder_init'], ['getTTSCapabilities', 'getTTSCapabilities'],
+  ['getFormattedAudioCompletion', 'formatter'], ['tokenize', 'prompt_prepare'],
+  ['completion', 'completion'], ['decodeAudioTokens', 'decode'],
+] as const)('preserves first failure from %s before failed codec cleanup without treating settled as success', async (method, stage) => {
+  const { native, context } = nativeContext();
+  native[method].mockRejectedValueOnce(new Error('synthetic private native detail'));
+  native.releaseVocoder.mockRejectedValueOnce(new Error('synthetic cleanup detail'));
+  let releaseCallsAtFailure: number | undefined;
+  const observe = jest.fn((event: TtsObservation) => {
+    if (event.operation === 'first_failure') releaseCallsAtFailure = native.releaseVocoder.mock.calls.length;
+  });
+  await expect(synthesizeTtsOnContext(context, tokensProfile, { ...options(), observe }))
+    .rejects.toMatchObject({ code: 'native_failed', cleanupError: { code: 'release_failed' } });
+  const failures = observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure');
+  expect(failures).toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: stage }]);
+  expect(releaseCallsAtFailure).toBe(0);
+  expect(JSON.stringify(failures)).not.toContain('detail');
+  expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
+});
+
+it('keeps the nested phonemizer failure ahead of its formatter and release catches', async () => {
+  const { native, context } = nativeContext(neuProfile);
+  native.getTTSCapabilities.mockResolvedValue({ ...capabilities(neuProfile), requiresPhonemes: true });
+  jest.mocked(requireLlamaModule).mockReturnValue({
+    listTTSLanguages: jest.fn(() => ['en-us']), listTTSVoices: jest.fn(() => ['jo']),
+    getTTSVoice: jest.fn(() => ({ ref_codes: [1, 2], ref_phones: 'hɛloʊ' })),
+  } as unknown as ReturnType<typeof requireLlamaModule>);
+  native.getFormattedAudioCompletion.mockImplementation(async config => {
+    await config.phonemizer?.(config.prompt, 'de');
+    return { prompt: 'bounded formatter', embedding: false, flow: 'tokens' };
+  });
+  const observe = jest.fn();
+  await expect(synthesizeTtsOnContext(context, neuProfile, {
+    ...options(neuProfile), voice: { kind: 'builtin', voice: 'jo' }, observe,
+  })).rejects.toMatchObject({ code: 'language_unsupported' });
+  expect(observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure'))
+    .toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: 'phonemizer' }]);
+  expect(native.completion).not.toHaveBeenCalled();
+});
+
+it('reports a deferred formatter failure before release drains and does not replace it with a later cleanup failure', async () => {
+  const { native, context } = nativeContext();
+  const formatter = deferred<FormattedAudio>(); const release = deferred<undefined>();
+  native.getFormattedAudioCompletion.mockReturnValueOnce(formatter.promise);
+  native.releaseVocoder.mockReturnValueOnce(release.promise);
+  const observe = jest.fn();
+  const work = synthesizeTtsOnContext(context, tokensProfile, { ...options(), observe });
+  const rejected = expect(work).rejects.toMatchObject({ code: 'native_failed', cleanupError: { code: 'release_failed' } });
+  await until(() => native.getFormattedAudioCompletion.mock.calls.length === 1);
+  formatter.reject(new Error('synthetic formatter detail'));
+  await until(() => native.releaseVocoder.mock.calls.length === 1);
+  expect(observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure'))
+    .toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: 'formatter' }]);
+  release.reject(new Error('synthetic late cleanup detail'));
+  await rejected;
+  expect(observe.mock.calls.filter(([event]) => event.operation === 'first_failure')).toHaveLength(1);
+});
+
+it('allows a throwing diagnostic observer without changing successful synthesis or release', async () => {
+  const { native, context } = nativeContext();
+  await expect(synthesizeTtsOnContext(context, tokensProfile, {
+    ...options(), observe: () => { throw new Error('ignored observer'); },
+  })).resolves.toMatchObject({ samples: [0.25, -0.5, 0.75], sampleRate: tokensProfile.sampleRate });
+  expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
 });

@@ -5,6 +5,7 @@ import { checkAndroidQaStage7ColdVoice, continueAndroidQaAudioStage7, getAndroid
 import fixture from '../../docs/validation/llama-rn-stage7/audio-input-fixtures.json';
 import syntheticFixtures from '../../docs/validation/llama-rn-stage7/synthetic-inputs.json';
 import type { TtsRequest } from '../../src/services/TtsService';
+import { prepareAndroidQaStage3Adapter } from '../../src/services/AndroidQaStage3';
 import { LifecycleStatus, type ModelMetadata } from '../../src/types/models';
 import { AudioPreparationError } from '../../src/services/AudioPreparationService';
 import { sanitizeAudioStage7Evidence } from '../../scripts/lib/audio-stage7-evidence';
@@ -406,4 +407,52 @@ it('requires an actual formatter speaker receipt before a reference path can pas
   } }));
   const work = runAndroidQaStage7Voices(); await until('awaiting_clip_copy'); continueAndroidQaAudioStage7();
   await work; expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'reference_not_used' });
+});
+
+it.each(['adapter_prepare', 'base_lora_load'] as const)('captures %s before the voices finally restores the original chat', async stage => {
+  const failure = new Error('synthetic private preparation detail');
+  if (stage === 'adapter_prepare') jest.mocked(prepareAndroidQaStage3Adapter).mockRejectedValueOnce(failure);
+  else mockLoad.mockRejectedValueOnce(failure);
+  await runAndroidQaStage7Voices();
+  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', phase: 'complete',
+    failureCode: 'qa_operation_failed', failureStage: stage, steps: [] });
+  expect(mockTtsStart).not.toHaveBeenCalled();
+  expect(mockTtsClear).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(sanitizeAudioStage7Evidence(getAndroidQaAudioStage7Evidence()))).not.toContain('private');
+});
+
+it('keeps the first observed stage while deferred QA cleanup replaces the terminal error', async () => {
+  let rejectCleanup!: (error: unknown) => void;
+  const cleanup = new Promise<void>((_resolve, reject) => { rejectCleanup = reject; });
+  mockTtsClear.mockReturnValueOnce(cleanup);
+  mockTtsStart.mockImplementationOnce(async (request: TtsRequest) => {
+    request.observe?.({ operation: 'first_failure', phase: 'failed', failureStage: 'formatter' });
+    request.observe?.({ operation: 'first_failure', phase: 'failed', failureStage: 'vocoder_release' });
+    throw new TtsError('native_failed');
+  });
+  const work = runAndroidQaStage7Voices(); await flush();
+  expect(mockTtsClear).toHaveBeenCalledTimes(1);
+  expect(getAndroidQaAudioStage7Evidence().status).toBe('running');
+  rejectCleanup(new TtsError('storage_failed')); await work;
+  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'storage_failed',
+    failureStage: 'formatter', steps: [] });
+});
+
+it('ignores a closed voices observer after a new run starts rather than resurrecting its diagnostic', async () => {
+  let oldObserve: TtsRequest['observe'];
+  mockTtsStart.mockImplementationOnce(async (request: TtsRequest) => {
+    oldObserve = request.observe;
+    request.observe?.({ operation: 'first_failure', phase: 'failed', failureStage: 'tts_backbone_init' });
+    throw new TtsError('native_failed');
+  });
+  await runAndroidQaStage7Voices();
+  expect(getAndroidQaAudioStage7Evidence().failureStage).toBe('tts_backbone_init');
+  mockTtsStart.mockImplementationOnce(async (request: TtsRequest) => {
+    request.observe?.({ operation: 'first_failure', phase: 'failed', failureStage: 'decode' });
+    throw new TtsError('native_failed');
+  });
+  const next = runAndroidQaStage7Voices();
+  oldObserve?.({ operation: 'first_failure', phase: 'failed', failureStage: 'restore' });
+  await next;
+  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureStage: 'decode', steps: [] });
 });

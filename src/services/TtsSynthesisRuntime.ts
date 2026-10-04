@@ -1,5 +1,5 @@
 import type { CompletionParams, LlamaContext, LlamaSpeaker, SpeakerPayload } from 'llama.rn';
-import { TTS_LIMITS, TtsError, TtsCleanupError, type TtsFlow, type TtsObservation, type TtsPhase, type TtsVoiceSelection } from '../types/tts';
+import { TTS_LIMITS, TtsError, TtsCleanupError, type TtsFlow, type TtsObservation, type TtsOperation, type TtsFailureStage, type TtsPhase, type TtsVoiceSelection } from '../types/tts';
 import type { TtsExecutionProfile } from './TtsExecutionProfiles';
 import { requireLlamaModule } from './llamaRnModule';
 import { getCompletionPromptTokenCount } from './LlamaPromptTokenCount';
@@ -70,9 +70,19 @@ export async function synthesizeTtsOnContext(
 ): Promise<TtsPcmResult> {
   const check = () => { options.assertCurrent(); if (options.signal?.aborted) throw new TtsError('cancelled'); };
   const observe = (event: TtsObservation) => { try { options.observe?.(event); } catch { /* Observation cannot alter ownership. */ } };
-  const observed = async <T>(operation: TtsObservation['operation'], call: () => Promise<T>): Promise<T> => {
+  let failureStage: TtsFailureStage = 'tts_setup';
+  let failureObserved = false;
+  const observeFailure = (stage: TtsFailureStage) => {
+    if (failureObserved) return;
+    failureObserved = true;
+    observe({ operation: 'first_failure', phase: 'failed', failureStage: stage });
+  };
+  const observed = async <T>(operation: TtsOperation, call: () => Promise<T>): Promise<T> => {
+    failureStage = operation;
     observe({ operation, phase: 'started' });
-    try { return await call(); } finally { observe({ operation, phase: 'settled' }); }
+    try { return await call(); }
+    catch (error) { observeFailure(operation); throw error; }
+    finally { observe({ operation, phase: 'settled' }); }
   };
   check();
   if (!options.text.trim() || options.text.length > TTS_LIMITS.textCharacters) throw new TtsError('input_too_large');
@@ -96,6 +106,7 @@ export async function synthesizeTtsOnContext(
     check();
     if (!initialized || !await context.isVocoderEnabled()) throw new TtsError('codec_incompatible');
     check();
+    failureStage = 'getTTSCapabilities';
     const capabilities = await context.getTTSCapabilities();
     check();
     if (typeof capabilities.requiresPhonemes !== 'boolean') throw new TtsError('codec_incompatible');
@@ -110,10 +121,12 @@ export async function synthesizeTtsOnContext(
       const started = Date.now();
       observe({ operation: 'phonemizer', phase: 'started' });
       try { return await phonemizeSpeech(text, language, check); }
+      catch (error) { observeFailure('phonemizer'); throw error; }
       finally { observe({ operation: 'phonemizer', phase: 'settled', elapsedMs: Math.max(0, Date.now() - started) }); }
     } : undefined;
     let speaker: SpeakerPayload | LlamaSpeaker | undefined;
     if (voice.kind === 'builtin') {
+      failureStage = 'builtin_voice_lookup';
       const llama = requireLlamaModule();
       const language = profile.builtinLanguage;
       if (!language || !profile.builtinVoices?.includes(voice.voice)
@@ -167,6 +180,7 @@ export async function synthesizeTtsOnContext(
     }
     check();
     const format = async () => {
+      failureStage = 'formatter';
       observe({ operation: 'formatter', phase: 'started' });
       let response: Awaited<ReturnType<LlamaContext['getFormattedAudioCompletion']>> | undefined;
       try {
@@ -174,7 +188,8 @@ export async function synthesizeTtsOnContext(
           language: profile.phonemizerLanguage ?? profile.builtinLanguage ?? options.language,
           ...(speaker === undefined ? {} : { speaker }), ...(phonemizer ? { phonemizer } : {}) });
         return response;
-      } finally {
+      } catch (error) { observeFailure('formatter'); throw error; }
+      finally {
         const receipt = response as { speakerRows?: unknown; speakerBaked?: unknown } | undefined;
         observe({ operation: 'formatter', phase: 'settled',
           ...(typeof receipt?.speakerRows === 'number' && Number.isSafeInteger(receipt.speakerRows)
@@ -200,6 +215,7 @@ export async function synthesizeTtsOnContext(
       || (formatted.grammar !== undefined && typeof formatted.grammar !== 'string')) throw new TtsError('codec_incompatible');
     // Qwen's prefix is owned by native; tokenizing the empty returned prompt is meaningless.
     // Bound payload text and reserve the fixed role/speaker prefix without manufacturing one.
+    failureStage = 'prompt_prepare';
     const tokenized = await context.tokenize(flow === 'talker_embd' ? options.text : formatted.prompt);
     check();
     const promptTokens = getCompletionPromptTokenCount(context, tokenized);
@@ -222,6 +238,7 @@ export async function synthesizeTtsOnContext(
     options.onPhase?.('synthesizing');
     check();
     completionActive = true;
+    failureStage = 'completion';
     let result: LlamaCompletionResult;
     observe({ operation: 'completion', phase: 'started', flow });
     try {
@@ -230,20 +247,23 @@ export async function synthesizeTtsOnContext(
         elementCount: flow === 'continuous_embd' ? result.embeddings?.length : result.audio_tokens?.length,
         tokensPredicted: result.tokens_predicted, tokensEvaluated: result.tokens_evaluated,
         interrupted: result.interrupted, stoppedEos: result.stopped_eos });
-    } catch (error) { observe({ operation: 'completion', phase: 'settled', flow }); throw error; }
+    } catch (error) { observeFailure('completion'); observe({ operation: 'completion', phase: 'settled', flow }); throw error; }
     finally { completionActive = false; await stopping; }
+    failureStage = 'completion';
     check();
     if (stopFailed) throw new TtsError('native_failed');
     validateTtsCompletion(result);
     const payload = validateTtsAudioPayload(result, flow, profile, sampleRate);
     options.onPhase?.('decoding');
     check();
+    failureStage = 'decode';
     observe({ operation: 'decode', phase: 'started', flow, elementCount: payload.elements.length });
     let samples: number[];
     try {
       samples = await (flow === 'continuous_embd' ? context.decodeAudioEmbeddings(payload.elements, payload.dimension!)
         : context.decodeAudioTokens(payload.elements));
     } catch (error) {
+      observeFailure('decode');
       observe({ operation: 'decode', phase: 'settled', flow });
       throw error;
     }
@@ -255,6 +275,7 @@ export async function synthesizeTtsOnContext(
       || samples.some(value => !Number.isFinite(value))) throw new TtsError('decode_failed');
     return { samples, sampleRate, flow, audioElements: payload.elements.length, promptTokens };
   } catch (error) {
+    observeFailure(failureStage);
     primaryError = error instanceof TtsError ? error : new TtsError('native_failed');
     throw primaryError;
   } finally {

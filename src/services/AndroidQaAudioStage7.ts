@@ -7,7 +7,7 @@ import { useChatStore } from '../store/chatStore';
 import { useDownloadStore } from '../store/downloadStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../types/models';
 import { DEFAULT_PRESET_SNAPSHOT } from '../types/chat';
-import { TtsError, sanitizePhonemizerFailure, type PhonemizerFailure, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
+import { TtsError, sanitizePhonemizerFailure, isTtsFailureStage, type TtsFailureStage, type PhonemizerFailure, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
 import { getCompanionBindingIdentity, getCompanionSourceIdentity } from '../utils/modelArtifacts';
 import { getModelFileIdentity } from '../utils/modelRoles';
 import { audioRecordingService } from './AudioRecordingService';
@@ -42,6 +42,7 @@ export interface AndroidQaAudioStage7Evidence {
   schemaVersion: 1; status: 'idle' | 'running' | 'native_passed' | 'failed'; phase: string;
   mode?: Mode; clipId?: string; failureCode?: string; requiresForceStop: boolean;
   phonemizerFailure?: PhonemizerFailure;
+  failureStage?: TtsFailureStage;
   steps: AndroidQaAudioStage7Step[]; runtimeVersion: '0.13.0-rc.3'; backend: 'cpu';
   contentVerification: 'not_run'; referenceConditioning: 'not_run';
 }
@@ -131,17 +132,28 @@ function safeFailureCode(error: unknown): string {
   }
   return error instanceof QaAudioFailure || error instanceof TtsError ? error.code : 'qa_operation_failed';
 }
-function run(mode: Mode, action: () => Promise<void>): Promise<void> {
+function run(mode: Mode, action: (recordFailure: (stage: TtsFailureStage) => void) => Promise<void>): Promise<void> {
   if (!isAndroidQaAudioStage7Enabled()) return Promise.resolve();
   if (active) return active;
   evidence = initial(); publish({ mode, status: 'running', phase: 'prepare' });
-  active = action().then(() => publish({ status: 'native_passed', phase: 'complete' }), error => {
+  let diagnosticsOpen = true;
+  let failureStage: TtsFailureStage | undefined;
+  const recordFailure = (stage: TtsFailureStage) => {
+    if (diagnosticsOpen && failureStage === undefined && isTtsFailureStage(stage)
+      && mode === 'voices') failureStage = stage;
+  };
+  active = action(recordFailure).then(() => {
+    diagnosticsOpen = false;
+    publish({ status: 'native_passed', phase: 'complete' });
+  }, error => {
+    diagnosticsOpen = false;
     publish({ status: 'failed', phase: 'complete', failureCode: safeFailureCode(error),
+      ...(failureStage === undefined ? {} : { failureStage }),
       ...(error instanceof TtsError && error.code === 'phonemizer_failed'
         ? { phonemizerFailure: sanitizePhonemizerFailure(error.phonemizerFailure) } : {}),
       requiresForceStop: llmEngineService.hasAuxiliaryContextOperation()
         || llmEngineService.hasActiveCompletion() || llmEngineService.getState().diagnostics?.contextRecoveryStatus === 'failed' });
-  }).finally(() => { active = null; });
+  }).finally(() => { diagnosticsOpen = false; active = null; });
   return active;
 }
 
@@ -305,13 +317,14 @@ const TARGET_TEXT = syntheticFixtures.referenceComparisonTarget;
 export function runAndroidQaStage7Voices(): Promise<void> {
   return run('voices', executeVoices);
 }
-async function executeVoices(): Promise<void> {
+async function executeVoices(recordFailure: (stage: TtsFailureStage) => void): Promise<void> {
   const originalThread = useChatStore.getState().activeThreadId;
   const originalBindings = getSettings().auxiliaryModels;
   const originalModel = llmEngineService.getState().activeModelId;
   const originalProfile = llmEngineService.getEffectiveLoadParameters();
   let ownedThread: string | undefined;
   let savedId: string | undefined;
+  let failureStage: TtsFailureStage = 'adapter_prepare';
   try {
     await prepareAndroidQaStage3Adapter(180_000);
     const base = registry.getModel(ANDROID_QA_DOCUMENT_MODEL_ID);
@@ -323,6 +336,7 @@ async function executeVoices(): Promise<void> {
     ownedThread = useChatStore.getState().createThread({ modelId: base.id, title: 'Android audio voices QA',
       presetId: null, presetSnapshot: DEFAULT_PRESET_SNAPSHOT, loraSnapshot: loraAdapters,
       paramsSnapshot: { temperature: 0, topP: 1, maxTokens: 32, seed: 42 } });
+    failureStage = 'base_lora_load';
     await llmEngineService.load(base.id, { forceReload: true, loadParamsMode: 'replace', loadParamsOverride: {
       contextSize: 512, gpuLayers: 0, backendPolicy: 'cpu', mtpEnabled: false, kvCacheType: 'f16',
       loraAdapters, parallelSlots: 1, useMmap: true, cpuThreads: 4 } });
@@ -342,11 +356,18 @@ async function executeVoices(): Promise<void> {
       publish({ phase: id });
       const profile = TTS_EXECUTION_PROFILES.find(item => item.id === profileId);
       check(profile, 'profile_missing');
+      failureStage = 'tts_fixture_prepare';
       const model = await prepareAndroidQaTtsProfile(profile);
       selectAuxiliaryModel('tts', model);
       const observations: TtsObservation[] = [];
+      failureStage = 'tts_setup';
       await ttsService.start({ text: TARGET_TEXT, language: 'en', voice, playAfterSynthesis: false,
-        observe: event => observations.push(event) });
+        observe: event => {
+          if (event.operation === 'first_failure') {
+            if (event.phase === 'failed' && isTtsFailureStage(event.failureStage)) recordFailure(event.failureStage);
+          } else observations.push(event);
+        } });
+      failureStage = 'qa_voice_sequence';
       restored();
       const decoded = observations.find(event => event.operation === 'decode' && event.phase === 'settled');
       const formatted = observations.find(event => event.operation === 'formatter' && event.phase === 'settled');
@@ -401,17 +422,28 @@ async function executeVoices(): Promise<void> {
     pass({ id: 'voice_saved', voiceCount: 1, selected: true, handlesPersisted: false });
     // Saved metadata remains for the runner's genuine force-stop/cold reopen check.
     savedId = undefined;
+  } catch (error) {
+    recordFailure(failureStage);
+    throw error;
   } finally {
-    await ttsService.cancelAndClear();
-    if (savedId) await referenceVoiceStore.delete(savedId);
-    if (!llmEngineService.hasAuxiliaryContextOperation() && !llmEngineService.hasActiveCompletion()) {
-      if (originalModel && originalProfile) await llmEngineService.load(originalModel,
-        { forceReload: true, loadParamsMode: 'replace', loadParamsOverride: originalProfile });
-      else await llmEngineService.unload();
-      if (ownedThread) useChatStore.getState().deleteThread(ownedThread);
-      useChatStore.getState().setActiveThread(originalThread);
-      updateSettings({ auxiliaryModels: originalBindings });
-    } else throw new QaAudioFailure('cleanup_native_owner_pending');
+    let cleanupStage: TtsFailureStage = 'context_release';
+    try {
+      await ttsService.cancelAndClear();
+      if (savedId) await referenceVoiceStore.delete(savedId);
+      if (!llmEngineService.hasAuxiliaryContextOperation() && !llmEngineService.hasActiveCompletion()) {
+        cleanupStage = 'restore';
+        if (originalModel && originalProfile) await llmEngineService.load(originalModel,
+          { forceReload: true, loadParamsMode: 'replace', loadParamsOverride: originalProfile });
+        else await llmEngineService.unload();
+        cleanupStage = 'qa_voice_sequence';
+        if (ownedThread) useChatStore.getState().deleteThread(ownedThread);
+        useChatStore.getState().setActiveThread(originalThread);
+        updateSettings({ auxiliaryModels: originalBindings });
+      } else throw new QaAudioFailure('cleanup_native_owner_pending');
+    } catch (error) {
+      recordFailure(cleanupStage);
+      throw error;
+    }
   }
 }
 

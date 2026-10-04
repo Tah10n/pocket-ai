@@ -68,10 +68,23 @@ export const TTS_LIMITS = Object.freeze({
   temporaryClips: 1,
 });
 
+/** One closed diagnostic stage; never carries an exception or speech data. */
+export const TTS_FAILURE_STAGES = [
+  'adapter_prepare', 'base_lora_load', 'tts_fixture_prepare', 'tts_admission', 'tts_setup', 'tts_detach',
+  'tts_backbone_init', 'vocoder_init', 'getTTSCapabilities', 'builtin_voice_lookup', 'phonemizer',
+  'speaker_create', 'speaker_bake', 'formatter', 'prompt_prepare', 'completion', 'completion_stop',
+  'decode', 'speaker_release', 'vocoder_release', 'context_release', 'restore', 'qa_voice_sequence',
+] as const;
+export type TtsFailureStage = typeof TTS_FAILURE_STAGES[number];
+export function isTtsFailureStage(value: unknown): value is TtsFailureStage {
+  return typeof value === 'string' && TTS_FAILURE_STAGES.includes(value as TtsFailureStage);
+}
+export type TtsOperation = 'vocoder_init' | 'speaker_create' | 'speaker_bake' | 'speaker_release'
+  | 'phonemizer' | 'formatter' | 'completion' | 'completion_stop' | 'decode' | 'vocoder_release';
 export interface TtsObservation {
-  operation: 'vocoder_init' | 'speaker_create' | 'speaker_bake' | 'speaker_release'
-    | 'phonemizer' | 'formatter' | 'completion' | 'completion_stop' | 'decode' | 'vocoder_release';
-  phase: 'started' | 'settled';
+  operation: TtsOperation | 'first_failure';
+  phase: 'started' | 'settled' | 'failed';
+  failureStage?: TtsFailureStage;
   flow?: TtsFlow;
   elementCount?: number;
   sampleRate?: number;

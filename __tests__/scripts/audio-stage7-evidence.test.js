@@ -93,3 +93,24 @@ it('handles the OS prompt with no QA marker, exclusively after explicit Record',
   expect(grantStage7MicrophoneAfterExplicitRecord('adb', 'emulator', { explicitRecordIssued: true, createSnapshot, tapBounds: tap })).toBe(true);
   expect(tap).toHaveBeenCalledTimes(1);
 });
+
+it('retains one closed failure stage only for failed voices and never upgrades failure to native acceptance', () => {
+  const { TTS_FAILURE_STAGES } = require('../../src/types/tts');
+  for (const failureStage of TTS_FAILURE_STAGES) {
+    const source = { ...initial('voices'), status: 'failed', failureCode: 'native_failed', failureStage,
+      error: { message: 'synthetic private detail' }, paths: ['/private'], phonemes: ['private'],
+      failureEvents: [{ failureStage, tokens: [1, 2] }] };
+    const safe = sanitizeAudioStage7Evidence(source);
+    expect(safe.failureStage).toBe(failureStage);
+    expect(JSON.stringify(safe)).not.toMatch(/private|failureEvents|phonemes|tokens|paths/u);
+    expect(() => validateAudioStage7Evidence(safe, 'voices')).toThrow();
+    expect(sanitizeAudioStage7Evidence({ ...source, status: 'native_passed' })).not.toHaveProperty('failureStage');
+    for (const mode of ['recording', 'input', 'cold_voice']) {
+      expect(sanitizeAudioStage7Evidence({ ...source, mode })).not.toHaveProperty('failureStage');
+    }
+  }
+  for (const failureStage of [null, 1, [], {}, 'private', 'formatter\n/private']) {
+    expect(sanitizeAudioStage7Evidence({ ...initial('voices'), status: 'failed', failureCode: 'native_failed', failureStage }))
+      .not.toHaveProperty('failureStage');
+  }
+});

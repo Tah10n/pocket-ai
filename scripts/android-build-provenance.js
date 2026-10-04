@@ -5,6 +5,7 @@ const path = require("path");
 const zlib = require("zlib");
 const { spawnSync } = require("child_process");
 const { getEnvFiles, parseEnvFiles } = require("@expo/env");
+const { applyPhonemizePatch } = require("../patches/phonemize-2.0.1");
 
 const BUILD_PROVENANCE_SCHEMA_VERSION = 3;
 const POCKET_ANYDOC_UPSTREAM_COMMIT =
@@ -2026,11 +2027,13 @@ function collectBuildProvenance(projectRoot, options = {}) {
   const llamaHexagon = hexagonManifestExists
     ? require("./llama-hexagon-sdk").verifyLlamaHexagonSdk(projectRoot, { abi, env: options.env || process.env }).identity
     : null;
+  const phonemize = applyPhonemizePatch(projectRoot, { check: true });
   const manifest = {
     schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
     variant,
     abi,
     ...(hexagonManifestExists ? { llamaHexagon } : {}),
+    ...(phonemize ? { phonemize } : {}),
     embeddedBundle: includeBundleInputs,
     buildContext,
     toolchains: options.toolchains || collectToolchainVersions(projectRoot, options),

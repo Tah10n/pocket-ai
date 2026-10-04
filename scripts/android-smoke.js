@@ -139,6 +139,7 @@ function startAndroidSmokeMain(runMain = main) {
 }
 
 async function main() {
+  require("../patches/phonemize-2.0.1").applyPhonemizePatch(projectRoot);
   const requestedSerial = cliOptions.serial || process.env.ANDROID_SERIAL || null;
   const requestedAvd = cliOptions.avd || process.env.ANDROID_AVD || null;
   const forceEmulator =

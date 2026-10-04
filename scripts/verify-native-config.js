@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const { patchLlamaBridge } = require('../patches/llama-rn-0.13.0-rc.3');
 const { patches: audioPatches, VERSION: audioVersion } = require('../patches/expo-audio-55.0.18');
+const { applyPhonemizePatch } = require('../patches/phonemize-2.0.1');
 
 const { HEXAGON_GUARD, assertPodfileSourceBuild } = require('../plugins/withLlamaSourceBuild')._internal;
 const projectRoot = path.resolve(__dirname, '..');
@@ -356,6 +357,7 @@ function run(argv = process.argv.slice(2), root = projectRoot) {
   assertLlamaNativeArtifacts(root);
   patchLlamaBridge(root, { check: true });
   assertExpoAudioNativePatch(root);
+  applyPhonemizePatch(root, { check: true });
 
   if (requireIos || fs.existsSync(path.join(root, 'ios'))) {
     assertIosGeneratedConfig(root);

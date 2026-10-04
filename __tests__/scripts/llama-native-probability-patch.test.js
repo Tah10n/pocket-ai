@@ -700,7 +700,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     const projectRoot = path.resolve(__dirname, '../..');
     const relative = 'patches/llama-rn-0.13.0-rc.3.js';
     const packageConfig = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
-    expect(packageConfig.scripts.postinstall).toBe(`node ./${relative} && node ./patches/expo-audio-55.0.18.js`);
+    expect(packageConfig.scripts.postinstall).toBe(`node ./${relative} && node ./patches/expo-audio-55.0.18.js && node ./patches/phonemize-2.0.1.js`);
     fs.mkdirSync(path.join(root, 'patches'));
     fs.copyFileSync(path.join(projectRoot, relative), path.join(root, relative));
     const before = collectPrebuildInputState(root);

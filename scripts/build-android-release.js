@@ -251,6 +251,7 @@ function ensureReleasePrebuild() {
   return verifiedInputState;
 }
 
+require("../patches/phonemize-2.0.1").applyPhonemizePatch(projectRoot);
 const sdkSetup = spawnSync(process.execPath, [path.join(projectRoot, "scripts", "llama-hexagon-sdk.js"), "setup", "--abi", "universal"], {
   cwd: projectRoot, env: releaseBuildEnvironment, encoding: "utf8", timeout: 35 * 60 * 1000,
 });

@@ -1,5 +1,6 @@
 const { withAndroidManifest, withAppBuildGradle } = require('expo/config-plugins');
 const { mergeContents } = require('@expo/config-plugins/build/utils/generateCode');
+const { ANDROID_QA_INSTANCE_PATTERN, resolveAndroidQaApplicationId } = require('../scripts/android-qa-application-id');
 
 const BLOCKED_PERMISSIONS = new Set([
   'android.permission.CAMERA',
@@ -24,6 +25,9 @@ function createReleaseConfigBlock({
     : 'com.github.tah10n.pocketai';
   const safeVersionCode = Number.isInteger(defaultVersionCode) && defaultVersionCode > 0 ? defaultVersionCode : 1;
   const safeVersionName = defaultVersionName ? escapeGroovyDoubleQuotedString(defaultVersionName) : '1.0.0';
+  const safeQaApplicationId = escapeGroovyDoubleQuotedString(resolveAndroidQaApplicationId(
+    defaultApplicationId || 'com.github.tah10n.pocketai', true,
+  ));
 
   return `def keystoreProperties = new Properties()
 def keystorePropertiesFile = rootProject.file("../keystore.properties")
@@ -80,7 +84,14 @@ def resolveBooleanValue = { gradleKey, envKey, defaultValue ->
 }
 
 def pocketAiDefaultApplicationId = "${safeApplicationId}"
-def pocketAiIsolatedQaApplicationId = "${safeApplicationId}.qa"
+def pocketAiIsolatedQaApplicationId = "${safeQaApplicationId}"
+def pocketAiQaInstance = System.getenv("POCKET_AI_ANDROID_QA_INSTANCE")
+if (pocketAiQaInstance != null) {
+    if (!pocketAiQaInstance.matches('${ANDROID_QA_INSTANCE_PATTERN}')) {
+        throw new GradleException("Android QA instance must be one lowercase alphanumeric segment, starting with a letter (1-32 characters).")
+    }
+    pocketAiIsolatedQaApplicationId = pocketAiDefaultApplicationId + "." + pocketAiQaInstance + ".qa"
+}
 def pocketAiDefaultVersionCode = ${safeVersionCode}
 def pocketAiDefaultVersionName = "${safeVersionName}"
 
@@ -89,6 +100,11 @@ if (!(appApplicationId in [pocketAiDefaultApplicationId, pocketAiIsolatedQaAppli
     throw new GradleException(
         "Pocket AI applicationId override must be the repository package or its isolated .qa package."
     )
+}
+if (pocketAiQaInstance != null && (appApplicationId != pocketAiIsolatedQaApplicationId
+        || System.getenv("EXPO_PUBLIC_ANDROID_QA") != "1"
+        || System.getenv("POCKET_AI_SHIPPING_BUILD")?.toBoolean())) {
+    throw new GradleException("Android QA instance requires its exact isolated package and nonshipping QA controls.")
 }
 def appVersionCodeValue = (findProperty("pocketAiVersionCode") ?: System.getenv("POCKET_AI_VERSION_CODE") ?: pocketAiDefaultVersionCode).toString()
 def appVersionNameValue = (findProperty("pocketAiVersionName") ?: System.getenv("POCKET_AI_VERSION_NAME") ?: pocketAiDefaultVersionName).toString()

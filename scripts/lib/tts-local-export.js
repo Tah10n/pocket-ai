@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { validateTtsWav } = require('./tts-evidence');
+const { parseAndroidQaApplicationId } = require('../android-qa-application-id');
 
 const within = (parent, child) => {
   const relative = path.relative(parent, child);
@@ -10,7 +11,7 @@ const within = (parent, child) => {
 
 /** Prove access before synthesis; run-as can return an error with exit code zero. */
 function assertTtsPrivateFileAccess(adb, serial, packageName, capture = spawnSync) {
-  if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\.qa$/u.test(packageName)) {
+  if (!parseAndroidQaApplicationId(packageName, 'com.github.tah10n.pocketai')) {
     throw new Error('Speech export requires the isolated QA package.');
   }
   const result = capture(adb, ['-s', serial, 'exec-out', 'run-as', packageName, 'pwd'], {

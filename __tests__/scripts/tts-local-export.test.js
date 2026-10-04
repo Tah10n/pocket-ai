@@ -5,11 +5,11 @@ const { resolveExternalTtsDirectory, exportLocalTtsClip, assertTtsPrivateFileAcc
 
 describe('isolated speech private-file access', () => {
   const packageName = 'com.github.tah10n.pocketai.qa';
-  it('requires affirmative access to the exact QA data directory', () => {
-    for (const stdout of [`/data/user/0/${packageName}\n`, `/data/data/${packageName}\n`]) {
+  it.each([packageName, 'com.github.tah10n.pocketai.stage7.qa'])('requires affirmative access to the exact QA data directory for %s', target => {
+    for (const stdout of [`/data/user/0/${target}\n`, `/data/data/${target}\n`]) {
       const capture = jest.fn(() => ({ status: 0, stdout, stderr: '' }));
-      expect(() => assertTtsPrivateFileAccess('adb', 'owned-emulator', packageName, capture)).not.toThrow();
-      expect(capture.mock.calls[0][1]).toEqual(['-s', 'owned-emulator', 'exec-out', 'run-as', packageName, 'pwd']);
+      expect(() => assertTtsPrivateFileAccess('adb', 'owned-emulator', target, capture)).not.toThrow();
+      expect(capture.mock.calls[0][1]).toEqual(['-s', 'owned-emulator', 'exec-out', 'run-as', target, 'pwd']);
     }
   });
   it.each([
@@ -26,6 +26,21 @@ describe('isolated speech private-file access', () => {
     const capture = jest.fn();
     expect(() => assertTtsPrivateFileAccess('adb', 'owned-emulator', 'com.github.tah10n.pocketai', capture)).toThrow(/isolated/);
     expect(capture).not.toHaveBeenCalled();
+  });
+  it.each(['com.other.app.qa', 'com.github.tah10n.pocketai.other.stage7.qa',
+    'com.github.tah10n.pocketai.Stage7.qa', 'com.github.tah10n.pocketai.stage-7.qa',
+    'com.github.tah10n.pocketai.stage7.qa\n'])(
+    'rejects unsupported QA identity %j before run-as', target => {
+      const capture = jest.fn();
+      expect(() => assertTtsPrivateFileAccess('adb', 'physical-device', target, capture)).toThrow(/isolated QA package/);
+      expect(capture).not.toHaveBeenCalled();
+    },
+  );
+  it('does not accept the old QA data directory for the selected named package', () => {
+    const capture = jest.fn(() => ({ status: 0, stdout: `/data/user/0/${packageName}`, stderr: '' }));
+    expect(() => assertTtsPrivateFileAccess('adb', 'physical-device', 'com.github.tah10n.pocketai.stage7.qa', capture))
+      .toThrow(/no verified/);
+    expect(capture).toHaveBeenCalledTimes(1);
   });
 });
 

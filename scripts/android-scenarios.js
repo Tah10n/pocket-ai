@@ -7,6 +7,7 @@ const { sanitizeTtsEvidence, validateTtsEvidence, validateTtsPlaybackEvidence } 
 const { sanitizeAudioStage7Evidence, validateAudioStage7Evidence, validateStage7MicInjectionReceipt } = require('./lib/audio-stage7-evidence');
 const { createTtsPublicSnapshotReader, getTtsControlTap, runTtsPublicControls } = require("./lib/tts-public-controls");
 const { resolveExternalTtsDirectory, exportLocalTtsClip, assertTtsPrivateFileAccess } = require("./lib/tts-local-export");
+const { normalizeAndroidQaInstance } = require("./android-qa-application-id");
 
 const fs = require("fs");
 const path = require("path");
@@ -158,7 +159,8 @@ const dumpPathOnDevice = "/sdcard/window_dump.xml";
 const expoConfig = readExpoConfig();
 const appPackageName = resolveAndroidQaApplicationId(
   expoConfig.packageName,
-  cliOptions.isolatedQaInstall
+  cliOptions.isolatedQaInstall,
+  cliOptions.qaInstance ?? (require.main === module ? process.env.POCKET_AI_ANDROID_QA_INSTANCE : null)
 );
 const appSchemeName = expoConfig.scheme;
 const homeLauncherLabel = "Pocket AI";
@@ -6138,6 +6140,11 @@ async function waitForInferenceSmokeEvidence(readEvidence, options = {}) {
 }
 
 function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenance, env = process.env) {
+  const qaInstance = normalizeAndroidQaInstance(options.qaInstance ?? env.POCKET_AI_ANDROID_QA_INSTANCE);
+  if (qaInstance !== null) {
+    if (!options.isolatedQaInstall) throw new ScenarioPreconditionFailureError("--qa-instance requires --isolated-qa-install.");
+    env.POCKET_AI_ANDROID_QA_INSTANCE = qaInstance;
+  }
   if (options.apkVariant) {
     env.ANDROID_SMOKE_APK_VARIANT = options.apkVariant;
   } else if (["documents", "native", "inference", "retrieval"].includes(options.pack) && !env.ANDROID_SMOKE_APK_VARIANT) {
@@ -8322,6 +8329,10 @@ function buildSmokeLaunchArgs(options, resolvedSerial) {
 
   if (options.isolatedQaInstall) {
     args.push("--isolated-qa-install");
+  }
+
+  if (options.qaInstance != null) {
+    args.push("--qa-instance", normalizeAndroidQaInstance(options.qaInstance));
   }
 
   if (options.apkVariant) {
@@ -11138,6 +11149,7 @@ function parseCliOptions(argv) {
     scenario: null,
     port: null,
     isolatedQaInstall: false,
+    qaInstance: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -11170,6 +11182,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--isolated-qa-install") {
       options.isolatedQaInstall = true;
+      continue;
+    }
+
+    if (arg === "--qa-instance") {
+      options.qaInstance = normalizeAndroidQaInstance(readCliValue(argv, ++index, "--qa-instance"));
       continue;
     }
 
@@ -11230,6 +11247,10 @@ function parseCliOptions(argv) {
     options.isolatedQaInstall = true;
   }
 
+  if (options.qaInstance !== null && !options.isolatedQaInstall) {
+    throw new Error("--qa-instance requires --isolated-qa-install.");
+  }
+
   return options;
 }
 
@@ -11257,6 +11278,7 @@ function printHelp() {
   console.log("  --preserve-running-app     Do not bootstrap or restart the app before scenarios");
   console.log("  --bootstrap-screenshot     Save a smoke bootstrap screenshot before scenarios");
   console.log("  --isolated-qa-install      Install and target the repository-owned side-by-side .qa package");
+  console.log("  --qa-instance <name>       Select a single lowercase named QA instance (requires isolated QA)");
   console.log("  --port <number>            Forward a specific Metro port to android-smoke");
   console.log("  --list                     Print available scenarios");
 }

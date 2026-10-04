@@ -1,6 +1,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import RNFS from 'react-native-fs';
 import DeviceInfo from 'react-native-device-info';
+import { parseAndroidQaApplicationId } from '../../scripts/android-qa-application-id';
 import inputManifest from '../../docs/validation/llama-rn-stage7/audio-input-fixtures.json';
 import { LifecycleStatus, type ModelMetadata } from '../types/models';
 import { validateGgufFileHeader } from '../utils/ggufValidation';
@@ -56,10 +57,11 @@ const localName = (source: TtsSourceIdentity) => `qa-stage7-${source.sha256}.ggu
 export async function prepareAndroidQaStage7Seed(
   kind: AndroidQaStage7SeedKind, desired: ModelMetadata,
 ): Promise<ModelMetadata | null> {
+  const applicationId = DeviceInfo.getBundleId();
   if (!isAndroidQaDocumentModelBootstrapEnabled()
-    || DeviceInfo.getBundleId() !== 'com.github.tah10n.pocketai.qa') return null;
+    || !parseAndroidQaApplicationId(applicationId, 'com.github.tah10n.pocketai')) return null;
   const cache = getAppCacheRootDir(); const models = getModelsDir();
-  check(cache?.endsWith('/com.github.tah10n.pocketai.qa/cache/') && models);
+  check(cache?.endsWith(`/${applicationId}/cache/`) && models);
   const pair = selectedPair(kind);
   const expected = { ...desired, id: pair.id, size: pair.backbone.bytes, sha256: pair.backbone.sha256,
     downloadUrl: url(pair.backbone), resolvedFileName: pair.backbone.filename, hfRevision: pair.backbone.revision };

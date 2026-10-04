@@ -4708,6 +4708,21 @@ describe('android-scenarios pack selection', () => {
     }
   });
 
+  it('forwards one named QA instance and binds the actual scenario build environment', () => {
+    const options = parseCliOptions(['--isolated-qa-install', '--qa-instance', 'stage7', '--pack', 'audio-voices']);
+    expect(buildSmokeLaunchArgs(options, 'physical-device')).toEqual(
+      expect.arrayContaining(['--isolated-qa-install', '--qa-instance', 'stage7', '--serial', 'physical-device']),
+    );
+    const env = { ANDROID_SMOKE_APK_VARIANT: 'release' };
+    configureScenarioBuildEnvironment(options, true, env);
+    expect(env).toMatchObject({ POCKET_AI_ANDROID_QA_INSTANCE: 'stage7', EXPO_PUBLIC_ANDROID_QA: '1',
+      POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1' });
+    expect(() => parseCliOptions(['--qa-instance', 'stage7'])).toThrow(/requires --isolated-qa-install/);
+    expect(() => parseCliOptions(['--isolated-qa-install', '--qa-instance', 'other.stage7'])).toThrow(/QA instance/);
+    expect(() => configureScenarioBuildEnvironment({ pack: 'audio-voices' }, true,
+      { POCKET_AI_ANDROID_QA_INSTANCE: 'stage7' })).toThrow(/requires --isolated-qa-install/);
+  });
+
   it('keeps Stage7 capture, audio input and voices in one explicit bounded pack', () => {
     const selected = selectScenarios(scenarios, parseCliOptions(['--pack', 'audio-voices', '--apk-variant', 'release', '--isolated-qa-install']));
     expect(selected.map(item => item.id)).toEqual(['runtime-stage7-recording', 'runtime-stage7-audio-input', 'runtime-stage7-voices']);

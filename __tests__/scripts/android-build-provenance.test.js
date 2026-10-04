@@ -717,6 +717,49 @@ describe('Android build content provenance', () => {
     } finally { fs.rmSync(projectRoot, { force: true, recursive: true }); }
   });
 
+  it('admits only the exact selected named QA identity and invalidates build/prebuild reuse', () => {
+    const projectRoot = createProject();
+    const env = { NODE_ENV: 'production', EXPO_PUBLIC_ANDROID_QA: '1',
+      POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: 'true', POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1' };
+    const options = { variant: 'release', env,
+      gradleArgs: ['-PpocketAiApplicationId=com.github.tah10n.pocketai.qa'],
+      userGradlePropertiesPath: path.join(projectRoot, 'isolated-gradle/gradle.properties') };
+    const named = { ...options, env: { ...env, POCKET_AI_ANDROID_QA_INSTANCE: 'stage7' },
+      gradleArgs: ['-PpocketAiApplicationId=com.github.tah10n.pocketai.stage7.qa'] };
+    try {
+      expect(collectAndroidEffectiveBuildContext(projectRoot, named)).toMatchObject({ qaPrivateFileAccess: true,
+        applicationId: { value: 'com.github.tah10n.pocketai.stage7.qa', isolatedQa: true, qaInstance: 'stage7' },
+        signing: { mode: 'debug-fallback' } });
+      expect(() => assertAndroidBuildOverrideContract(projectRoot, named)).not.toThrow();
+      const metadata = { toolchains: {}, git: {} };
+      expect(collectBuildProvenance(projectRoot, { ...named, ...metadata }).digest)
+        .not.toBe(collectBuildProvenance(projectRoot, { ...options, ...metadata }).digest);
+      expect(collectPrebuildInputState(projectRoot, named).digest).not.toBe(collectPrebuildInputState(projectRoot, options).digest);
+      fs.mkdirSync(path.join(projectRoot, 'scripts'));
+      const identityHelper = path.join(projectRoot, 'scripts/android-qa-application-id.js');
+      fs.writeFileSync(identityHelper, 'module.exports = { fixture: 1 };');
+      const buildWithHelper = collectBuildProvenance(projectRoot, { ...named, ...metadata }).digest;
+      const prebuildWithHelper = collectPrebuildInputState(projectRoot, named).digest;
+      fs.writeFileSync(identityHelper, 'module.exports = { fixture: 2 };');
+      expect(collectBuildProvenance(projectRoot, { ...named, ...metadata }).digest).not.toBe(buildWithHelper);
+      expect(collectPrebuildInputState(projectRoot, named).digest).not.toBe(prebuildWithHelper);
+      for (const args of [[], options.gradleArgs, ['-PpocketAiApplicationId=com.github.tah10n.pocketai.other.qa'],
+        ['-PpocketAiApplicationId=com.other.stage7.qa']]) {
+        expect(() => collectAndroidEffectiveBuildContext(projectRoot, { ...named, gradleArgs: args })).toThrow(/QA instance/);
+      }
+      for (const patch of [{ EXPO_PUBLIC_ANDROID_QA: '0' }, { POCKET_AI_SHIPPING_BUILD: '1' },
+        { POCKET_AI_ANDROID_QA_INSTANCE: 'stage.7' }]) {
+        expect(() => collectAndroidEffectiveBuildContext(projectRoot, { ...named, env: { ...named.env, ...patch } })).toThrow(/QA instance/);
+      }
+      expect(() => createAndroidShippingBuildEnvironment(projectRoot,
+        { NODE_ENV: 'production', POCKET_AI_ANDROID_QA_INSTANCE: 'stage7' })).toThrow(/reject POCKET_AI_ANDROID_QA_INSTANCE/);
+      fs.writeFileSync(path.join(projectRoot, 'upload.keystore'), 'fixture signing identity');
+      expect(() => collectAndroidEffectiveBuildContext(projectRoot, { ...named, env: { ...named.env,
+        POCKET_AI_UPLOAD_STORE_FILE: path.join(projectRoot, 'upload.keystore'), POCKET_AI_UPLOAD_STORE_PASSWORD: 'fixture',
+        POCKET_AI_UPLOAD_KEY_ALIAS: 'fixture', POCKET_AI_UPLOAD_KEY_PASSWORD: 'fixture' } })).toThrow(/local debug-fallback release signing/);
+    } finally { fs.rmSync(projectRoot, { force: true, recursive: true }); }
+  });
+
   it.each([
     ['production package', {}, [], 'release'],
     ['foreign qa package', {}, ['-PpocketAiApplicationId=com.other.app.qa'], 'release'],

@@ -21,6 +21,7 @@ let mockCurrent: ModelMetadata | undefined; let mockQueue: ModelMetadata[] = [];
 let mockOptions: Record<string, { companionArtifactId?: string }> = {};
 const cache = 'file:///data/user/0/com.github.tah10n.pocketai.qa/cache/';
 const models = 'file:///data/user/0/com.github.tah10n.pocketai.qa/files/models/';
+let mockCache = cache; let mockModels = models;
 jest.mock('expo-file-system/legacy', () => ({
   EncodingType: { Base64: 'base64' }, getInfoAsync: (uri: string) => mockInfo(uri),
   readAsStringAsync: async (uri: string, options: { length: number; position: number }) => {
@@ -33,8 +34,8 @@ jest.mock('react-native-fs', () => ({ __esModule: true, default: { hash: (path: 
 jest.mock('react-native-device-info', () => ({ __esModule: true, default: { getBundleId: () => mockPackage } }));
 jest.mock('../../src/services/AndroidQaDocumentModelBootstrap', () => ({ isAndroidQaDocumentModelBootstrapEnabled: () => mockEnabled }));
 jest.mock('../../src/services/FileSystemSetup', () => ({
-  getAppCacheRootDir: () => 'file:///data/user/0/com.github.tah10n.pocketai.qa/cache/',
-  getModelsDir: () => 'file:///data/user/0/com.github.tah10n.pocketai.qa/files/models/',
+  getAppCacheRootDir: () => mockCache,
+  getModelsDir: () => mockModels,
 }));
 jest.mock('../../src/services/LocalStorageRegistry', () => ({ registry: {
   getModel: () => mockCurrent, updateModel: (...args: unknown[]) => mockRegistryWrite(...args),
@@ -82,7 +83,7 @@ function seed(kind: 'ultravox' | 'neutts' | 'qwen3' = 'ultravox') {
   const profile = TTS_EXECUTION_PROFILES.find(item => item.family === (kind === 'neutts' ? 'neutts' : 'qwen3_tts'))!;
   const sources = kind === 'ultravox' ? [manifest.audioInput.backbone, manifest.audioInput.projector] : [profile.backbone, profile.codec];
   const header = Buffer.alloc(24); header.write('GGUF'); header.writeUInt32LE(3, 4); header.writeUInt32LE(1, 8);
-  for (const source of sources) mockFiles.set(cache + 'stage7-model-fixtures/' + source.sha256 + '.gguf',
+  for (const source of sources) mockFiles.set(mockCache + 'stage7-model-fixtures/' + source.sha256 + '.gguf',
     { size: source.bytes, hash: source.sha256, header: header.toString('base64') });
   return sources;
 }
@@ -90,6 +91,7 @@ const flush = async () => { for (let index = 0; index < 30; index++) await Promi
 beforeEach(() => {
   jest.clearAllMocks(); mockFiles.clear(); mockEnabled = true; mockPackage = 'com.github.tah10n.pocketai.qa';
   mockCurrent = undefined; mockQueue = []; mockOptions = {};
+  mockCache = cache; mockModels = models;
   mockDownloadLease = false; mockResourceLease = false;
   mockRegistryWrite.mockImplementation(() => {
     expect(mockDownloadLease).toBe(true); expect(mockResourceLease).toBe(true);
@@ -111,6 +113,36 @@ test.each(['ultravox', 'neutts', 'qwen3'] as const)('verifies the fixed %s pair 
   expect(mockRegistryWrite).toHaveBeenCalledTimes(1); expect(mockRegistryWrite).toHaveBeenCalledWith(result);
   expect(mockDownloadLease).toBe(false); expect(mockResourceLease).toBe(false);
 });
+
+test.each(['ultravox', 'neutts', 'qwen3'] as const)('keeps the named QA %s seed inside its actual bundle cache under both leases', async kind => {
+  mockPackage = 'com.github.tah10n.pocketai.stage7.qa';
+  mockCache = `file:///data/user/0/${mockPackage}/cache/`;
+  mockModels = `file:///data/user/0/${mockPackage}/files/models/`;
+  const sources = seed(kind);
+  const result = await prepareAndroidQaStage7Seed(kind, desired(kind));
+  expect(result?.localPath).toBe('qa-stage7-' + sources[0].sha256 + '.gguf');
+  expect(mockHash).toHaveBeenCalledTimes(4);
+  expect(mockMove.mock.calls.every(([options]) => options.from.startsWith(mockCache) && options.to.startsWith(mockModels))).toBe(true);
+  expect(mockRegistryWrite).toHaveBeenCalledWith(result);
+  expect(mockDownloadLease).toBe(false); expect(mockResourceLease).toBe(false);
+});
+
+test('rejects the old QA cache when the running bundle is the named instance before any file access', async () => {
+  mockPackage = 'com.github.tah10n.pocketai.stage7.qa'; seed();
+  await expect(prepareAndroidQaStage7Seed('ultravox', desired())).rejects.toThrow('stage7_seed_invalid');
+  expect(mockInfo).not.toHaveBeenCalled(); expect(mockHash).not.toHaveBeenCalled();
+  expect(mockMove).not.toHaveBeenCalled(); expect(mockRegistryWrite).not.toHaveBeenCalled();
+});
+
+test.each(['com.github.tah10n.pocketai', 'com.other.stage7.qa', 'com.github.tah10n.pocketai.other.stage7.qa',
+  'com.github.tah10n.pocketai.Stage7.qa', 'com.github.tah10n.pocketai.stage7.qa\n'])(
+  'does not provision fixtures for unsupported bundle %j', async packageName => {
+    mockPackage = packageName; seed();
+    await expect(prepareAndroidQaStage7Seed('ultravox', desired())).resolves.toBeNull();
+    expect(mockInfo).not.toHaveBeenCalled(); expect(mockHash).not.toHaveBeenCalled();
+    expect(mockRegistryWrite).not.toHaveBeenCalled();
+  },
+);
 
 test('admits the actual registry-normalized projector source while preserving native verification and file leases', async () => {
   seed();

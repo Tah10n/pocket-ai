@@ -32,6 +32,7 @@ const {
   sanitizeAndroidQaText,
 } = require("./android-qa-sanitization");
 const { isCompletePngBuffer } = require("./png-validation");
+const { normalizeAndroidQaInstance, resolveAndroidQaApplicationId } = require("./android-qa-application-id");
 
 const cliOptions = require.main === module ? parseCliOptions(process.argv.slice(2)) : {};
 const projectRoot = path.resolve(__dirname, "..");
@@ -46,6 +47,7 @@ const androidBuildEnvironment = createIsolatedAndroidBuildEnvironment(
   process.env,
   {
     NODE_ENV: androidBuildNodeEnv,
+    ...(cliOptions.qaInstance != null ? { POCKET_AI_ANDROID_QA_INSTANCE: cliOptions.qaInstance } : {}),
     ...(apkVariant === "release"
       ? {
           POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING:
@@ -155,7 +157,8 @@ async function main() {
   const appConfig = readExpoConfig();
   const appPackage = resolveAndroidQaApplicationId(
     appConfig.packageName,
-    cliOptions.isolatedQaInstall
+    cliOptions.isolatedQaInstall,
+    cliOptions.qaInstance ?? androidBuildEnvironment.POCKET_AI_ANDROID_QA_INSTANCE
   );
   const appScheme = appConfig.scheme || "app";
 
@@ -3228,6 +3231,7 @@ function parseCliOptions(argv) {
     autoTarget: false,
     transferMetroOwnership: null,
     isolatedQaInstall: false,
+    qaInstance: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -3260,6 +3264,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--isolated-qa-install") {
       options.isolatedQaInstall = true;
+      continue;
+    }
+
+    if (arg === "--qa-instance") {
+      options.qaInstance = normalizeAndroidQaInstance(readCliValue(argv, ++index, "--qa-instance"));
       continue;
     }
 
@@ -3317,6 +3326,9 @@ function parseCliOptions(argv) {
     throw new Error(`Unknown option: ${arg}`);
   }
 
+  if (options.qaInstance !== null && !options.isolatedQaInstall) {
+    throw new Error("--qa-instance requires --isolated-qa-install.");
+  }
   if (options.keepMetroForeground && options.transferMetroOwnership) {
     throw new Error("--keep-metro-foreground cannot be combined with --transfer-metro-ownership.");
   }
@@ -3351,6 +3363,7 @@ function printHelp() {
   console.log("  --keep-metro-foreground    Keep an owned Metro attached until Ctrl+C");
   console.log("  --clear-metro-cache        Start a fresh Metro and reset its disk cache");
   console.log("  --isolated-qa-install      Install the repository-owned side-by-side .qa package");
+  console.log("  --qa-instance <name>       Select a single lowercase named QA instance (requires isolated QA)");
   console.log("  --transfer-metro-ownership <path> Internal: hand an owned Metro PID to a parent runner");
   console.log("  --apk-variant <variant>    Install debug or release APK (default: debug)");
   console.log("  --target-abi <abi>         Build and verify universal, arm64-v8a, or x86_64");
@@ -3386,14 +3399,6 @@ function parseTargetAbi(value) {
   return normalized;
 }
 
-function resolveAndroidQaApplicationId(defaultApplicationId, isolatedQaInstall = false) {
-  const normalizedDefault = `${defaultApplicationId || ""}`.trim();
-  if (!normalizedDefault) {
-    return null;
-  }
-  return isolatedQaInstall ? `${normalizedDefault}.qa` : normalizedDefault;
-}
-
 function buildGradleAssembleArgs(assembleTask, targetAbi = "universal", options = {}) {
   const normalizedAssembleTask = `${assembleTask || ""}`.trim();
   if (!normalizedAssembleTask) {
@@ -3405,11 +3410,14 @@ function buildGradleAssembleArgs(assembleTask, targetAbi = "universal", options 
     : [normalizedAssembleTask, `-PreactNativeArchitectures=${normalizedTargetAbi}`];
   const defaultApplicationId = readExpoConfig().packageName;
   const requestedApplicationId = `${options.applicationId || defaultApplicationId || ""}`.trim();
-  const isolatedQaApplicationId = `${defaultApplicationId}.qa`;
+  const qaInstance = normalizeAndroidQaInstance(options.qaInstance
+    ?? (options.env || androidBuildEnvironment).POCKET_AI_ANDROID_QA_INSTANCE);
+  const isolatedQaApplicationId = resolveAndroidQaApplicationId(defaultApplicationId, true, qaInstance);
   if (
     !requestedApplicationId
     || !defaultApplicationId
     || ![defaultApplicationId, isolatedQaApplicationId].includes(requestedApplicationId)
+    || (qaInstance !== null && requestedApplicationId !== isolatedQaApplicationId)
   ) {
     throw new Error("Android QA applicationId must be the repository package or its isolated .qa package.");
   }
@@ -3428,7 +3436,7 @@ function assertSmokeBuildOverrideContract(gradleArgs = null, options = {}) {
   const resolvedGradleArgs = gradleArgs || buildGradleAssembleArgs(
     `app:assemble${resolvedVariant[0].toUpperCase()}${resolvedVariant.slice(1)}`,
     resolvedAbi,
-    { applicationId: options.applicationId }
+    { applicationId: options.applicationId, qaInstance: options.qaInstance, env: options.env }
   );
   assertAndroidBuildOverrideContract(options.projectRoot || projectRoot, {
     ...options,

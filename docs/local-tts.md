@@ -51,8 +51,10 @@ CPU configurations. NeuTTS Nano Q4_K_M + NeuCodec Q8_0 selects an actual helper 
 keys are `en-us`; those keys retain separate meanings. German/French catalog entries do not extend
 this English model's language admission. The exact `phonemize@2.0.1` implementation uses bundled
 English IPA data without network, Python or another language model. Input is bounded to 240
-characters, output to 4,096 phoneme characters, with a one-second elapsed-time rejection policy
-and cancellation checks before and after the operation. A synchronous JS operation must settle
+characters and output to 4,096 phoneme characters. Lazy module initialization has a two-second
+budget; conversion and validation retain a separate one-second budget, allowing at most three
+seconds for an admitted cold result. Cancellation is checked before and after each stage.
+Over-budget synchronous calls are rejected after they settle. A synchronous JS operation must settle
 before ownership is released. Applicable builtin reference text is phonemized explicitly because
 the upstream handle and payload branches differ. Third-party notices are available in the preview.
 

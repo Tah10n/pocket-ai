@@ -129,7 +129,9 @@ chat preparation uses 16 kHz, the admitted Qwen reference uses 24 kHz. Native de
 actual frame counts and a 30-second processing deadline are bounded, and admission reserves
 64 MiB of current available memory. This is a conservative reserve, not a measured peak.
 
-Native recorder duration/file limits stop real capture. Backgrounding stops and finalizes a
+Native recorder duration/file limits stop real capture at 29.5 seconds for chat and 7.5 seconds
+for references, leaving a finalization reserve within the 30/eight-second preparation limits.
+Backgrounding stops and finalizes a
 started recording without automatic resume; cancelled preparation or permission requests cannot
 start capture later. A finished interrupted draft can be explicitly reviewed on return. Cancel,
 unmount and chat changes drain native work before deleting their own files. Capture, sample
@@ -146,6 +148,30 @@ The exact Ultravox fixture and native verification status are recorded in the
 [Stage 7 manifest](validation/llama-rn-stage7/audio-input-fixtures.json) and
 [acceptance report](validation/llama-rn-stage7/acceptance.md). Importing a fixture, controlled
 emulator microphone injection and physical acoustic capture have separate evidence scopes.
+
+The C15 physical Android API 34 ARM64 CPU run passed all seven recorder lifecycle cases,
+including background interruption without automatic resume. Both imported input and the actual
+microphone capture matched controlled native audio-input content and drained completion. The
+prepared capture was 16 kHz mono PCM16, 331,766 samples and 20.735375 seconds; independent ASR
+reported 0 errors across 9 reference words with an exact normalized numeric match. These controlled
+native results are separate from the ordinary composer attempts. The first ordinary attempt failed
+host metadata collection after Record, auto-stopped to Ready at about 29.5 seconds and passed
+actual Discard without sound, Attach or Send. A later manual Record was visually confirmed in two
+screenshots and auto-stopped to Ready at about 29.5 seconds. No controlled PC sound was played
+because its handoff missed the host guard. Preview was invoked (Preparing then Ready; Playing
+unobserved), Attach and Send passed, and complete user/assistant messages with an audio attachment
+were observed. This capture has no controlled-content oracle. Cold reopen retained the same thread,
+complete user/assistant messages and audio attachment identities after app force-stop, process
+absence and a new process generation. Eight fresh UI observations showed no recorder sheet, Stop
+control or Recording phase; native owner identity, file-byte identity and cold playback were not
+checked. Regenerate was not run and was not needed for this bounded persistence check. Generated
+speech/reference conditioning remain unverified. The separate bounded privacy
+audit inspected 1,687 application records / 256,959 bytes with zero candidates; that captured-window
+result is not a guarantee for unobserved routes. A second manual window timed out after 408 records
+with zero candidates and confirmed cleanup, so it is incomplete. The third bounded continuous
+window covered manual Send and cold reopen, with 478 records / 75,191 bytes, zero candidates, no
+raw logs retained, explicit audit-stop request and confirmed capture drain. That pass does not cover the earlier
+manual recording.
 
 Diagnostics must not include raw audio payloads. Structured `input_audio.data` values are dropped
 from sanitized diagnostic objects, and local file URLs are redacted.

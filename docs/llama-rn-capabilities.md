@@ -106,13 +106,37 @@ References default to temporary private copies. Explicit consent and Save voice 
 audio/configuration in the existing encrypted store: four voices, 2 MiB each/eight seconds and
 8 MiB total. Handles and embeddings are never saved. Cold opening restores selection without
 capture/synthesis; deletion waits for active leases and preserves borrowed chat files. Temporary
-native cache bytes are unencrypted, bounded, excluded from backup and reconciled after drain.
+decoded/reference PCM and WAV derivatives are plaintext only in bounded app-private cache,
+excluded from backup and removed or reconciled after file leases and native users drain.
 
 See [local speech](local-tts.md), [audio attachments](multimodal-attachments.md),
 [privacy](privacy-disclosures.md), the [Stage 7 manifests and report](validation/llama-rn-stage7/acceptance.md).
 Implementation, source tests, native operation receipts, spoken content and reference resemblance
-retain separate statuses. Stage 7 native acceptance is pending on the implementation source;
-Stage 6 content receipts do not establish it. Physical acoustic recording, Bluetooth, Russian speech
+retain separate statuses. C15 source `6457bb2b970d1b1c7c62d98c745394ec4308c956` passed all seven
+recorder lifecycle cases on physical Android API 34 ARM64 CPU, including background interruption
+with no automatic resume. Imported and actual microphone-recorded audio both matched controlled
+input content and drained completion; independent recorded-word ASR had 0 errors across 9 words
+with an exact normalized numeric match. These controlled native checks remain separate from
+ordinary composer observations and do not establish generated speech or reference conditioning.
+
+The first Neu/jo voice case failed `memory_insufficient` at `tts_admission` before any synthesis
+step or clip export; Qwen was not reached. The first ordinary attempt failed host metadata collection
+after Record, then auto-stopped to Ready at about 29.5 seconds and actual Discard passed. A later
+manual Record was visually confirmed in two screenshots and auto-stopped to Ready at about 29.5
+seconds. No controlled PC sound was played because its handoff missed the host guard. Preview was
+invoked (Preparing then Ready; Playing unobserved), Attach and Send passed, and complete
+user/assistant messages with an audio attachment were observed. This later capture has no controlled
+content oracle. Cold reopen retained the same thread, complete user/assistant messages and audio
+attachment identities after app force-stop, process absence and a new process generation. Eight
+fresh UI observations showed no recorder sheet, Stop control or Recording phase; native owner
+identity, file-byte identity and cold playback were not checked. Regenerate was not run and was not
+needed for this bounded persistence check. The bounded C15 privacy audit
+inspected 1,687 application records and 256,959 bytes with zero candidates and no raw logs retained;
+it covers only that captured window. A second manual window timed out after 408 records with zero
+candidates and confirmed cleanup, so it is incomplete. The third bounded continuous window covered
+manual Send and cold reopen, with 478 records / 75,191 bytes, zero candidates, no raw logs retained,
+explicit audit-stop request and confirmed capture drain. That pass does not cover the earlier manual recording.
+Stage 6 content receipts do not establish Stage 7 acceptance. Bluetooth/USB audio, Russian speech
 and iOS/GPU/NPU execution remain separate unverified scopes.
 
 ## Stage 4 local tools: implementation and verification

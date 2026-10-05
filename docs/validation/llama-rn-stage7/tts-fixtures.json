@@ -1,7 +1,9 @@
 {
   "runtime": "llama.rn/0.13.0-rc.3",
-  "evidenceKind": "source-researched execution contracts; not native acceptance",
-  "sourcePatchSha256": "d796952bfde9d0868d7897cd7b0b8f6d106f75565ace9a6b2503d47c3cdeaf7b",
+  "evidenceKind": "source-researched execution contracts with a scoped admission outcome; not speech/reference acceptance",
+  "sourcePatchSha256": "ac6071d8d49228d6f1473cffe1c0ccdbfe5a0733d32f33924225447d9eb57d28",
+  "testedSourceHead": "6457bb2b970d1b1c7c62d98c745394ec4308c956",
+  "testedApkSha256": "587bf83581ef548dc6f50995c929c6bd46150a04a1d62f8dcb29db10a5c88f95",
   "nativeSpeakerReceiptSourceSha256": "37086c38c42f9f91e2947bd486d845da421d7b848318d9287f52950373065017",
   "nativeTtsBoundsAndDestructorSourceSha256": "dc55dac2ee2da8d49f4a04c2a82f647b4d0ee9e37e3da271dbf9d90ae8129fdb",
   "profiles": [
@@ -13,7 +15,8 @@
       "codec": { "filename": "codec-q8_0.gguf", "bytes": 341719168, "sha256": "9972d7cabd38582f0425ba898abffc6f92166154ce046a4f392654dbdad5fafa" },
       "uniqueArtifactBytes": 551290944,
       "artifactsWithSecondCodecLoadBytes": 893010112,
-      "estimatedPeakBytes": 3967177088, "memoryConfidence": "low; policy estimate, not measured",
+      "estimatedPeakBytes": 3346420096, "memoryConfidence": "low; policy estimate, not measured",
+      "modelGeometry": { "hiddenDimension": 576, "layers": 24, "contextTokens": 4096 },
       "family": "neutts", "promptKind": "neutts", "flow": "tokens",
       "speechLanguages": ["en"], "builtinLanguage": "en-us", "phonemizerLanguage": "en-us",
       "builtinVoices": ["default", "dave", "jo"], "referenceVoice": false,
@@ -21,7 +24,7 @@
       "maxFrames": 800, "generationSteps": 801, "maxPromptTokens": 1536,
       "modelLicense": "NeuTTS Open License v1.0 (conditional commercial use)",
       "codecLicense": "Apache-2.0",
-      "nativeValidation": "not_run in this source record"
+      "nativeValidation": "memory_insufficient at tts_admission before Neu/jo synthesis on physical Android API 34 ARM64 CPU; zero steps and clip exports"
     },
     {
       "id": "qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0",
@@ -38,7 +41,7 @@
       "maxFrames": 200, "generationSteps": 201,
       "reference": { "sampleRate": 24000, "minSamples": 4800, "maxSamples": 192000, "maxSeconds": 8, "speakerRows": 1, "speakerHiddenDimension": 1024, "transcriptUsed": false, "emotionUsed": false },
       "modelAndCodecLicense": "Apache-2.0",
-      "nativeValidation": "not_run in this source record"
+      "nativeValidation": "not_reached; the tested voice flow stopped at Neu/jo admission before the Qwen case"
     }
   ],
   "phonemizer": {

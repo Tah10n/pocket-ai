@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-10-03
+Last updated: 2026-10-05
 
 ## Summary
 
@@ -29,7 +29,8 @@ Auxiliary role selections, explicit companion source bindings, and local compati
 
 Experimental [local speech](local-tts.md) requires an explicit editable-text preview or completed-assistant action. Synthesis, the supported offline phonemizer and playback stay on-device and do not add audio or latent arrays to chat history. Playback stores one unencrypted app-private temporary WAV, at most 1,536,044 bytes, and requires confirmed player disposal before deletion. Editing/changing the source, closing/leaving Chat, backgrounding or private-data reset invalidates speech and clears that clip after native drain; foregrounding does not resume it. Choosing a builtin voice or opening voice controls does not request microphone access or start synthesis.
 
-Recording starts only after explicit Record and the immediately preceding system microphone request.
+Recording starts only after explicit Record. The app checks microphone permission and requests it
+if needed before capture.
 It can create a chat attachment or a temporary voice reference; neither is sent automatically.
 Capture, sample preview and generated speech share one session, with background recording/playback
 and automatic resume disabled. A voice reference requires explicit confirmation of ownership or
@@ -43,11 +44,21 @@ reference PCM and native snapshots are never persisted. Cold opening restores th
 recording, preparing or synthesizing. Delete invalidates selection immediately and waits for
 active leases/native drain before deleting its owned source; borrowed chat attachments are retained.
 
-Native preprocessing and synthesis temporarily need unencrypted files in app-private cache
+Native preprocessing and synthesis temporarily need bounded plaintext PCM/WAV derivatives in app-private cache
 directories `audio-reference/`, `audio-preparation/` and `tts-clips/`. iOS caches are excluded from
 backup, Android auto-backup is disabled, and cold-start/private-reset reconciliation covers the
 reserved files. These temporary bytes and ordinary chat attachment files are not separately
-encrypted. Native and speech-content/reference-conditioning acceptance are recorded separately.
+encrypted. File leases and native users must drain before these owned temporary files are removed.
+Native and speech-content/reference-conditioning acceptance are recorded separately.
+
+The C15 physical Android API 34 recorder run passed all seven lifecycle cases, including
+background interruption without automatic resume; imported and recorded audio-input content
+also passed. The bounded C15 privacy audit inspected 1,687 application records / 256,959 bytes,
+found zero candidates, retained no raw logs and confirmed capture drain. Device records cover
+2026-10-05 14:45:38.274280–15:59:54.542422 UTC; host capture ran 14:43:19.194–16:02:39.496 UTC.
+Those windows are distinct. Earlier forbidden diagnostic candidates remain recorded, and this
+result does not establish unobserved device routes. Recorder/content success and cleanup alone
+are not privacy-audit proof; see the [Stage 7 report](validation/llama-rn-stage7/acceptance.md).
 
 ## Chat attachments
 

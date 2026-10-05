@@ -77,20 +77,27 @@ and returns bounded audio tokens for decoding; the pinned TypeScript flow union 
 
 References are temporary by default and never added to chat automatically. **Save voice** stores
 the original source and a small consent/name/config record in the existing encrypted private store:
-four voices, at most 2 MiB each, at most 8 MiB total. It stores no handles, embeddings or PCM
+four voices, at most 2 MiB/eight seconds each, at most 8 MiB total. It stores no handles, embeddings or PCM
 snapshot. Cold opening restores the saved choice without native initialization or capture.
 Deletion invalidates selection and waits for active leases/native drain; it removes owned source
-copies and preserves borrowed chat files. Native materialization and preprocessing use explicitly
-unencrypted app-private cache files excluded from backup, then remove them after drain.
+copies and preserves borrowed chat files. Temporary decoded/reference PCM and WAV derivatives
+are plaintext only in bounded app-private cache excluded from backup, then removed after the
+active file leases and native owners drain.
 
 Neu's output is one codebook with at most 800 frames, 480 samples per frame at 24 kHz. Qwen's
 output is 16 codebooks with at most 200 frames, 1,920 samples per frame at 24 kHz. The 16-second
 decode bound is retained. Conservative admission includes duplicated codec loading, graph/KV
 reserves, reference PCM/bridge copies and native speaker state; these estimates are not measured
-device fit. [Stage 7 acceptance](validation/llama-rn-stage7/acceptance.md) keeps native, spoken
-content and reference-conditioning evidence separate. Rows, baked and differing WAV hashes are
-not evidence of voice resemblance. Russian speech, physical microphones, Bluetooth and iOS/GPU/NPU
-execution require separate verification.
+device fit. Neu's corrected 576-wide, 24-layer geometry estimates 3,346,420,096 bytes; Qwen's
+estimate remains 8,837,808,576 bytes. In the C15 physical Android API 34 ARM64 CPU voice run,
+the first Neu/jo case failed `memory_insufficient` at `tts_admission`, with zero completed steps
+or clip exports. Qwen was not reached. Neither estimate is a measured peak.
+
+[Stage 7 acceptance](validation/llama-rn-stage7/acceptance.md) keeps native, spoken content and
+reference-conditioning evidence separate. The chat recorder's seven-step physical microphone
+result and recorded-input ASR do not establish generated speech or reference conditioning. Rows,
+baked and differing WAV hashes are not evidence of voice resemblance. Russian speech, reference
+microphone conditioning, Bluetooth/USB and iOS/GPU/NPU execution require separate verification.
 
 The interface is localized in English and Russian. Russian speech is not admitted or verified. The wider language declarations in upstream cards do not extend these application profiles.
 

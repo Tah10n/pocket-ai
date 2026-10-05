@@ -1,7 +1,9 @@
 {
   "schemaVersion": 1,
   "runtimeVersion": "0.13.0-rc.3",
-  "selectionStatus": "source_verified_native_not_run",
+  "selectionStatus": "source_verified_imported_and_recorded_native_input_passed",
+  "testedSourceHead": "6457bb2b970d1b1c7c62d98c745394ec4308c956",
+  "testedApkSha256": "587bf83581ef548dc6f50995c929c6bd46150a04a1d62f8dcb29db10a5c88f95",
   "audioInput": {
     "repository": "ggml-org/ultravox-v0_5-llama-3_2-1b-GGUF",
     "revision": "5390c7c41cbd6f261f7f205fc0c5ae61bbdca650",
@@ -21,7 +23,8 @@
     "backend": "cpu",
     "uniqueWeightBytes": 2178818080,
     "memoryPolicy": "Use the existing model/projector memory admission and validate actual runtime audio support. Weight size is not a peak-memory estimate or device-fit receipt.",
-    "nativeVerification": "not_run"
+    "nativeVerification": "passed for imported and physically recorded input on Android API 34 ARM64 CPU; controlled content matched and both completions drained",
+    "recordedContentVerification": "independent ASR: 0 errors across 9 reference words, WER 0 and exact normalized numeric match; recorded input only, not generated speech or ordinary composer proof"
   },
   "referencePolicy": {
     "maximumSeconds": 8,
@@ -29,7 +32,7 @@
     "qwenReferenceSampleRate": 24000,
     "maximumQwenSamples": 192000,
     "referenceTranscript": "Qwen's pinned encoder does not consume refText; omit it. Neu builtin payload reference phones are handled separately.",
-    "provenance": "Two local Windows SAPI synthetic references and one controlled input clip are pinned in synthetic-inputs.json. No user voice or microphone is used; raw files are not published.",
+    "provenance": "Two local Windows SAPI synthetic references and one controlled input clip are pinned in synthetic-inputs.json. The fixtures contain no user voice. Physical recording verification uses the controlled input clip played externally and the actual microphone; source and captured files are not published.",
     "referenceConditioningVerification": "not_run"
   }
 }

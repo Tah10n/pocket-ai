@@ -154,8 +154,12 @@ export class AudioRecordingService {
         if (!this.current(generation) || AppState.currentState !== 'active') return;
         const audio = await loadAudio();
         if (!this.current(generation) || AppState.currentState !== 'active') return;
-        const permission = await audio.requestRecordingPermissionsAsync();
+        let permission = await audio.getRecordingPermissionsAsync();
         if (!this.current(generation) || AppState.currentState !== 'active') return;
+        if (!permission.granted) {
+          permission = await audio.requestRecordingPermissionsAsync();
+          if (!this.current(generation) || AppState.currentState !== 'active') return;
+        }
         if (!permission.granted) throw new AudioRecordingError(permission.canAskAgain ? 'permission_denied' : 'permission_permanently_denied');
         this.publish({ ...this.state, phase: 'preparing' });
         this.lease = await acquireAudioSession(this.leaseOwner, () => this.cancelAndClear());

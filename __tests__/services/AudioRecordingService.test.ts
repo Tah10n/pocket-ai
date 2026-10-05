@@ -1,6 +1,7 @@
-import { AppState } from 'react-native';
+import { AppState, type AppStateStatus } from 'react-native';
 import { AudioRecordingService, AUDIO_RECORDING_LIMITS } from '../../src/services/AudioRecordingService';
 
+const mockGetPermission = jest.fn();
 const mockPermission = jest.fn();
 const mockMode = jest.fn();
 const mockReleaseLease = jest.fn();
@@ -13,7 +14,8 @@ let mockRecorder: ReturnType<typeof makeRecorder>;
 
 jest.mock('../../src/services/AudioSessionCoordinator', () => ({ acquireAudioSession: (...args: unknown[]) => mockAcquire(...args) }));
 jest.mock('../../src/services/AudioPreparationService', () => ({ waitForAudioPreparationDrain: () => mockPreparationDrain() }));
-jest.mock('expo-audio', () => ({ requestRecordingPermissionsAsync: () => mockPermission(), setAudioModeAsync: () => mockMode(),
+jest.mock('expo-audio', () => ({ getRecordingPermissionsAsync: () => mockGetPermission(),
+  requestRecordingPermissionsAsync: () => mockPermission(), setAudioModeAsync: () => mockMode(),
   AudioQuality: { HIGH: 96 }, IOSOutputFormat: { MPEG4AAC: 'aac' },
   AudioModule: { AudioRecorder: function (...args: unknown[]) { mockConstruct(...args); return mockRecorder; } } }));
 jest.mock('expo-file-system', () => ({
@@ -59,6 +61,7 @@ beforeEach(() => {
   jest.useFakeTimers();
   jest.clearAllMocks(); mockFiles.clear();
   Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'active' });
+  mockGetPermission.mockResolvedValue({ granted: false, canAskAgain: true });
   mockPermission.mockResolvedValue({ granted: true, canAskAgain: true });
   mockMode.mockResolvedValue(undefined);
   mockAcquire.mockResolvedValue({ release: mockReleaseLease });
@@ -84,7 +87,7 @@ it('supports detached external-store callbacks used by the recording sheet', () 
 });
 
 it('requests nothing on construction and publishes recording only after true native status', async () => {
-  expect(mockPermission).not.toHaveBeenCalled(); expect(mockConstruct).not.toHaveBeenCalled();
+  expect(mockGetPermission).not.toHaveBeenCalled(); expect(mockPermission).not.toHaveBeenCalled(); expect(mockConstruct).not.toHaveBeenCalled();
   const startGate = deferred<ReturnType<typeof initial>>();
   mockRecorder.startAsync.mockReturnValueOnce(startGate.promise);
   const work = service.start({ ownerKey: 'chat-a', purpose: 'chat' }); await flush();
@@ -93,6 +96,68 @@ it('requests nothing on construction and publishes recording only after true nat
   expect(service.getState().phase).toBe('recording');
   expect(mockRecorder.prepareAsync).toHaveBeenCalledWith(1, 29.5, AUDIO_RECORDING_LIMITS.chat.sourceBytes);
   expect(mockRecorder.preventAutomaticResume).toBe(true);
+});
+
+it('uses an existing Granted permission without another OS request', async () => {
+  mockGetPermission.mockResolvedValue({ granted: true, canAskAgain: true });
+  await start();
+  expect(mockGetPermission).toHaveBeenCalledTimes(1);
+  expect(mockPermission).not.toHaveBeenCalled();
+  expect(service.getState().phase).toBe('recording');
+  expect(mockRecorder.startAsync).toHaveBeenCalledTimes(1);
+});
+
+it.each([true, false])('late permission query with granted=%s after cancellation cannot ask or record', async granted => {
+  const permission = deferred<{ granted: boolean; canAskAgain: boolean }>();
+  mockGetPermission.mockReturnValueOnce(permission.promise);
+  const work = start(); await flush();
+  expect(service.getState().phase).toBe('requesting-permission');
+  expect(mockGetPermission).toHaveBeenCalledTimes(1);
+  const close = service.cancelAndClear();
+  permission.resolve({ granted, canAskAgain: true }); await work; await close;
+  expect(mockPermission).not.toHaveBeenCalled(); expect(mockAcquire).not.toHaveBeenCalled();
+  expect(mockConstruct).not.toHaveBeenCalled(); expect(service.getState().phase).toBe('idle');
+});
+
+it.each([true, false])('background during a pending permission query with granted=%s cannot ask or record', async granted => {
+  let onAppStateChange!: (state: AppStateStatus) => void;
+  const subscription = jest.spyOn(AppState, 'addEventListener').mockImplementation((_event, listener) => {
+    onAppStateChange = listener;
+    return { remove: jest.fn() };
+  });
+  try {
+    const permission = deferred<{ granted: boolean; canAskAgain: boolean }>();
+    mockGetPermission.mockReturnValueOnce(permission.promise);
+    const work = start(); await flush();
+    expect(mockGetPermission).toHaveBeenCalledTimes(1);
+    Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'background' });
+    onAppStateChange('background');
+    permission.resolve({ granted, canAskAgain: true }); await work;
+    await service.cancelAndClear();
+    expect(mockPermission).not.toHaveBeenCalled(); expect(mockAcquire).not.toHaveBeenCalled();
+    expect(mockConstruct).not.toHaveBeenCalled(); expect(service.getState().phase).toBe('idle');
+  } finally { subscription.mockRestore(); }
+});
+
+it('rechecks AppState after a Granted query even before a background callback arrives', async () => {
+  const permission = deferred<{ granted: boolean; canAskAgain: boolean }>();
+  mockGetPermission.mockReturnValueOnce(permission.promise);
+  const work = start(); await flush();
+  Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'background' });
+  permission.resolve({ granted: true, canAskAgain: true }); await work;
+  expect(mockPermission).not.toHaveBeenCalled(); expect(mockAcquire).not.toHaveBeenCalled();
+  expect(mockConstruct).not.toHaveBeenCalled();
+});
+
+it('a stale caller after the permission query cannot trigger an OS request', async () => {
+  const permission = deferred<{ granted: boolean; canAskAgain: boolean }>();
+  mockGetPermission.mockReturnValueOnce(permission.promise);
+  let current = true;
+  const work = service.start({ ownerKey: 'chat-a', purpose: 'chat', isCurrent: () => current }); await flush();
+  current = false;
+  permission.resolve({ granted: false, canAskAgain: true }); await work;
+  expect(mockPermission).not.toHaveBeenCalled(); expect(mockAcquire).not.toHaveBeenCalled();
+  expect(mockConstruct).not.toHaveBeenCalled(); expect(service.getState().phase).toBe('idle');
 });
 
 it.each([true, false])('handles denied permission with canAskAgain=%s without recorder construction', async canAskAgain => {

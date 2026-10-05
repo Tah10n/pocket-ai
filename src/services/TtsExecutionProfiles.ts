@@ -88,7 +88,8 @@ export const TTS_EXECUTION_PROFILES: readonly TtsExecutionProfile[] = Object.fre
     // reference overhead; existing profiles retain the 512-token admission unchanged.
     maxPromptTokens: 1536, sampleRate: 24000, samplesPerFrame: 480,
     codebooks: 1, codebookSize: 65536, generationSteps: 801, maxFrames: 800,
-    contextTokens: 4096, hiddenDimension: 1024, layers: 32, graphReserveBytes: 768 * MiB,
+    // Pinned GGUF metadata: llama.embedding_length=576 and llama.block_count=24.
+    contextTokens: 4096, hiddenDimension: 576, layers: 24, graphReserveBytes: 768 * MiB,
     sampling: Object.freeze({ temperature: 1, top_k: 50, top_p: 1, penalty_repeat: 1 }),
   }),
   Object.freeze({

@@ -1,5 +1,8 @@
 # Stage 7 audio and reference-voice acceptance
 
+The subsequent [audio interface handoff](ui-handoff.md) records the refreshed physical-device UI,
+its separate APK and manual verification. It does not supersede the native limits below.
+
 Stage 7 remains incomplete. On one physical Android API 34 ARM64 device using CPU execution,
 the recorder lifecycle, imported and recorded audio input, and recorded words passed. The first
 Neu/jo voice case stopped at memory admission before synthesis. A separate manual ordinary capture

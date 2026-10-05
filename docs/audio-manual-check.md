@@ -12,7 +12,7 @@ Use a local Android QA build with downloaded, compatible model resources. Record
 
 ## Read aloud
 
-1. Open **Local speech** in Chat. Text and the current voice summary should be visible without technical controls. Enter “The blue door is open.”
+1. Open **Read aloud** in Chat. Text and the current voice summary should be visible without technical controls. Enter “The blue door is open.”
 2. Expand the voice summary and select an admitted language/voice. The list belongs to the selected model; a displayed language does not prove intelligible speech in that language.
 3. Tap **Create speech** and listen to the complete new sentence. **Starting** is distinct from **Playing**. Stop during generation, create speech again, then Replay the existing clip. Replay must not load the model again.
 4. Paste more than 240 characters: the full draft remains and speech is disabled. Structured text must show the exact input and require explicit review.

@@ -10,10 +10,12 @@ import ru from '../../src/i18n/locales/ru.json';
 
 jest.mock('react-native-css-interop', () => { const mockReact = require('react'); return { createInteropElement: mockReact.createElement }; });
 jest.mock('../../src/components/ui/ScreenShell', () => {
-  const mockReact = require('react'), { View } = require('react-native');
+  const mockReact = require('react'), { View, Pressable } = require('react-native');
   const Container = ({ children, ...props }: any) => mockReact.createElement(View, props, children);
-  return { ScreenModalOverlay: Container, ScreenSheet: Container };
+  const IconButton = (props: any) => mockReact.createElement(Pressable, { ...props, accessibilityRole: 'button' });
+  return { ScreenModalOverlay: Container, ScreenSheet: Container, ScreenCard: Container, ScreenIconButton: IconButton };
 });
+jest.mock('../../src/components/ui/MaterialSymbols', () => ({ MaterialSymbols: () => null }));
 let mockState: AudioRecordingState = { phase: 'idle', durationMillis: 0 };
 const mockListeners = new Set<() => void>();
 jest.mock('../../src/services/AudioRecordingService', () => ({ audioRecordingService: {
@@ -22,19 +24,25 @@ jest.mock('../../src/services/AudioRecordingService', () => ({ audioRecordingSer
   start: jest.fn(), stop: jest.fn(), cancelAndClear: jest.fn(), onBackground: jest.fn(),
 } }));
 jest.mock('../../src/services/AudioPreparationService', () => ({ prepareManagedAudio: jest.fn(), discardPreparedAudio: jest.fn() }));
-const mockPreviewState = { phase: 'stopped', position: 0, duration: 0 };
+let mockPreviewState = { phase: 'stopped', position: 0, duration: 0 };
+const mockPreviewListeners = new Set<() => void>();
 jest.mock('../../src/services/AudioSamplePreviewService', () => ({ audioSamplePreviewService: {
   getState: () => mockPreviewState,
-  subscribe: () => () => undefined, play: jest.fn(), stop: jest.fn(),
+  subscribe: (listener: () => void) => { mockPreviewListeners.add(listener); return () => mockPreviewListeners.delete(listener); },
+  play: jest.fn(), stop: jest.fn(),
 } }));
 const source: RecordedAudio = { uri: 'file:///cache/recording.m4a', byteSize: 1024, durationMillis: 1000,
   container: 'm4a', recorderId: 'native-recorder-1', requestId: 1 };
 const audio: PreparedAudio = { uri: 'file:///cache/audio-preparation/123.wav', sourceSha256: 'a'.repeat(64),
   identity: 'prepared-v1', sampleRate: 16_000, channels: 1, sampleCount: 16_000, durationMs: 1000, sizeBytes: 32_044 };
-function emit(phase: AudioRecordingState['phase'], recording?: RecordedAudio) {
+function emit(phase: AudioRecordingState['phase'], recording?: RecordedAudio, durationMillis = recording?.durationMillis ?? 1000) {
   const request = jest.mocked(audioRecordingService.start).mock.calls.at(-1)?.[0];
-  mockState = { phase, ownerKey: request?.ownerKey, purpose: request?.purpose ?? 'chat', durationMillis: 1000, ...(recording ? { recording } : {}) };
+  mockState = { phase, ownerKey: request?.ownerKey, purpose: request?.purpose ?? 'chat', durationMillis, ...(recording ? { recording } : {}) };
   mockListeners.forEach(listener => listener());
+}
+function emitPreview(phase: string) {
+  mockPreviewState = { ...mockPreviewState, phase };
+  mockPreviewListeners.forEach(listener => listener());
 }
 function deferred<T>() { let resolve!: (value: T) => void; return { promise: new Promise<T>(done => { resolve = done; }), resolve: (value: T) => resolve(value) }; }
 function props(overrides: Partial<React.ComponentProps<typeof AudioRecordingSheet>> = {}) {
@@ -51,6 +59,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockState = { phase: 'idle', durationMillis: 0 };
   mockListeners.clear();
+  mockPreviewState = { phase: 'stopped', position: 0, duration: 0 };
+  mockPreviewListeners.clear();
   Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'active' });
   jest.spyOn(AppState, 'addEventListener').mockImplementation((_event, listener) => {
     background = listener as (state: string) => void;
@@ -82,6 +92,8 @@ it('shows native Starting separately and Stop invalidates a pending real recorde
   fireEvent.press(view.getByTestId('audio-record'));
   await waitFor(() => expect(view.getByTestId('audio-recording-phase').props.children).toBe('audioRecording.phases.starting'));
   expect(view.queryByTestId('audio-record-attach')).toBeNull();
+  expect(view.queryByTestId('audio-record')).toBeNull();
+  expect(view.getByTestId('audio-record-stop')).toBeEnabled();
   const request = jest.mocked(audioRecordingService.start).mock.calls[0][0];
   fireEvent.press(view.getByTestId('audio-record-stop'));
   expect(request.isCurrent?.()).toBe(false);
@@ -193,6 +205,124 @@ it('latches uncertain preparation cleanup and blocks preview/Attach retries', as
   expect(view.getByTestId('audio-recording-error').props.children).toBe('audioRecording.errors.cleanup_failed');
   fireEvent.press(view.getByTestId('audio-record-preview'));
   expect(prepareManagedAudio).toHaveBeenCalledTimes(1);
+});
+
+it('uses native elapsed time and offers only the primary action for each recording phase', async () => {
+  const view = render(<AudioRecordingSheet {...props()} />);
+  expect(view.getByTestId('audio-recording-timer').props.children).toBe('00:00');
+  expect(view.getByTestId('audio-record')).toBeEnabled();
+  expect(view.queryByTestId('audio-record-stop')).toBeNull();
+  expect(view.queryByTestId('audio-record-attach')).toBeNull();
+  expect(view.getByTestId('audio-record-discard').props.accessibilityLabel).toBe('audioRecording.cancel');
+  await primeRecorder(view, 'recording');
+  await act(async () => { emit('recording', undefined, 12_850); });
+  expect(view.getByTestId('audio-recording-timer').props.children).toBe('00:12');
+  expect(view.queryByTestId('audio-record')).toBeNull();
+  expect(view.getByTestId('audio-record-stop')).toBeEnabled();
+  await act(async () => { emit('finalizing', undefined, 12_850); });
+  expect(view.queryByTestId('audio-record')).toBeNull();
+  expect(view.queryByTestId('audio-record-stop')).toBeNull();
+  expect(view.getByTestId('audio-record-finalizing')).toBeDisabled();
+  await act(async () => { emit('ready', { ...source, durationMillis: 13_010 }); });
+  expect(view.getByTestId('audio-recording-timer').props.children).toBe('00:13');
+  expect(view.queryByTestId('audio-record')).toBeNull();
+  expect(view.queryByTestId('audio-record-stop')).toBeNull();
+  expect(view.getByTestId('audio-record-attach')).toBeEnabled();
+  expect(view.getByTestId('audio-record-retake')).toBeEnabled();
+});
+
+it.each(['starting', 'playing'])('replaces preview with its Stop control while the owned sample is %s', async phase => {
+  const view = render(<AudioRecordingSheet {...props()} />);
+  await primeRecorder(view, 'ready', source);
+  fireEvent.press(view.getByTestId('audio-record-preview'));
+  await waitFor(() => expect(audioSamplePreviewService.play).toHaveBeenCalled());
+  await act(async () => { emitPreview(phase); });
+  expect(view.queryByTestId('audio-record-preview')).toBeNull();
+  expect(view.getByTestId('audio-preview-stop')).toBeEnabled();
+  const ownerKey = jest.mocked(audioRecordingService.start).mock.calls[0][0].ownerKey;
+  fireEvent.press(view.getByTestId('audio-preview-stop'));
+  expect(audioSamplePreviewService.stop).toHaveBeenLastCalledWith(ownerKey);
+  await act(async () => { emitPreview('stopped'); });
+  expect(view.queryByTestId('audio-preview-stop')).toBeNull();
+  expect(view.getByTestId('audio-record-preview')).toBeEnabled();
+  expect(audioSamplePreviewService.play).toHaveBeenCalledTimes(1);
+});
+
+it('drains preview, discards the derivative and clears the old source before a new explicit take', async () => {
+  const options = props();
+  const view = render(<AudioRecordingSheet {...options} />);
+  await primeRecorder(view, 'ready', source);
+  fireEvent.press(view.getByTestId('audio-record-preview'));
+  await waitFor(() => expect(audioSamplePreviewService.play).toHaveBeenCalled());
+  const ownerKey = jest.mocked(audioRecordingService.start).mock.calls[0][0].ownerKey;
+  const disposal = deferred<void>();
+  const deletion = deferred<void>();
+  const sourceClear = deferred<void>();
+  jest.mocked(audioSamplePreviewService.stop).mockReturnValueOnce(disposal.promise);
+  jest.mocked(discardPreparedAudio).mockReturnValueOnce(deletion.promise);
+  jest.mocked(audioRecordingService.cancelAndClear).mockReturnValueOnce(sourceClear.promise);
+  await waitFor(() => expect(view.getByTestId('audio-record-retake')).toBeEnabled());
+  fireEvent.press(view.getByTestId('audio-record-retake'));
+  await waitFor(() => expect(audioSamplePreviewService.stop).toHaveBeenLastCalledWith(ownerKey));
+  expect(discardPreparedAudio).not.toHaveBeenCalled();
+  expect(audioRecordingService.cancelAndClear).not.toHaveBeenCalled();
+  expect(audioRecordingService.start).toHaveBeenCalledTimes(1);
+  expect(options.onClose).not.toHaveBeenCalled();
+  await act(async () => { disposal.resolve(); });
+  await waitFor(() => expect(discardPreparedAudio).toHaveBeenCalledWith(audio));
+  expect(audioRecordingService.cancelAndClear).not.toHaveBeenCalled();
+  expect(audioRecordingService.start).toHaveBeenCalledTimes(1);
+  await act(async () => { deletion.resolve(); });
+  await waitFor(() => expect(audioRecordingService.cancelAndClear).toHaveBeenCalledWith(ownerKey));
+  expect(audioRecordingService.start).toHaveBeenCalledTimes(1);
+  await act(async () => { sourceClear.resolve(); emit('idle', undefined, 0); });
+  await waitFor(() => expect(audioRecordingService.start).toHaveBeenCalledTimes(2));
+  expect(jest.mocked(audioRecordingService.start).mock.calls[1][0]).toEqual(expect.objectContaining({ ownerKey, purpose: 'chat' }));
+  expect(options.onAttach).not.toHaveBeenCalled();
+  expect(options.onClose).not.toHaveBeenCalled();
+  const nextSource = { ...source, uri: 'file:///cache/second-take.m4a', recorderId: 'native-recorder-2', requestId: 2 };
+  const nextAudio = { ...audio, uri: 'file:///cache/audio-preparation/second.wav', identity: 'prepared-v2', sourceSha256: 'b'.repeat(64) };
+  jest.mocked(prepareManagedAudio).mockResolvedValueOnce(nextAudio);
+  await act(async () => { emit('ready', nextSource); });
+  await waitFor(() => expect(view.getByTestId('audio-record-attach')).toBeEnabled());
+  fireEvent.press(view.getByTestId('audio-record-attach'));
+  await waitFor(() => expect(options.onAttach).toHaveBeenCalledWith(nextAudio, nextSource, { assertCurrent: expect.any(Function) }));
+  expect(prepareManagedAudio).toHaveBeenLastCalledWith(expect.objectContaining({ sourceUri: nextSource.uri }));
+});
+
+it('closing during Retake drains the source cleanup without starting another microphone', async () => {
+  const options = props();
+  const view = render(<AudioRecordingSheet {...options} />);
+  await primeRecorder(view, 'ready', source);
+  const sourceClear = deferred<void>();
+  jest.mocked(audioRecordingService.cancelAndClear).mockReturnValueOnce(sourceClear.promise);
+  await waitFor(() => expect(view.getByTestId('audio-record-retake')).toBeEnabled());
+  fireEvent.press(view.getByTestId('audio-record-retake'));
+  await waitFor(() => expect(audioRecordingService.cancelAndClear).toHaveBeenCalled());
+  fireEvent.press(view.getByTestId('audio-record-discard'));
+  expect(options.onClose).not.toHaveBeenCalled();
+  await act(async () => { sourceClear.resolve(); });
+  await waitFor(() => expect(options.onClose).toHaveBeenCalled());
+  expect(audioRecordingService.start).toHaveBeenCalledTimes(1);
+  expect(options.onAttach).not.toHaveBeenCalled();
+});
+
+it('blocks Retake and attachment when deleting the old prepared clip cannot be confirmed', async () => {
+  const options = props();
+  const view = render(<AudioRecordingSheet {...options} />);
+  await primeRecorder(view, 'ready', source);
+  fireEvent.press(view.getByTestId('audio-record-preview'));
+  await waitFor(() => expect(audioSamplePreviewService.play).toHaveBeenCalled());
+  jest.mocked(discardPreparedAudio).mockRejectedValueOnce(new Error('native delete refused'));
+  await waitFor(() => expect(view.getByTestId('audio-record-retake')).toBeEnabled());
+  fireEvent.press(view.getByTestId('audio-record-retake'));
+  await waitFor(() => expect(options.onCleanupFailure).toHaveBeenCalled());
+  expect(audioRecordingService.start).toHaveBeenCalledTimes(1);
+  expect(audioRecordingService.cancelAndClear).not.toHaveBeenCalled();
+  expect(view.getByTestId('audio-recording-error').props.children).toBe('audioRecording.errors.cleanup_failed');
+  expect(view.getByTestId('audio-record-retake')).toBeDisabled();
+  expect(view.getByTestId('audio-record-attach')).toBeDisabled();
+  expect(view.getByTestId('audio-record-preview')).toBeDisabled();
 });
 
 it('localizes every recorder phase and native failure in both languages', () => {

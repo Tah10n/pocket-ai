@@ -1357,7 +1357,7 @@
     "saveLoadProfile": "Save load profile"
   },
   "tts": {
-    "title": "Local speech",
+    "title": "Read aloud",
     "speakAnswer": "Speak answer",
     "experimental": "Experimental local speech. Stopping may wait for native decoding and cleanup.",
     "researchOnly": "BlueMagpie is for local research and evaluation. Do not publish generated audio.",
@@ -1373,7 +1373,7 @@
     "checkFiles": "Check files",
     "filesChecked": "Files checked. Synthesis, playback and content accuracy are separate checks.",
     "openModels": "Choose model and codec",
-    "synthesize": "Synthesize and play",
+    "synthesize": "Create speech",
     "play": "Play",
     "pause": "Pause",
     "stop": "Stop",
@@ -1433,15 +1433,15 @@
     },
     "voiceMode": "Voice",
     "modes": {
-      "speakerless": "Model voice",
-      "builtin": "Built-in voice",
-      "reference": "Reference voice"
+      "speakerless": "Default",
+      "builtin": "Built-in",
+      "reference": "My sample"
     },
     "localPhonemizer": "English IPA is prepared locally with packaged rules and dictionaries.",
     "neuttsLicense": "NeuTTS has a conditional open license. Review the model license before commercial use.",
-    "referenceInfo": "Use a WAV, MP3 or M4A sample of your own voice, or a voice you have permission to use. Maximum 8 seconds and 2 MiB. Temporary samples are removed when this sheet closes.",
+    "referenceInfo": "Use a voice you own or have permission to use. Up to 8 seconds and 2 MiB. Temporary samples are removed when this screen closes.",
     "recordReference": "Record sample",
-    "importReference": "Import sample",
+    "importReference": "Choose audio file",
     "temporaryReference": "Temporary sample · {{seconds}} seconds",
     "previewReference": "Play sample",
     "removeReference": "Remove sample",
@@ -1455,7 +1455,20 @@
       "eager": "Prepare voice first",
       "lazy": "Prepare voice when used"
     },
-    "phonemizerNotices": "Phonemizer licenses and notices"
+    "phonemizerNotices": "Phonemizer licenses and notices",
+    "subtitle": "Write, choose a voice, and listen.",
+    "language": "Language",
+    "chooseModel": "Choose a speech model",
+    "sampleHint": "Record or choose a clear voice sample. Up to 8 seconds and 2 MiB; WAV, MP3 or M4A.",
+    "temporaryHint": "This sample is temporary and is removed when you close this screen.",
+    "saveForLater": "Save this voice for later",
+    "savedVoices": "Saved voices",
+    "sampleSelected": "Voice sample",
+    "sampleRequired": "Choose a voice sample and confirm permission before creating speech.",
+    "advanced": "Advanced settings",
+    "voicePreparation": "Voice preparation",
+    "listen": "Listen",
+    "createAgain": "Create new audio"
   },
   "audioRecording": {
     "title": "Record audio for chat",
@@ -1463,7 +1476,7 @@
     "record": "Record audio",
     "stop": "Stop recording",
     "preview": "Preview",
-    "stopPreview": "Stop preview",
+    "stopPreview": "Stop",
     "attach": "Attach to chat",
     "useSample": "Use sample",
     "discard": "Discard and close",
@@ -1502,6 +1515,13 @@
       "file_invalid": "The recorded file is empty or invalid.",
       "release_failed": "Audio resources could not be safely cleared. Further recording is blocked.",
       "storage_failed": "Audio resources could not be safely cleared. Further recording is blocked."
-    }
+    },
+    "cancel": "Cancel recording",
+    "cancelHint": "Close and discard this recording. Nothing is attached.",
+    "chatHint": "Record a short message, then listen or attach it.",
+    "referenceHint": "Record a clear sample to use as a voice.",
+    "limit": "Up to {{seconds}} seconds",
+    "readyHint": "Listen to this take or use it below.",
+    "retake": "Record again"
   }
 }

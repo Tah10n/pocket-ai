@@ -120,6 +120,7 @@ import {
     armAndroidQaGenerationGate,
     getAndroidQaGenerationEvidenceSnapshot,
     isAndroidQaGenerationEvidenceEnabled,
+    isAndroidQaUiControlsVisible,
     subscribeAndroidQaGenerationEvidence,
 } from '../../services/AndroidQaGenerationEvidence';
 import {
@@ -883,7 +884,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
             />
             {!isTtsPreviewOpen ? <View accessible collapsable={false} testID="chat-qa-tts-playback-state"
                 accessibilityLabel={getTtsQaPlaybackMarker(ttsPlaybackState)} style={styles.androidQaEvidenceMarker} /> : null}
-            <View style={styles.androidQaEvidenceActions}>
+            {isAndroidQaUiControlsVisible() ? <View style={styles.androidQaEvidenceActions}>
                 {isAndroidQaDocumentModelBootstrapEnabled() ? (
                     <>
                         <Button
@@ -1027,7 +1028,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                         </Button>
                     </>
                 ) : null}
-            </View>
+            </View> : null}
             {Platform.OS === 'android' ? (
                 <>
                     <View

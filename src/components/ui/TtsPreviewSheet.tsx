@@ -9,7 +9,8 @@ import { Pressable } from './pressable';
 import { ScrollView } from './scroll-view';
 import { Input, InputField } from './input';
 import { Button, ButtonText } from './button';
-import { ScreenModalOverlay, ScreenSheet } from './ScreenShell';
+import { ScreenCard, ScreenIconButton, ScreenModalOverlay, ScreenPressableCard, ScreenSegmentedControl, ScreenSheet } from './ScreenShell';
+import { MaterialSymbols } from './MaterialSymbols';
 import { getTtsSelectionStatus, ttsService, type TtsRequest, type TtsServiceState } from '../../services/TtsService';
 import { isAndroidQaGenerationEvidenceEnabled } from '../../services/AndroidQaGenerationEvidence';
 import { subscribeSettings } from '../../services/SettingsStore';
@@ -66,6 +67,10 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
   const [recording, setRecording] = useState(false);
   const [bake, setBake] = useState<'lazy' | 'eager'>('eager');
   const [showNotices, setShowNotices] = useState(false);
+  const [showVoiceOptions, setShowVoiceOptions] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showSaveVoice, setShowSaveVoice] = useState(false);
+  const [showExactPreview, setShowExactPreview] = useState(false);
   const [referencePreviewOwner] = useState(() => 'tts-reference-preview:' + Date.now() + ':' + Math.random());
   const temporaryOwner = useRef<TemporaryReferenceSource | undefined>(undefined);
   const previewDerivative = useRef<PreparedAudio | undefined>(undefined);
@@ -224,6 +229,8 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
       temporaryOwner.current = next;
       setTemporary(next);
       setConsent(false);
+      setShowSaveVoice(false);
+      setVoiceName('');
       referenceVoiceStore.select(null);
       ++voiceRevision.current;
     } catch (failure) { await next.release(); throw failure; }
@@ -239,6 +246,12 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
     void clear().catch(() => undefined);
   };
 
+  const languageLabel = (value: string) => value === 'en' ? t('tts.english') : value === 'zh-tw' ? t('tts.mandarin') : value;
+  const builtinLabel = (value: string) => value === 'default' ? t('tts.modes.speakerless') : value.charAt(0).toUpperCase() + value.slice(1);
+  const voiceLabel = voiceMode === 'builtin' ? builtinLabel(builtinVoice) : voiceMode === 'reference'
+    ? selectedSavedVoice?.name ?? t(temporary ? 'tts.sampleSelected' : 'tts.modes.reference') : t('tts.modes.speakerless');
+  const speechActive = Boolean(state.phase && !['ready', 'stopped', 'error'].includes(state.phase));
+
   return (
     <Modal visible transparent animationType="fade" onRequestClose={() => close(onClose)}>
       <ScreenModalOverlay>
@@ -247,25 +260,49 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
           {isAndroidQaGenerationEvidenceEnabled() ? <View accessible collapsable={false}
             testID="chat-qa-tts-playback-state" accessibilityLabel={getTtsQaPlaybackMarker(state)}
             style={{ height: 1, width: 1 }} /> : null}
-          {/* Measured viewport height bounds scrolling on small displays. */}
-          <ScrollView style={{ maxHeight: height * 0.72 }} keyboardShouldPersistTaps="handled">
-            <Box className="gap-3">
-              <Box className="flex-row items-center justify-between gap-3">
-                <Text className="text-lg font-semibold">{t('tts.title')}</Text>
-                <Button action="secondary" size="sm" onPress={() => close(onClose)} testID="tts-close">
-                  <ButtonText>{t('common.close')}</ButtonText>
+          <Box className="flex-row items-center justify-between gap-3 pb-3">
+            <Box className="flex-1 gap-1"><Text className="text-xl font-semibold">{t('tts.title')}</Text>
+              <Text colorRole="secondary">{t('tts.subtitle')}</Text></Box>
+            <ScreenIconButton iconName="close" testID="tts-close" accessibilityLabel={t('common.close')} onPress={() => close(onClose)} />
+          </Box>
+          <ScrollView style={{ maxHeight: height * 0.6, flexShrink: 1 }} keyboardShouldPersistTaps="handled">
+            <Box className="gap-4 pb-3">
+              <ScreenCard variant="inset" className="gap-2">
+                <Text className="font-semibold">{t('tts.editText')}</Text>
+              <Input><InputField testID="tts-text-input" multiline value={draft} onChangeText={changeText}
+                accessibilityLabel={t('tts.editText')} placeholder={t('tts.editText')} className="min-h-28 px-3 py-3" /></Input>
+              <Text colorRole={tooLong ? 'danger' : 'secondary'}>{t('tts.characters', {
+                count: prepared?.text.length ?? draft.length, max: TTS_LIMITS.textCharacters,
+              })}</Text>
+              {tooLong ? <Text colorRole="danger">{t('tts.errors.input_too_large')}</Text> : null}
+              <Pressable testID="tts-exact-toggle" className="min-h-12 flex-row items-center justify-between gap-3"
+                accessibilityRole="button" accessibilityState={{ expanded: needsReview || tooLong || showExactPreview }} onPress={() => setShowExactPreview(value => !value)}>
+                <Text colorRole="secondary">{t('tts.exactPreview')}</Text><MaterialSymbols name={needsReview || tooLong || showExactPreview ? 'expand-less' : 'expand-more'} colorRole="secondary" />
+              </Pressable>
+              {needsReview || tooLong || showExactPreview ? <Text selectable testID="tts-exact-preview">{prepared?.text ?? ''}</Text> : null}
+              {needsReview ? <Box className="gap-2">
+                <Text colorRole="warning">{t('tts.review.' + reason)}</Text>
+                <Button action="secondary" size="sm" testID="tts-confirm-review" onPress={() => setReviewed(value => !value)}>
+                  <ButtonText>{t(reviewed ? 'tts.reviewConfirmed' : 'tts.confirmReview')}</ButtonText>
                 </Button>
-              </Box>
-              <Text colorRole="secondary">{t('tts.experimental')}</Text>
-              <Text>{selection.modelName ?? t('tts.errors.selection_missing')}</Text>
-              {selection.profileId?.startsWith('bluemagpie') ? <Text colorRole="warning">{t('tts.researchOnly')}</Text> : null}
-              <Text colorRole="secondary">{t('tts.noRussianClaim')}</Text>
-              {selection.profileId?.startsWith('neutts') ? <Text colorRole="warning">{t('tts.neuttsLicense')}</Text> : null}
-              {selection.requiredBytes ? <Text colorRole="secondary">{t('tts.memoryEstimate', {
-                gb: (selection.requiredBytes / (1024 ** 3)).toFixed(1),
-              })}</Text> : null}
+              </Box> : null}
+
+              </ScreenCard>
+              <ScreenPressableCard testID="tts-voice-options" padding="compact" accessibilityRole="button"
+                accessibilityLabel={selection.errorCode === 'selection_missing' ? t('tts.chooseModel') : undefined}
+                accessibilityState={{ expanded: showVoiceOptions }} onPress={() => {
+                  if (selection.errorCode === 'selection_missing') close(onOpenModels);
+                  else setShowVoiceOptions(value => !value);
+                }}>
+                <Box className="flex-row items-center gap-3"><MaterialSymbols name="record-voice-over" colorRole="accent" />
+                  <Box className="flex-1 gap-1"><Text className="font-semibold">{voiceLabel}</Text>
+                    <Text colorRole="secondary">{languageLabel(language)} · {selection.modelName ?? t('tts.chooseModel')}</Text></Box>
+                  <MaterialSymbols name={showVoiceOptions ? 'expand-less' : 'expand-more'} colorRole="secondary" /></Box>
+              </ScreenPressableCard>
+              {showVoiceOptions ? <Box testID="tts-voice-options-content" className="gap-3">
+                <Text className="font-semibold">{t('tts.language')}</Text>
               <Box className="flex-row flex-wrap gap-2">
-                {(selection.languages ?? []).map(value => <Button key={value} size="sm" action={language === value ? 'primary' : 'secondary'}
+                {(selection.languages ?? []).map(value => <Button key={value} size="sm" disabled={clearing || fatalCleanup} action={language === value ? 'primary' : 'secondary'}
                   accessibilityState={{ selected: language === value }} testID={'tts-language-' + value}
                   onPress={() => {
                     if (value !== language) ++restoreVersion.current;
@@ -273,39 +310,29 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
                     setReviewed(false);
                     void clear().catch(() => undefined);
                   }}>
-                  <ButtonText>{t(value === 'zh-tw' ? 'tts.mandarin' : 'tts.english')}</ButtonText>
+                  <ButtonText>{languageLabel(value)}</ButtonText>
                 </Button>)}
               </Box>
-              <Text className="font-semibold">{t('tts.voiceMode')}</Text>
-              <Box className="flex-row flex-wrap gap-2">
-                {(selection.voiceModes ?? ['speakerless']).map(mode => <Button key={mode} size="sm"
-                  testID={'tts-mode-' + mode} action={voiceMode === mode ? 'primary' : 'secondary'}
-                  accessibilityState={{ selected: voiceMode === mode }} disabled={clearing || fatalCleanup}
-                  onPress={() => { ++voiceRevision.current; setVoiceMode(mode); void clear().catch(() => undefined); }}>
-                  <ButtonText>{t('tts.modes.' + mode)}</ButtonText>
-                </Button>)}
-              </Box>
+
+              {(selection.voiceModes ?? ['speakerless']).length > 1 ? <ScreenSegmentedControl
+                activeKey={voiceMode} disabled={clearing || fatalCleanup} testID="tts-voice-modes"
+                options={(selection.voiceModes ?? ['speakerless']).map(mode => ({ key: mode, label: t('tts.modes.' + mode), testID: 'tts-mode-' + mode }))}
+                onChange={value => { const mode = value as typeof voiceMode; ++voiceRevision.current; setVoiceMode(mode); void clear().catch(() => undefined); }} /> : null}
               {voiceMode === 'builtin' ? <Box className="gap-2">
-                <Text colorRole="secondary">{t('tts.localPhonemizer')}</Text>
-                <Button size="sm" action="secondary" onPress={() => setShowNotices(value => !value)}>
-                  <ButtonText>{t('tts.phonemizerNotices')}</ButtonText>
-                </Button>
-                {showNotices ? <Text selectable>{phonemizerNotices.notices.map(item => item.component + '\n' + item.license).join('\n\n')}</Text> : null}
-                <Box className="flex-row flex-wrap gap-2">{(selection.builtinVoices ?? []).map(voice => <Button key={voice}
-                  size="sm" testID={'tts-builtin-' + voice} action={builtinVoice === voice ? 'primary' : 'secondary'}
-                  accessibilityState={{ selected: builtinVoice === voice }} disabled={clearing || fatalCleanup}
+                <Box className="gap-2">{(selection.builtinVoices ?? []).map(voice => <ScreenPressableCard key={voice} padding="compact"
+                  accessibilityRole="radio" testID={'tts-builtin-' + voice} tone={builtinVoice === voice ? 'accent' : 'default'}
+                  accessibilityState={{ checked: builtinVoice === voice, selected: builtinVoice === voice }} disabled={clearing || fatalCleanup}
                   onPress={() => { ++voiceRevision.current; setBuiltinVoice(voice); void clear().catch(() => undefined); }}>
-                  <ButtonText>{voice}</ButtonText>
-                </Button>)}</Box>
+                  <Box className="flex-row items-center justify-between gap-3">
+                    <Text className="font-semibold">{builtinLabel(voice)}</Text>
+                    <MaterialSymbols name={builtinVoice === voice ? 'radio-button-checked' : 'radio-button-unchecked'} colorRole={builtinVoice === voice ? 'accent' : 'secondary'} />
+                  </Box>
+                </ScreenPressableCard>)}</Box>
+
               </Box> : null}
+
               {voiceMode === 'reference' ? <Box className="gap-2">
-                <Text colorRole="secondary">{t('tts.referenceInfo')}</Text>
-                <Box className="flex-row flex-wrap gap-2">{(['eager', 'lazy'] as const).map(value => <Button key={value}
-                  size="sm" action={bake === value ? 'primary' : 'secondary'} disabled={clearing || fatalCleanup}
-                  testID={'tts-bake-' + value} accessibilityState={{ selected: bake === value }}
-                  onPress={() => { ++voiceRevision.current; setBake(value); void clear().catch(() => undefined); }}>
-                  <ButtonText>{t('tts.bake.' + value)}</ButtonText>
-                </Button>)}</Box>
+                <Text colorRole="secondary">{t('tts.sampleHint')}</Text>
                 <Box className="flex-row flex-wrap gap-2">
                   <Button size="sm" action="secondary" disabled={blocked} testID="tts-reference-record"
                     onPress={() => {
@@ -342,8 +369,8 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
                       }
                     }, 'reference_invalid')}><ButtonText>{t('tts.importReference')}</ButtonText></Button>
                 </Box>
-                {temporary ? <Box className="gap-2">
-                  <Text>{t('tts.temporaryReference', { seconds: (temporary.durationMs / 1000).toFixed(1) })}</Text>
+                {temporary && !selectedSavedVoice ? <ScreenCard variant="inset" className="gap-3">
+                  <Text className="font-semibold">{t('tts.temporaryReference', { seconds: (temporary.durationMs / 1000).toFixed(1) })}</Text>
                   <Button size="sm" action="secondary" disabled={blocked} testID="tts-reference-preview"
                     onPress={() => void invoke(async () => {
                       const captured = revision.current;
@@ -376,10 +403,17 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
                       ++voiceRevision.current; await clear(); await temporaryOwner.current?.release();
                       temporaryOwner.current = undefined; setTemporary(undefined); setConsent(false);
                     }, 'storage_failed')}><ButtonText>{t('tts.removeReference')}</ButtonText></Button>
-                  <Button size="sm" action="secondary" disabled={clearing || fatalCleanup} testID="tts-reference-consent"
+                  <Pressable className="min-h-12 flex-row items-center gap-3 py-2" accessibilityRole="checkbox" disabled={clearing || fatalCleanup} testID="tts-reference-consent"
                     accessibilityState={{ checked: consent }} onPress={() => { ++voiceRevision.current; setConsent(value => !value); void clear().catch(() => undefined); }}>
-                    <ButtonText>{t(consent ? 'tts.consentConfirmed' : 'tts.referenceConsent')}</ButtonText>
-                  </Button>
+                    <MaterialSymbols name={consent ? 'check-box' : 'check-box-outline-blank'} colorRole={consent ? 'accent' : 'secondary'} />
+                    <Text className="flex-1">{t('tts.referenceConsent')}</Text>
+                  </Pressable>
+                  <Text colorRole="secondary">{t('tts.temporaryHint')}</Text>
+                  <Pressable testID="tts-save-options" className="min-h-12 flex-row items-center justify-between gap-3 py-2"
+                    accessibilityRole="button" accessibilityState={{ expanded: showSaveVoice }} onPress={() => setShowSaveVoice(value => !value)}>
+                    <Text>{t('tts.saveForLater')}</Text><MaterialSymbols name={showSaveVoice ? 'expand-less' : 'expand-more'} colorRole="secondary" />
+                  </Pressable>
+                  {showSaveVoice ? <Box className="gap-2">
                   <Input><InputField value={voiceName} onChangeText={setVoiceName} maxLength={60}
                     testID="tts-reference-name" placeholder={t('tts.voiceName')} accessibilityLabel={t('tts.voiceName')} /></Input>
                   <Button size="sm" action="secondary" disabled={blocked || !consent || !voiceName.trim()} testID="tts-reference-save"
@@ -390,39 +424,75 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
                         consent: true, language }, { assertCurrent: () => assertReferenceCurrent(captured) });
                       assertReferenceCurrent(captured); referenceVoiceStore.select(voice.id); ++voiceRevision.current;
                     }, 'storage_failed')}><ButtonText>{t('tts.saveReference')}</ButtonText></Button>
-                </Box> : null}
-                {saved.voices.map(voice => <Box key={voice.id} className="flex-row flex-wrap gap-2">
-                  <Button size="sm" action={saved.selectedVoiceId === voice.id ? 'primary' : 'secondary'} disabled={clearing || fatalCleanup}
+                  </Box> : null}
+                </ScreenCard> : null}
+                {saved.voices.length ? <Text className="font-semibold">{t('tts.savedVoices')}</Text> : null}
+                {saved.voices.map(voice => <Box key={voice.id} className="gap-2">
+                  <ScreenPressableCard padding="compact" accessibilityRole="radio" accessibilityState={{ checked: saved.selectedVoiceId === voice.id, selected: saved.selectedVoiceId === voice.id }}
+                    tone={saved.selectedVoiceId === voice.id ? 'accent' : 'default'} disabled={clearing || fatalCleanup}
                     testID={'tts-saved-' + voice.id} onPress={() => {
                       ++voiceRevision.current; referenceVoiceStore.select(voice.id); void clear().catch(() => undefined);
-                    }}><ButtonText>{voice.name}</ButtonText></Button>
-                  <Button size="sm" action="secondary" disabled={blocked} testID={'tts-delete-' + voice.id}
+                    }}><Box className="flex-row items-center justify-between gap-3"><Text className="font-semibold flex-1">{voice.name}</Text>
+                      <MaterialSymbols name={saved.selectedVoiceId === voice.id ? 'radio-button-checked' : 'radio-button-unchecked'} colorRole="secondary" />
+                    </Box></ScreenPressableCard>
+                  {saved.selectedVoiceId === voice.id ? <Button size="sm" action="softDestructive" disabled={blocked} testID={'tts-delete-' + voice.id}
                     onPress={() => void invoke(async () => { ++voiceRevision.current; await clear(); await referenceVoiceStore.delete(voice.id); }, 'storage_failed')}>
                     <ButtonText>{t('tts.deleteReference')}</ButtonText>
-                  </Button>
+                  </Button> : null}
                 </Box>)}
                 {temporary && selectedSavedVoice ? <Button size="sm" action="secondary" disabled={blocked}
                   onPress={() => { ++voiceRevision.current; referenceVoiceStore.select(null); void clear().catch(() => undefined); }}>
                   <ButtonText>{t('tts.useTemporary')}</ButtonText></Button> : null}
               </Box> : null}
-              <Input><InputField testID="tts-text-input" multiline value={draft} onChangeText={changeText}
-                accessibilityLabel={t('tts.editText')} placeholder={t('tts.editText')} className="min-h-28 px-3 py-3" /></Input>
-              <Text colorRole={tooLong ? 'danger' : 'secondary'}>{t('tts.characters', {
-                count: prepared?.text.length ?? draft.length, max: TTS_LIMITS.textCharacters,
-              })}</Text>
-              {tooLong ? <Text colorRole="danger">{t('tts.errors.input_too_large')}</Text> : null}
-              <Text className="font-semibold">{t('tts.exactPreview')}</Text>
-              <Text selectable testID="tts-exact-preview">{prepared?.text ?? ''}</Text>
-              {needsReview ? <Box className="gap-2">
-                <Text colorRole="warning">{t('tts.review.' + reason)}</Text>
-                <Button action="secondary" size="sm" testID="tts-confirm-review" onPress={() => setReviewed(value => !value)}>
-                  <ButtonText>{t(reviewed ? 'tts.reviewConfirmed' : 'tts.confirmReview')}</ButtonText>
-                </Button>
+
               </Box> : null}
-              {error ? <Text testID="tts-error" colorRole="danger" accessibilityLiveRegion="polite">{t('tts.errors.' + error)}</Text> : null}
-              {state.phase ? <Text testID="tts-phase" accessibilityLiveRegion="polite">{t('tts.phases.' + state.phase)}</Text> : null}
-              {filesChecked ? <Text testID="tts-files-checked" colorRole="secondary">{t('tts.filesChecked')}</Text> : null}
+              {audioReady ? <ScreenCard variant="inset" className="gap-3">
+                <Text className="font-semibold">{t('tts.listen')}</Text>
               <Box className="flex-row flex-wrap gap-2">
+                {audioReady && state.phase !== 'playing' ? <Button size="sm" action="secondary" testID="tts-play" disabled={blocked}
+                  onPress={() => void invoke(() => ttsService.play(), 'playback_failed')}><ButtonText>{t('tts.play')}</ButtonText></Button> : null}
+                {state.phase === 'playing' ? <Button size="sm" action="secondary" testID="tts-pause"
+                  onPress={() => void invoke(() => ttsService.pause(), 'playback_failed')}><ButtonText>{t('tts.pause')}</ButtonText></Button> : null}
+                {audioReady ? <Button size="sm" action="secondary" testID="tts-replay" disabled={blocked}
+                  onPress={() => void invoke(() => ttsService.replay(), 'playback_failed')}><ButtonText>{t('tts.replay')}</ButtonText></Button> : null}
+              </Box>
+              {typeof state.duration === 'number' ? <Text colorRole="secondary">{t('tts.progress', {
+                position: (state.position ?? 0).toFixed(1), duration: state.duration.toFixed(1),
+              })}</Text> : null}
+              </ScreenCard> : null}
+
+              {error ? <ScreenCard tone="error" padding="compact" className="gap-2">
+                <Text testID="tts-error" colorRole="danger" accessibilityLiveRegion="polite">{t('tts.errors.' + error)}</Text>
+                {['selection_missing', 'files_missing', 'memory_insufficient', 'codec_incompatible', 'profile_unverified'].includes(error)
+                  ? <Button action="secondary" testID="tts-error-models" onPress={() => close(onOpenModels)}><ButtonText>{t('tts.openModels')}</ButtonText></Button> : null}
+              </ScreenCard> : null}
+              {voiceMode === 'reference' && !referenceReady ? <Text colorRole="secondary">{t('tts.sampleRequired')}</Text> : null}
+              <Pressable testID="tts-advanced-toggle" accessibilityRole="button" accessibilityState={{ expanded: showAdvanced }}
+                className="min-h-12 flex-row items-center justify-between gap-3" onPress={() => setShowAdvanced(value => !value)}>
+                <Text colorRole="secondary">{t('tts.advanced')}</Text><MaterialSymbols name={showAdvanced ? 'expand-less' : 'expand-more'} colorRole="secondary" />
+              </Pressable>
+              {showAdvanced ? <ScreenCard variant="inset" className="gap-3" testID="tts-advanced-content">
+                <Text colorRole="secondary">{t('tts.experimental')}</Text>
+              {selection.profileId?.startsWith('bluemagpie') ? <Text colorRole="warning">{t('tts.researchOnly')}</Text> : null}
+              <Text colorRole="secondary">{t('tts.noRussianClaim')}</Text>
+              {selection.profileId?.startsWith('neutts') ? <Text colorRole="warning">{t('tts.neuttsLicense')}</Text> : null}
+              {selection.requiredBytes ? <Text colorRole="secondary">{t('tts.memoryEstimate', {
+                gb: (selection.requiredBytes / (1024 ** 3)).toFixed(1),
+              })}</Text> : null}
+
+                {voiceMode === 'builtin' ? <Box className="gap-2"><Text colorRole="secondary">{t('tts.localPhonemizer')}</Text>
+                  <Button action="secondary" onPress={() => setShowNotices(value => !value)}><ButtonText>{t('tts.phonemizerNotices')}</ButtonText></Button>
+                  {showNotices ? <Text selectable>{phonemizerNotices.notices.map(item => item.component + '\n' + item.license).join('\n\n')}</Text> : null}</Box> : null}
+                {voiceMode === 'reference' ? <Box className="gap-2"><Text className="font-semibold">{t('tts.voicePreparation')}</Text>
+                <Box className="flex-row flex-wrap gap-2">{(['eager', 'lazy'] as const).map(value => <Button key={value}
+                  size="sm" action={bake === value ? 'primary' : 'secondary'} disabled={clearing || fatalCleanup}
+                  testID={'tts-bake-' + value} accessibilityState={{ selected: bake === value }}
+                  onPress={() => { ++voiceRevision.current; setBake(value); void clear().catch(() => undefined); }}>
+                  <ButtonText>{t('tts.bake.' + value)}</ButtonText>
+                </Button>)}</Box>
+
+                </Box> : null}
+                <Box className="flex-row flex-wrap gap-2">
                 <Button action="secondary" size="sm" testID="tts-check-files" disabled={blocked || Boolean(selection.errorCode)}
                   onPress={() => void invoke(async () => {
                     const captured = revision.current;
@@ -432,7 +502,20 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
                 <Button action="secondary" size="sm" onPress={() => close(onOpenModels)}>
                   <ButtonText>{t('tts.openModels')}</ButtonText>
                 </Button>
-                <Button testID="tts-synthesize" disabled={blocked || Boolean(selection.errorCode) || Boolean(inputError)
+
+                </Box>
+                {filesChecked ? <Text testID="tts-files-checked" colorRole="secondary">{t('tts.filesChecked')}</Text> : null}
+              </ScreenCard> : null}
+            </Box>
+          </ScrollView>
+          <Box className="gap-2 pt-3">
+            {state.phase ? <Text testID="tts-phase" colorRole="secondary" accessibilityLiveRegion="polite">{t('tts.phases.' + state.phase)}</Text> : null}
+            {speechActive ? <Box>
+                <Button size="lg" className="w-full" action="primary" testID="tts-stop" onPress={() => {
+                  void ttsService.stop().catch(() => { if (mounted.current) setLocalError('release_failed'); onCleanupFailure(); });
+                }}><ButtonText>{t('tts.stop')}</ButtonText></Button>
+            </Box> : <Box>
+                <Button size="lg" className="w-full" action={audioReady ? 'secondary' : 'primary'} testID="tts-synthesize" disabled={speechActive || blocked || Boolean(selection.errorCode) || Boolean(inputError)
                   || !prepared?.text || tooLong || (needsReview && !reviewed)
                   || (voiceMode === 'builtin' && !builtinVoice) || (voiceMode === 'reference' && !referenceReady)}
                   onPress={() => {
@@ -455,24 +538,10 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
                       isRestoreCurrent: () => restoreVersion.current === capturedRestoreVersion
                         && JSON.stringify(getTtsSelectionStatus()) === capturedSelectionIdentity,
                       playAfterSynthesis: true }));
-                  }}><ButtonText>{t('tts.synthesize')}</ButtonText></Button>
-              </Box>
-              <Box className="flex-row flex-wrap gap-2">
-                {audioReady && state.phase !== 'playing' ? <Button size="sm" action="secondary" testID="tts-play" disabled={blocked}
-                  onPress={() => void invoke(() => ttsService.play(), 'playback_failed')}><ButtonText>{t('tts.play')}</ButtonText></Button> : null}
-                {state.phase === 'playing' ? <Button size="sm" action="secondary" testID="tts-pause"
-                  onPress={() => void invoke(() => ttsService.pause(), 'playback_failed')}><ButtonText>{t('tts.pause')}</ButtonText></Button> : null}
-                {audioReady ? <Button size="sm" action="secondary" testID="tts-replay" disabled={blocked}
-                  onPress={() => void invoke(() => ttsService.replay(), 'playback_failed')}><ButtonText>{t('tts.replay')}</ButtonText></Button> : null}
-                {state.phase ? <Button size="sm" action="secondary" testID="tts-stop" onPress={() => {
-                  void ttsService.stop().catch(() => { if (mounted.current) setLocalError('release_failed'); onCleanupFailure(); });
-                }}><ButtonText>{t('tts.stop')}</ButtonText></Button> : null}
-              </Box>
-              {typeof state.duration === 'number' ? <Text colorRole="secondary">{t('tts.progress', {
-                position: (state.position ?? 0).toFixed(1), duration: state.duration.toFixed(1),
-              })}</Text> : null}
-            </Box>
-          </ScrollView>
+                  }}><ButtonText>{t(audioReady ? 'tts.createAgain' : 'tts.synthesize')}</ButtonText></Button>
+
+            </Box>}
+          </Box>
         </ScreenSheet>
       </ScreenModalOverlay>
       {recording ? <AudioRecordingSheet ownerKey="tts-reference" purpose="reference"

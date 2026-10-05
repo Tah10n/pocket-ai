@@ -4,10 +4,12 @@ Pocket AI has an explicit local speech preview for editable text and completed a
 
 ## Using the preview
 
-1. In model resources, select a TTS backbone and its matching codec, then prepare both files through the existing download manager. **Check files** verifies the selected file identities; it does not synthesize or prove model compatibility.
+1. In model resources, select a TTS backbone and its matching codec, then prepare both files through the existing download manager. **Check files**, under **Advanced settings**, verifies the selected file identities; it does not synthesize or prove model compatibility.
 2. Open **Local speech** in Chat, or the speech action on a completed assistant reply. The reply action captures that message and chat; it does not create another assistant turn.
-3. Review or edit the text and choose the admitted profile's language. The preview displays the exact text sent to synthesis. Ordinary prose has supported display markup removed. Structured output, code, tables and uncertain markup require explicit review and can be edited before synthesis.
-4. Select **Synthesize**, then **Play**, **Pause**, **Stop** or **Replay**. Replay uses the existing clip and does not run inference again. Stop releases the player and retains that clip until it is cleared.
+3. Review or edit the text at the top. Tap the compact voice summary to change the admitted language or voice. **Exact synthesis input** reveals the complete input; structured output, code, tables and uncertain markup show it automatically and require explicit review. Ordinary prose has supported display markup removed.
+4. Select **Create speech**. The resulting audio plays after native startup succeeds. Use the compact player to **Play**, **Pause** or **Replay**; Replay uses the existing clip and does not run inference again. **Stop** stays available during generation and playback. **Create new audio** starts a new synthesis.
+
+Voice sample controls appear inside the voice chooser. Confirm permission explicitly before using a temporary sample. **Save this voice for later** reveals the optional name and save action; saving is never automatic. Voice preparation mode, file checks, memory estimates and third-party notices are grouped under **Advanced settings**. See the [manual audio check](audio-manual-check.md) for an end-to-end test.
 
 Play first shows Starting. Playing appears only after native playback confirms the current request. A focus refusal or a 3-second unconfirmed-start deadline shows an explicit error; when cleanup succeeds, Play/Replay retries the retained clip without synthesis. Uncertain player disposal or file deletion blocks retry.
 

@@ -7218,4 +7218,23 @@ describe('ChatScreen', () => {
       expect(getByTestId('context-size-value').props.children).toBe(String(loweredCeiling));
     });
   });
+
+  it('shows the ordinary chat and bounded evidence without developer buttons in manual QA mode', () => {
+    const qaGeneration = jest.requireActual('../../src/services/AndroidQaGenerationEvidence');
+    const generationGate = jest.spyOn(qaGeneration, 'isAndroidQaGenerationEvidenceEnabled').mockReturnValue(true);
+    const previous = process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS;
+    process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS = '0';
+    const view = render(React.createElement(ChatScreen));
+    try {
+      expect(view.queryByTestId('chat-qa-arm-before-first-output')).toBeNull();
+      expect(view.queryByTestId('chat-qa-start-background-task')).toBeNull();
+      expect(view.getAllByTestId('chat-qa-tts-playback-state').length).toBeGreaterThan(0);
+      expect(lastChatInputBarProps).toBeTruthy();
+    } finally {
+      view.unmount();
+      generationGate.mockRestore();
+      if (previous === undefined) delete process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS;
+      else process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS = previous;
+    }
+  });
 });

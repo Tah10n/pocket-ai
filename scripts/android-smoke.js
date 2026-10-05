@@ -536,6 +536,7 @@ function collectNativeBuildInputState(verifiedPrebuildInputDigest = null, applic
     gradleArgs,
     buildContext: {
       androidQaEvidence: process.env.EXPO_PUBLIC_ANDROID_QA === "1",
+      androidQaControlsVisible: process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS !== "0",
       effectiveBuild: collectAndroidEffectiveBuildContext(projectRoot, {
         variant: apkVariant,
         gradleArgs,

@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { validateTtsWav } = require('./tts-evidence');
+const { validateTtsWav, validateRecordedWav } = require('./tts-evidence');
 const { parseAndroidQaApplicationId } = require('../android-qa-application-id');
 
 const within = (parent, child) => {
@@ -50,7 +50,8 @@ function resolveExternalTtsDirectory(value, publicRoot) {
 /** Own the exact new file immediately; a failed write must not leave an unrecorded partial clip. */
 function exportLocalTtsClip(directory, id, bytes, step) {
   if (!/^(?:(tokens|continuous_embd)-(1|2|retry)|recorded|neu-jo|qwen-r1-eager|qwen-r2-lazy|qwen-no-reference|qwen-saved-cold)$/u.test(id)) throw new Error('Invalid TTS clip identity.');
-  const receipt = validateTtsWav(bytes, step);
+  const validateWav = id === 'recorded' ? validateRecordedWav : validateTtsWav;
+  const receipt = validateWav(bytes, step);
   const filename = `${id}.wav`;
   const target = path.join(directory, filename);
   let descriptor;
@@ -61,7 +62,7 @@ function exportLocalTtsClip(directory, id, bytes, step) {
     fs.writeFileSync(descriptor, bytes);
     fs.closeSync(descriptor);
     descriptor = undefined;
-    const saved = validateTtsWav(fs.readFileSync(target), step);
+    const saved = validateWav(fs.readFileSync(target), step);
     if (saved.sha256 !== receipt.sha256) throw new Error('The local TTS export was not written completely.');
     return { id, filename, ...receipt, contentVerification: 'not_run' };
   } catch (error) {

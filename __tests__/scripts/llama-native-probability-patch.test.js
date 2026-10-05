@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const vm = require('node:vm');
 const { sync: globSync } = require('glob');
 const {
   AFTER, AFTER_SHA256, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION,
@@ -34,6 +35,74 @@ describe('pinned serial sampling and template clock corrections', () => {
   afterEach(() => {
     // Only the exact temporary directory allocated by this test is removed.
     if (root) fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('removes actual multimodal text-log arguments while retaining event and media-count metadata', () => {
+    const paths = ['cpp/tools/mtmd/mtmd.cpp', 'cpp/rn-mtmd.hpp'];
+    const originals = new Map(paths.map(relative => [relative, fs.readFileSync(path.join(root, 'node_modules/llama.rn', relative), 'utf8')]));
+    const secrets = ['synthetic-lazy-private', 'synthetic-input-private', 'synthetic-full-prompt-private', 'synthetic-prompt-private'];
+    const runLogs = sources => {
+      const cpp = sources.get(paths[0]);
+      const header = sources.get(paths[1]);
+      const lazy = cpp.match(/LOG_DBG\("%s: lazy callback returned text[^\n]*\);/u)[0];
+      const addText = cpp.slice(cpp.indexOf('void add_text(const std::string & txt, bool parse_special)')).match(/LOG_DBG\([^\n]*\);/u)[0];
+      const processing = header.match(/LOG_INFO\("\[DEBUG\] Processing[^\n]*\);/gu);
+      expect(processing).toHaveLength(2);
+      const emitted = [];
+      const log = (format, ...args) => {
+        let index = 0;
+        emitted.push(format.replace(/%s|%zu/gu, () => String(args[index++])));
+      };
+      // These four actual C++ calls share JavaScript's function-call syntax.
+      // Execute only the log expressions, with synthetic values for their arguments.
+      vm.runInNewContext([lazy, addText, ...processing].join('\n'), {
+        LOG_DBG: log, LOG_INFO: log, __func__: 'synthetic_function',
+        out_str: secrets[0], txt: { c_str: () => secrets[1] },
+        full_prompt: { c_str: () => secrets[2] }, prompt: { c_str: () => secrets[3] },
+        media_paths: { size: () => 2 },
+      });
+      return emitted;
+    };
+    expect(runLogs(originals)).toHaveLength(4);
+    runLogs(originals).forEach((entry, index) => expect(entry).toContain(secrets[index]));
+    patchLlamaBridge(root);
+    const updated = new Map(paths.map(relative => [relative, fs.readFileSync(path.join(root, 'node_modules/llama.rn', relative), 'utf8')]));
+    expect(runLogs(updated)).toEqual([
+      'synthetic_function: lazy callback returned text\n',
+      'synthetic_function: added text chunk\n',
+      '[DEBUG] Processing message with role=user',
+      '[DEBUG] Processing 2 media',
+    ]);
+    for (const entry of runLogs(updated)) for (const secret of secrets) expect(entry).not.toContain(secret);
+    for (const relative of paths) {
+      const patch = SOURCE_PATCHES.find(entry => entry.source === relative);
+      let reversed = updated.get(relative);
+      for (const [before, after] of [...patch.replacements].reverse()) reversed = reversed.replace(after, before);
+      expect(reversed).toBe(originals.get(relative));
+      expect(hashSource(updated.get(relative))).toBe(patch.afterSha256);
+    }
+  });
+
+  it.each(['cpp/tools/mtmd/mtmd.cpp', 'cpp/rn-mtmd.hpp'])('checks and reapplies the exact multimodal privacy patch idempotently: %s', relative => {
+    const file = path.join(root, 'node_modules/llama.rn', relative);
+    const original = fs.readFileSync(file, 'utf8');
+    patchLlamaBridge(root);
+    fs.writeFileSync(file, original);
+    expect(() => patchLlamaBridge(root, { check: true })).toThrow(/patch is missing/u);
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
+    expect(patchLlamaBridge(root).status).toBe('applied');
+    const patched = fs.readFileSync(file, 'utf8');
+    expect(patchLlamaBridge(root, { check: true }).status).toBe('already-applied');
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+    expect(fs.readFileSync(file, 'utf8')).toBe(patched);
+  });
+
+  it.each(['pristine', 'applied'].flatMap(state => ['cpp/tools/mtmd/mtmd.cpp', 'cpp/rn-mtmd.hpp'].map(relative => [state, relative])))('rejects unknown %s multimodal source before every write: %s', (state, relative) => {
+    if (state === 'applied') patchLlamaBridge(root);
+    fs.appendFileSync(path.join(root, 'node_modules/llama.rn', relative), '\n// unexpected multimodal source drift\n');
+    const before = SOURCE_PATCHES.map(patch => [patch.source, fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source))]);
+    expect(() => patchLlamaBridge(root)).toThrow(`fingerprint mismatch: ${relative}`);
+    for (const [source, bytes] of before) expect(fs.readFileSync(path.join(root, 'node_modules/llama.rn', source))).toEqual(bytes);
   });
 
   it('removes reconstructible token IDs and text from serial completion and batch diagnostics', () => {

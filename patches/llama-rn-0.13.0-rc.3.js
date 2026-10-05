@@ -462,6 +462,34 @@ static int codec_decode_n_q_for_profile(const tts_model_profile &profile, ::code
     return rn_tts_take_pcm(codec_model, pcm);`
   ],
 ];
+const MTMD_TEXT_PRIVACY_PATCHES = [
+  { source: 'cpp/tools/mtmd/mtmd.cpp',
+    beforeSha256: '70d790fc2d34e85ea34874d385caf65d07517d9c4bee648e6709feb50bbb9ac9',
+    afterSha256: '39ed20835c38dee50b8e29fe906bdd4faf38565981aa7eaf17fd5271451df3f4',
+    replacements: [
+      [
+        '                            LOG_DBG("%s: lazy callback returned text: %s\\n", __func__, out_str);',
+        '                            LOG_DBG("%s: lazy callback returned text\\n", __func__);',
+      ],
+      [
+        '        LOG_DBG("%s: %s\\n", __func__, txt.c_str());',
+        '        LOG_DBG("%s: added text chunk\\n", __func__);',
+      ],
+    ] },
+  { source: 'cpp/rn-mtmd.hpp',
+    beforeSha256: '3f0512f398a30d10d466b9a4736dedd31758fb2250dcebf164dc07dd99fab4e0',
+    afterSha256: '396f4c1760e9b366ee02cbe961d4f8ab2b5c5f1b6f8525145ecef3ccac2a3450',
+    replacements: [
+      [
+        '    LOG_INFO("[DEBUG] Processing message with role=user, content=%s", full_prompt.c_str());',
+        '    LOG_INFO("[DEBUG] Processing message with role=user");',
+      ],
+      [
+        '    LOG_INFO("[DEBUG] Processing %zu media with prompt: %s", media_paths.size(), prompt.c_str());',
+        '    LOG_INFO("[DEBUG] Processing %zu media", media_paths.size());',
+      ],
+    ] },
+];
 const SOURCE_PATCHES = [
   { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256,
     replacements: [[BEFORE, AFTER], ...SPEAKER_RECEIPT_REPLACEMENTS],
@@ -505,6 +533,7 @@ const SOURCE_PATCHES = [
   {"source": "cpp/ggml-cpu/arch/x86/quants.c", "beforeSha256": "0b0942f1030384ae3a907350d69b0ad29f5a9dffe3bf35286a24489f9caa9eeb", "afterSha256": "93fe81c2ea5b0b321b6bf50e7833f6152bc8e4464ea6e65afc2c891c4097ad69", "replacements": [["#define LM_GGML_COMMON_IMPL_C", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || defined(_M_X64))\n#define LM_GGML_COMMON_IMPL_C"], ["*s = hsum_float_8(accum);\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n", "*s = hsum_float_8(accum);\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n\n#endif // compile-target CPU architecture\n"]]},
   {"source": "cpp/ggml-cpu/arch/x86/repack.cpp", "beforeSha256": "18c55964dcdf1ac589dfca0e5013755a856505f5d48e4c935ed8300580e4a7c2", "afterSha256": "0141703d24d858af37ea92eab1246e5d4a6cded95cf57de113d035345da27e92", "replacements": [["#define LM_GGML_COMMON_IMPL_CPP", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || defined(_M_X64))\n#define LM_GGML_COMMON_IMPL_CPP"], ["_mm256_sub_ps(acc_rows[i], acc_min_rows[i]));\n            }\n        }\n    }\n#else\n\n    lm_ggml_gemm_q2_K_8x8_q8_K_generic(n, s, bs, vx, vy, nr, nc);\n\n\n#endif\n}\n", "_mm256_sub_ps(acc_rows[i], acc_min_rows[i]));\n            }\n        }\n    }\n#else\n\n    lm_ggml_gemm_q2_K_8x8_q8_K_generic(n, s, bs, vx, vy, nr, nc);\n\n\n#endif\n}\n\n#endif // compile-target CPU architecture\n"]]},
   {"source":"cpp/rn-llama.cpp","beforeSha256":"e33948572e199c90a74f1ecb4d27be791924fe4954737f0d83c96b2a18ad0d1c","afterSha256":"b4ad27f004e6398d5de8fe49181f52e1d77c734f0b499389b8c5973ba6d14835","replacements":[["            LOG_ERROR(\"unable to load model: %s\", params_.model.path.c_str());","            LOG_ERROR(\"unable to load model\");"],["            LOG_ERROR(\"unable to initialize context for model: %s\", params_.model.path.c_str());","            LOG_ERROR(\"unable to initialize context for model\");"]]},
+  ...MTMD_TEXT_PRIVACY_PATCHES,
 ];
 // JSI fixes are compiled locally in every mode. Clock and sampler fixes are in the core:
 // source-build configuration must also be enforced by the native config verifier.

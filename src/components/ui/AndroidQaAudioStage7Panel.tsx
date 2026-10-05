@@ -18,11 +18,9 @@ export function AndroidQaAudioStage7Panel() {
   if (!isAndroidQaAudioStage7Enabled()) return null;
   const busy = evidence.status === 'running' || evidence.requiresForceStop;
   return <>
-    <Box className="absolute right-2 top-20">
-      <Button size="xs" action="secondary" testID="chat-qa-stage7-panel-toggle" onPress={() => setOpen(true)}>
-        <ButtonText>QA Stage 7</ButtonText>
-      </Button>
-    </Box>
+    <Button size="xs" action="secondary" testID="chat-qa-stage7-panel-toggle" onPress={() => setOpen(true)}>
+      <ButtonText>QA Stage 7</ButtonText>
+    </Button>
     <Modal visible={open} transparent animationType="none" onRequestClose={() => { if (!busy) setOpen(false); }}>
       <Box className="flex-1 justify-center bg-background-0/90 px-6">
         <Box className="gap-3 rounded-2xl border border-outline-200 bg-background-50 p-4">

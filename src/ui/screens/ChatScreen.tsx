@@ -912,6 +912,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                         <Button size="xs" action="secondary" testID="chat-qa-run-stage3"
                             disabled={isAnyNativeQaBusy || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaStage3()}><ButtonText>QA Stage 3</ButtonText></Button>
+                        <AndroidQaAudioStage7Panel />
                         <Button size="xs" action="secondary" testID="chat-qa-run-local-tools"
                             disabled={isAnyNativeQaBusy || localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaLocalTools()}><ButtonText>QA Local Tools</ButtonText></Button>
@@ -3947,7 +3948,6 @@ const ChatScreenContent = () => {
                 onCancelDiagnostics={() => diagnosticAbortRef.current?.abort()}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
             />
-            <AndroidQaAudioStage7Panel />
             {speechPreview ? <TtsPreviewSheet key={speechPreview.id}
                 initialText={speechPreview.text} reviewReason={speechPreview.reason} source={speechPreview.source}
                 isPreviewCurrent={isSpeechPreviewCurrent} onClose={closeSpeechPreview}

@@ -10,7 +10,7 @@ import { registry } from '../../src/services/LocalStorageRegistry';
 import { getSettings, resetSettings, updateSettings } from '../../src/services/SettingsStore';
 import * as settingsStore from '../../src/services/SettingsStore';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
-import { TTS_EXECUTION_PROFILES, getTtsInitParameters, estimateTtsPeakBytes,
+import { DEFAULT_TTS_PROFILE_ID, TTS_EXECUTION_PROFILES, getTtsInitParameters, estimateTtsPeakBytes,
   type TtsExecutionProfile } from '../../src/services/TtsExecutionProfiles';
 import { synthesizeTtsOnContext, type TtsPcmResult } from '../../src/services/TtsSynthesisRuntime';
 import { TtsPlaybackController } from '../../src/services/TtsPlayback';
@@ -21,6 +21,7 @@ import { TtsCleanupError, TtsError, type TtsObservation } from '../../src/types/
 import { EngineStatus, LifecycleStatus, ModelAccessState, type EngineState, type ModelMetadata } from '../../src/types/models';
 import * as audioPreparation from '../../src/services/AudioPreparationService';
 import { referenceVoiceStore, type ReferenceVoiceLease } from '../../src/services/ReferenceVoiceStore';
+import * as androidQaEvidence from '../../src/services/AndroidQaGenerationEvidence';
 
 jest.mock('../../src/services/LLMEngineService', () => ({ llmEngineService: {
   getState: jest.fn(), hasAuxiliaryContextOperation: jest.fn(() => false),
@@ -438,6 +439,78 @@ it('admits sufficient OS allocatable memory after detaching A even when free pag
   expect(synthesize).toHaveBeenCalledTimes(1);
   expect(playback.setClip).toHaveBeenCalledTimes(1);
   expect(state.activeModelId).toBe(chatId);
+  expect(getSystemMemorySnapshot).toHaveBeenCalledTimes(1);
+  expect(service.getState().memoryAdmission).toEqual({
+    availableBytes: requiredBytes + thresholdBytes, freeBytes: 1, processAvailableBytes: undefined,
+    thresholdBytes, budgetBytes: requiredBytes, requiredBytes, lowMemory: false, pressureLevel: 'normal',
+  });
+});
+
+it('admits the automatically selected legacy builtin profile with its full allocation policy and exact installed pair', async () => {
+  const preferred = TTS_EXECUTION_PROFILES.find(profile => profile.id === DEFAULT_TTS_PROFILE_ID)!;
+  registry.saveModels([chatModel(), ttsModel(preferred)]);
+  updateSettings({ auxiliaryModels: {}, autoSelectTtsModel: true });
+  expect(getTtsSelectionStatus()).toMatchObject({ profileId: DEFAULT_TTS_PROFILE_ID });
+  jest.mocked(FileSystem.getInfoAsync).mockImplementation(async uri => ({ exists: true, isDirectory: false,
+    uri: String(uri), size: preferred.codec.bytes, modificationTime: 1 }));
+  jest.mocked(RNFS.hash).mockResolvedValue(preferred.codec.sha256);
+  const requiredBytes = estimateTtsPeakBytes(preferred);
+  const thresholdBytes = 256 * 2 ** 20;
+  jest.mocked(getSystemMemorySnapshot).mockResolvedValueOnce({ availableBytes: requiredBytes + thresholdBytes,
+    freeBytes: 1, thresholdBytes, lowMemory: false, pressureLevel: 'normal' } as never);
+  await service.start({ text: 'Hello.', language: 'en', voice: { kind: 'builtin', voice: 'default' },
+    playAfterSynthesis: false });
+  expect(requiredBytes).toBe(2_378_644_640);
+  expect(contextRequests[0].initParams).toMatchObject({ n_ctx: 3840, n_batch: 128,
+    embedding: false, cache_type_k: 'f16', cache_type_v: 'f16', n_gpu_layers: 0 });
+  expect(synthesize).toHaveBeenCalledWith(context, preferred, expect.objectContaining({
+    voice: { kind: 'builtin', voice: 'default' } }));
+  expect(service.getState().memoryAdmission).toMatchObject({ requiredBytes, budgetBytes: requiredBytes });
+  expect(getSystemMemorySnapshot).toHaveBeenCalledTimes(1);
+  expect(state.activeModelId).toBe(chatId);
+});
+
+it('retains the exact failed admission snapshot before loading or inference can start', async () => {
+  choose();
+  const availableBytes = 2_440_790_016;
+  const thresholdBytes = 256 * 2 ** 20;
+  const freeBytes = 206_880 * 1024;
+  const phases: (string | null)[] = [];
+  const remove = service.subscribe(() => { phases.push(service.getState().phase); });
+  jest.mocked(getSystemMemorySnapshot).mockResolvedValueOnce({ availableBytes, freeBytes,
+    thresholdBytes, lowMemory: false, pressureLevel: 'normal' } as never);
+  try {
+    await expect(service.start({ text: 'Hello.', language: 'en' }))
+      .rejects.toMatchObject({ code: 'memory_insufficient' });
+    expect(service.getState().memoryAdmission).toEqual({ availableBytes, freeBytes,
+      processAvailableBytes: undefined, thresholdBytes, budgetBytes: availableBytes - thresholdBytes,
+      requiredBytes: estimateTtsPeakBytes(tokensProfile), lowMemory: false, pressureLevel: 'normal' });
+    expect(phases).not.toContain('loading');
+    expect(getSystemMemorySnapshot).toHaveBeenCalledTimes(1);
+    expect(initContext).not.toHaveBeenCalled();
+    expect(synthesize).not.toHaveBeenCalled();
+  } finally { remove(); }
+});
+
+it('does not retain admission evidence when QA evidence is disabled', async () => {
+  choose();
+  const enabled = jest.spyOn(androidQaEvidence, 'isAndroidQaGenerationEvidenceEnabled').mockReturnValue(false);
+  try {
+    await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+    expect(service.getState().memoryAdmission).toBeUndefined();
+    expect(getSystemMemorySnapshot).toHaveBeenCalledTimes(1);
+  } finally { enabled.mockRestore(); }
+});
+
+it('keeps out-of-range snapshot bytes out of admission evidence without changing the gate', async () => {
+  choose();
+  jest.mocked(getSystemMemorySnapshot).mockResolvedValueOnce({ availableBytes: 65 * 2 ** 30,
+    freeBytes: Number.NaN, thresholdBytes: -1, lowMemory: false, pressureLevel: 'normal' } as never);
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().memoryAdmission).toEqual({ availableBytes: undefined, freeBytes: undefined,
+    processAvailableBytes: undefined, thresholdBytes: undefined, budgetBytes: undefined,
+    requiredBytes: estimateTtsPeakBytes(tokensProfile), lowMemory: false, pressureLevel: 'normal' });
+  expect(initContext).toHaveBeenCalledTimes(1);
 });
 
 it.each([

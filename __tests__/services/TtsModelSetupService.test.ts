@@ -107,10 +107,11 @@ describe('explicit recommended TTS setup', () => {
 
   it('keeps installed lookups and pinned metadata free of download side effects', () => {
     expect(getInstalledRecommendedTtsModel()).toBeUndefined();
-    expect(getRecommendedTtsModelMetadata()).toMatchObject({ id: RECOMMENDED_TTS_MODEL_ID, name: 'OuteTTS 1.0 (0.6B)',
-      hfRevision: profile.backbone.revision, sha256: profile.backbone.sha256, size: profile.backbone.bytes,
+    expect(getRecommendedTtsModelMetadata()).toMatchObject({ id: RECOMMENDED_TTS_MODEL_ID, name: 'OuteTTS 0.3 (0.5B)',
+      parameterSizeLabel: '0.5B', license: 'cc-by-sa-4.0', hfRevision: 'ae0577d4386cfb6f442a610a1ec5f2a27d935fc4',
+      sha256: '086667b32948d618c4ddc3a36d2bdb5f40f7afbb721e51cd32b318680543965f', size: 357753600,
       roleEvidence: [{ role: 'tts', source: 'model_card', confidence: 'declared' }] });
-    expect(RECOMMENDED_TTS_DOWNLOAD_MIB).toBe(524);
+    expect(RECOMMENDED_TTS_DOWNLOAD_MIB).toBe(503);
     expect(mockRegistryUpdate).not.toHaveBeenCalled(); expect(mockAddToQueue).not.toHaveBeenCalled(); expect(mockSelect).not.toHaveBeenCalled();
   });
 
@@ -139,6 +140,11 @@ describe('explicit recommended TTS setup', () => {
     expect(mockPrepareCompanion).not.toHaveBeenCalled(); // The finished base still owns its queue slot.
     removeJob(base.id); await tick();
     expect(mockPrepareCompanion).toHaveBeenCalledTimes(1); expect(mockSelect).not.toHaveBeenCalled();
+    expect(mockPrepareCompanion).toHaveBeenCalledWith(expect.objectContaining({ artifacts: expect.arrayContaining([
+      expect.objectContaining({ kind: 'tts_codec', sizeBytes: 169512160,
+        sha256: '9b08679358a172b1bf1d4f3394c8bad2779a077a9395d7cd0148dff989feb99f',
+        hfRevision: '4cd6ecf17367ebc03bba4b2ce8186268a6ce7436' }),
+    ]) }), expect.any(String));
     expect(setup.getState().phase).toBe('downloading_codec');
     const ready = installedVoice(mockModels.get(base.id)!); mockModels.set(ready.id, ready); removeJob(ready.id);
     await tick(); await work;

@@ -38,6 +38,9 @@ export interface TtsPreviewSheetProps {
 export function getTtsQaPlaybackMarker(state: TtsServiceState): string {
   const seconds = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value)
     && value >= 0 && value <= TTS_LIMITS.durationSeconds;
+  const bytes = (value: number | undefined) => typeof value === 'number' && Number.isSafeInteger(value)
+    && value >= 0 && value <= 64 * 1024 ** 3 ? value : undefined;
+  const admission = state.memoryAdmission;
   return JSON.stringify({
     phase: state.phase,
     ...(seconds(state.position) ? { position: state.position } : {}),
@@ -46,6 +49,14 @@ export function getTtsQaPlaybackMarker(state: TtsServiceState): string {
       && state.sampleCount >= 0 && state.sampleCount <= TTS_LIMITS.pcmSamples ? { sampleCount: state.sampleCount } : {}),
     ...(typeof state.sampleRate === 'number' && Number.isSafeInteger(state.sampleRate)
       && state.sampleRate >= 8_000 && state.sampleRate <= 192_000 ? { sampleRate: state.sampleRate } : {}),
+    ...(admission ? { memoryAdmission: {
+      availableBytes: bytes(admission.availableBytes), freeBytes: bytes(admission.freeBytes),
+      processAvailableBytes: bytes(admission.processAvailableBytes), thresholdBytes: bytes(admission.thresholdBytes),
+      budgetBytes: bytes(admission.budgetBytes), requiredBytes: bytes(admission.requiredBytes),
+      lowMemory: typeof admission.lowMemory === 'boolean' ? admission.lowMemory : undefined,
+      pressureLevel: ['normal', 'warning', 'critical', 'unknown'].includes(admission.pressureLevel ?? '')
+        ? admission.pressureLevel : undefined,
+    } } : {}),
     errorCode: state.errorCode ?? null,
   });
 }

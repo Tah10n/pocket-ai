@@ -44,11 +44,11 @@ export interface TtsExecutionProfile {
   /** Stored codec owners in the guarded native build, separate from decode casts. */
   readonly codecStoredCopies?: 1 | 2;
   readonly graphReserveBytes: number;
-  readonly sampling: Readonly<{ temperature: number; top_k: number; top_p: number; penalty_repeat: number }>;
+  readonly sampling: Readonly<{ temperature: number; top_k: number; top_p: number; penalty_repeat?: number }>;
 }
 
 const MiB = 1024 * 1024;
-export const DEFAULT_TTS_PROFILE_ID = 'outetts-1.0-0.6b-q4_k_m-dac-speech-f16';
+export const DEFAULT_TTS_PROFILE_ID = 'outetts-0.3-500m-q4_0-wavtokenizer-large-f16';
 export const TTS_EXECUTION_PROFILES: readonly TtsExecutionProfile[] = Object.freeze([
   Object.freeze({
     id: 'outetts-1.0-0.6b-q4_k_m-dac-speech-f16',
@@ -70,6 +70,29 @@ export const TTS_EXECUTION_PROFILES: readonly TtsExecutionProfile[] = Object.fre
     codecStoredCopies: 1,
     graphReserveBytes: 768 * MiB,
     sampling: Object.freeze({ temperature: 0.4, top_k: 40, top_p: 0.9, penalty_repeat: 1.1 }),
+  }),
+  Object.freeze({
+    id: 'outetts-0.3-500m-q4_0-wavtokenizer-large-f16',
+    backbone: Object.freeze({ repository: 'OuteAI/OuteTTS-0.3-500M-GGUF',
+      revision: 'ae0577d4386cfb6f442a610a1ec5f2a27d935fc4', filename: 'OuteTTS-0.3-500M-Q4_0.gguf',
+      sha256: '086667b32948d618c4ddc3a36d2bdb5f40f7afbb721e51cd32b318680543965f', bytes: 357753600 }),
+    codec: Object.freeze({ repository: 'BricksDisplay/codec.cpp-gguf',
+      revision: '4cd6ecf17367ebc03bba4b2ce8186268a6ce7436', filename: 'wavtokenizer-large-speech-75tokens.gguf',
+      sha256: '9b08679358a172b1bf1d4f3394c8bad2779a077a9395d7cd0148dff989feb99f', bytes: 169512160 }),
+    family: 'outetts' as const, promptKind: 'outetts_v0_3' as const, flow: 'tokens' as const,
+    languages: Object.freeze(['en']), voiceModes: Object.freeze(['builtin'] as const),
+    builtinLanguage: 'en-us', builtinVoices: Object.freeze(['default']),
+    maxPromptTokens: 1536, sampleRate: 24000, samplesPerFrame: 320,
+    codebooks: 1, codebookSize: 4096, generationSteps: 2304, maxFrames: 1200,
+    // Pinned Qwen2 metadata: 896 hidden dimensions, 24 layers, 14 heads and 2 KV heads.
+    // The complete legacy builtin prompt allowance (1536) plus generation (2304) fits exactly.
+    contextTokens: 3840, hiddenDimension: 896, layers: 24,
+    kvCache: Object.freeze({ heads: 2, keyDimension: 64, valueDimension: 64 }),
+    backboneEmbeddings: false, backboneBatchTokens: 128,
+    // Guarded rc.3 skips the unused audio_lm owner for plain WavTokenizer metadata.
+    codecStoredCopies: 1, graphReserveBytes: 768 * MiB,
+    // Pinned rc.3 TTS example uses top_k=4 and leaves repetition at its native default.
+    sampling: Object.freeze({ temperature: 0.7, top_k: 4, top_p: 0.9 }),
   }),
   Object.freeze({
     id: 'bluemagpie-barbet-1b-q4_k_m-audiovae-q8_0',
@@ -139,7 +162,7 @@ export function getTtsInitParameters(profile: TtsExecutionProfile, path: string)
 }
 
 export function estimateTtsPeakBytes(profile: TtsExecutionProfile): number {
-  // The guarded plain-DAC path retains one codec; other rc.3 paths retain two.
+  // Guarded plain DAC/WavTokenizer decoders retain one codec; other rc.3 paths retain two.
   // Reserve full-file F32 casts in addition to stored F16 weights for DAC decode,
   // working graphs, KV/hidden states, native output + JS number[] + encoded WAV + player buffers.
   // This is deliberately low-confidence; unknown artifact pairs receive no estimate/admission.

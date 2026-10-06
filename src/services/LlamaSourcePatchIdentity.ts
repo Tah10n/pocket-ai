@@ -1,2 +1,2 @@
 /** SHA-256 of the exact guarded llama.rn patch script after LF normalization. */
-export const LLAMA_SOURCE_PATCH_SHA256 = '5aa4c162a8b2ec723aee92e8a409515fc221bef1c4ec04b4cad18d1333860a76';
+export const LLAMA_SOURCE_PATCH_SHA256 = '640cf514ef3d628e6231556bcdcf805fdd93d7495a7cecbce2db499f006448f5';

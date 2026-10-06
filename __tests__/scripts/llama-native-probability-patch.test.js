@@ -198,6 +198,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     ['cpp/rn-tts.cpp', '30c41e9ee214171f20ab11191317954c7f13d3bc3c8508d4f14901d27f05abe0'],
     ['cpp/rn-tts.cpp', 'ac3acbe44c5a84b60144f79105cbd6902af0e3548a5f3ac53c4a9e1ce2546ad3'],
     ['cpp/rn-tts.cpp', 'dc55dac2ee2da8d49f4a04c2a82f647b4d0ee9e37e3da271dbf9d90ae8129fdb'],
+    ['cpp/rn-tts.cpp', '5b2759c889c37641ce41e350f5a4a4d522c7c0f95fc251c4ab751255db1ea164'],
   ])('upgrades the exact accepted pre-TTS privacy source: %s', (source, previousHash) => {
     const patch = SOURCE_PATCHES.find(entry => entry.source === source);
     const migration = patch.intermediates.find(entry => entry.sha256 === previousHash);
@@ -237,7 +238,16 @@ describe('pinned serial sampling and template clock corrections', () => {
 
   it.each([
     ['plain DAC', { arch: 'dac', meta: { items: [{ key: 'codec.architecture' }, { key: 'codec.dac.hop_size' }], n_items: 2 } }, false],
+    ['plain WavTokenizer', { arch: 'wavtokenizer_large', meta: { items: [
+      { key: 'general.architecture', value: 'wavtokenizer_large' },
+      { key: 'general.name', value: 'WavTokenizer' },
+      { key: 'codec.sample_rate', value: '24000' },
+      { key: 'codec.hop_size', value: '320' },
+      { key: 'codec.has_encoder', value: 'true' },
+      { key: 'codec.has_decoder', value: 'true' },
+    ], n_items: 6 } }, false],
     ['other codec', { arch: 'neucodec', meta: { items: [{ key: 'codec.architecture' }], n_items: 1 } }, true],
+    ['unknown codec architecture', { arch: 'unknown', meta: { items: [{ key: 'general.architecture' }], n_items: 1 } }, true],
     ['unknown model', null, true],
     ['missing metadata', { arch: 'dac', meta: null }, true],
     ['missing metadata items', { arch: 'dac', meta: { items: null, n_items: 1 } }, true],
@@ -246,6 +256,13 @@ describe('pinned serial sampling and template clock corrections', () => {
     ['DAC with LM first', { arch: 'dac', meta: { items: [{ key: 'codec.lm.type' }, { key: 'codec.dac.hop_size' }], n_items: 2 } }, true],
     ['DAC with LM last', { arch: 'dac', meta: { items: [{ key: 'codec.dac.hop_size' }, { key: 'codec.lm.hidden_size', value: null }], n_items: 2 } }, true],
     ['DAC with a different prefix', { arch: 'dac', meta: { items: [{ key: 'codec.lm_extra' }], n_items: 1 } }, false],
+    ['WavTokenizer missing metadata', { arch: 'wavtokenizer_large', meta: null }, true],
+    ['WavTokenizer missing metadata items', { arch: 'wavtokenizer_large', meta: { items: null, n_items: 1 } }, true],
+    ['WavTokenizer empty metadata', { arch: 'wavtokenizer_large', meta: { items: [], n_items: 0 } }, true],
+    ['WavTokenizer unreadable metadata key', { arch: 'wavtokenizer_large', meta: { items: [{ key: null }], n_items: 1 } }, true],
+    ['WavTokenizer with an explicit false LM flag', { arch: 'wavtokenizer_large', meta: { items: [{ key: 'codec.lm.has_adaptor', value: 'false' }], n_items: 1 } }, true],
+    ['WavTokenizer with LM first', { arch: 'wavtokenizer_large', meta: { items: [{ key: 'codec.lm.kind' }, { key: 'codec.hop_size' }], n_items: 2 } }, true],
+    ['WavTokenizer with LM last', { arch: 'wavtokenizer_large', meta: { items: [{ key: 'codec.hop_size' }, { key: 'codec.lm.hidden_dim', value: null }], n_items: 2 } }, true],
   ])('uses actual native metadata and retains optional LM initialization for %s', (_label, model, needsAudioLm) => {
     patchLlamaBridge(root);
     const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn/cpp/rn-tts.cpp'), 'utf8');
@@ -254,6 +271,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     // Execute the native guard's actual branch body, translating only C++ declarations/access.
     const body = match[1]
       .replace(/::codec_model_arch/gu, 'codec_model_arch')
+      .replace(/const ::codec_arch arch/gu, 'const arch')
       .replace(/const struct codec_lm_gguf_metadata \*meta/gu, 'const meta')
       .replace(/const char \*key/gu, 'const key')
       .replace(/for \(size_t i/gu, 'for (let i')
@@ -261,7 +279,7 @@ describe('pinned serial sampling and template clock corrections', () => {
       .replace(/std::strncmp/gu, 'strncmp')
       .replace(/\bnullptr\b/gu, 'null');
     const actual = vm.runInNewContext('(function(model) {' + body + '\n})(model)', {
-      model, CODEC_ARCH_DAC: 'dac',
+      model, CODEC_ARCH_DAC: 'dac', CODEC_ARCH_WAVTOKENIZER_LARGE: 'wavtokenizer_large',
       codec_model_arch: value => value.arch,
       codec_model_metadata: value => value.meta,
       strncmp: (left, right, length) => left.slice(0, length).localeCompare(right.slice(0, length)),

@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { TtsPreviewSheet } from '../../src/components/ui/TtsPreviewSheet';
+import { TtsPreviewSheet, getTtsQaPlaybackMarker } from '../../src/components/ui/TtsPreviewSheet';
 import { ttsService, getTtsSelectionStatus } from '../../src/services/TtsService';
 import * as DocumentPicker from 'expo-document-picker';
 import { referenceVoiceStore, type TemporaryReferenceSource } from '../../src/services/ReferenceVoiceStore';
@@ -10,6 +10,29 @@ import type { AudioRecordingSheet } from '../../src/components/ui/AudioRecording
 import en from '../../src/i18n/locales/en.json';
 import ru from '../../src/i18n/locales/ru.json';
 import type { TtsModelSetupState } from '../../src/services/TtsModelSetupService';
+
+it('serializes only bounded admission fields from the existing QA playback marker', () => {
+  const memoryAdmission = { availableBytes: 2_440_790_016, freeBytes: 211_845_120,
+    thresholdBytes: 268_435_456, budgetBytes: 2_172_354_560, requiredBytes: 2_378_644_640,
+    lowMemory: false, pressureLevel: 'normal' as const, modelPath: '/private/voice.gguf', text: 'private speech' };
+  const marker = getTtsQaPlaybackMarker({ phase: 'error', errorCode: 'memory_insufficient',
+    profileId: 'private-profile', memoryAdmission });
+  expect(JSON.parse(marker)).toEqual({ phase: 'error', errorCode: 'memory_insufficient', memoryAdmission: {
+    availableBytes: 2_440_790_016, freeBytes: 211_845_120, thresholdBytes: 268_435_456,
+    budgetBytes: 2_172_354_560, requiredBytes: 2_378_644_640, lowMemory: false, pressureLevel: 'normal',
+  } });
+  expect(marker).not.toContain('private');
+});
+
+it('omits invalid admission values while retaining valid zero and 64 GiB bounds', () => {
+  const marker = getTtsQaPlaybackMarker({ phase: 'error', memoryAdmission: {
+    availableBytes: 64 * 2 ** 30, freeBytes: 0, processAvailableBytes: 64 * 2 ** 30 + 1,
+    thresholdBytes: -1, budgetBytes: Number.NaN, requiredBytes: Number.POSITIVE_INFINITY,
+  } });
+  expect(JSON.parse(marker)).toEqual({ phase: 'error', errorCode: null,
+    memoryAdmission: { availableBytes: 64 * 2 ** 30, freeBytes: 0 } });
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: null }))).not.toHaveProperty('memoryAdmission');
+});
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');

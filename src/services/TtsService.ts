@@ -18,7 +18,8 @@ import { getModelsDir } from './FileSystemSetup';
 import { llmEngineService } from './LLMEngineService';
 import { runWithIdleModelDownloads } from './ModelDownloadManager';
 import { assertPrivateStorageWritable, isPrivateStorageWritable } from './storage';
-import { getSystemMemorySnapshot } from './SystemMetricsService';
+import { getSystemMemorySnapshot, type SystemMemorySnapshot } from './SystemMetricsService';
+import { isAndroidQaGenerationEvidenceEnabled } from './AndroidQaGenerationEvidence';
 import { resolveConservativeAvailableMemoryBudget } from '../memory/budget';
 import { getLlamaBuildInfo } from './LlamaRuntimeAdapter';
 import { LLAMA_SOURCE_PATCH_SHA256 } from './LlamaSourcePatchIdentity';
@@ -44,12 +45,30 @@ export interface TtsRequest {
   playAfterSynthesis?: boolean;
   observe?: (event: TtsObservation) => void;
 }
+export interface TtsMemoryAdmission {
+  availableBytes?: number;
+  freeBytes?: number;
+  processAvailableBytes?: number;
+  thresholdBytes?: number;
+  budgetBytes?: number;
+  requiredBytes?: number;
+  lowMemory?: boolean;
+  pressureLevel?: SystemMemorySnapshot['pressureLevel'];
+}
+
+function toAdmissionByteCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value)
+    && value >= 0 && value <= 64 * 1024 ** 3 ? value : undefined;
+}
+
 export interface TtsServiceState {
   phase: TtsPhase | null;
   errorCode?: TtsErrorCode;
   profileId?: string;
   requiredBytes?: number;
   memoryConfidence?: 'low';
+  /** QA-only values from the same post-detach snapshot used by the admission gate. */
+  memoryAdmission?: TtsMemoryAdmission;
   position?: number;
   duration?: number;
   sampleRate?: number;
@@ -383,8 +402,19 @@ export class TtsService {
               // A is detached. Use OS allocatable memory; free pages exclude reclaimable file caches.
               // The budget still reserves the OS threshold and caps critical/low-memory snapshots.
               const budget = memory ? resolveConservativeAvailableMemoryBudget(memory) : null;
+              const requiredBytes = estimateTtsPeakBytes(binding.profile);
+              if (isAndroidQaGenerationEvidenceEnabled()) {
+                this.publish({ ...this.state, memoryAdmission: {
+                  availableBytes: toAdmissionByteCount(memory?.availableBytes),
+                  freeBytes: toAdmissionByteCount(memory?.freeBytes),
+                  processAvailableBytes: toAdmissionByteCount(memory?.processAvailableBytes),
+                  thresholdBytes: toAdmissionByteCount(memory?.thresholdBytes),
+                  budgetBytes: toAdmissionByteCount(budget), requiredBytes: toAdmissionByteCount(requiredBytes),
+                  lowMemory: memory?.lowMemory, pressureLevel: memory?.pressureLevel,
+                } });
+              }
               if (budget === null) throw new TtsError('memory_unknown');
-              if (memory?.lowMemory || budget < estimateTtsPeakBytes(binding.profile)) throw new TtsError('memory_insufficient');
+              if (memory?.lowMemory || budget < requiredBytes) throw new TtsError('memory_insufficient');
               this.publish({ ...this.state, phase: 'loading' });
             },
           }, context => {

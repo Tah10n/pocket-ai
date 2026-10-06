@@ -16,7 +16,7 @@ const profile = TTS_EXECUTION_PROFILES.find(entry => entry.id === DEFAULT_TTS_PR
 const totalBytes = profile.backbone.bytes + profile.codec.bytes;
 const SETUP_TIMEOUT_MS = 30 * 60 * 1000;
 const DRAIN_TIMEOUT_MS = 30 * 1000;
-export const RECOMMENDED_TTS_MODEL_ID = 'pocket-ai/default-tts-outetts-1.0-q4_k_m';
+export const RECOMMENDED_TTS_MODEL_ID = 'pocket-ai/default-tts-outetts-0.3-q4_0';
 export const RECOMMENDED_TTS_DOWNLOAD_MIB = Math.round(totalBytes / (1024 * 1024));
 
 export type TtsModelSetupPhase = 'idle' | 'checking' | 'downloading_model' | 'downloading_codec'
@@ -42,12 +42,12 @@ const bindingIdentity = () => JSON.stringify([getSettings().auxiliaryModels?.tts
 
 /** Pinned public weights. Merely reading this metadata never queues a download. */
 export function getRecommendedTtsModelMetadata(): ModelMetadata {
-  return { id: RECOMMENDED_TTS_MODEL_ID, name: 'OuteTTS 1.0 (0.6B)', author: 'OuteAI',
+  return { id: RECOMMENDED_TTS_MODEL_ID, name: 'OuteTTS 0.3 (0.5B)', author: 'OuteAI',
     size: profile.backbone.bytes, sha256: profile.backbone.sha256, downloadUrl: sourceUrl(profile.backbone),
     resolvedFileName: profile.backbone.filename, hfRevision: profile.backbone.revision,
     lifecycleStatus: LifecycleStatus.AVAILABLE, fitsInRam: null, downloadProgress: 0, metadataTrust: 'trusted_remote',
     accessState: ModelAccessState.PUBLIC, isPrivate: false, isGated: false,
-    languages: [...profile.languages], parameterSizeLabel: '0.6B',
+    languages: [...profile.languages], parameterSizeLabel: '0.5B', license: 'cc-by-sa-4.0',
     roleEvidence: [{ role: 'tts', source: 'model_card', confidence: 'declared' }] };
 }
 function verifiedBackbone(model: ModelMetadata): boolean {

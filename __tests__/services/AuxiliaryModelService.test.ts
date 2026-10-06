@@ -10,7 +10,7 @@ import { useChatStore } from '../../src/store/chatStore';
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { bindManagedCompanion, getSelectedManagedCompanions } from '../../src/utils/modelArtifacts';
 import { getModelFileIdentity } from '../../src/utils/modelRoles';
-import { TTS_EXECUTION_PROFILES, type TtsExecutionProfile } from '../../src/services/TtsExecutionProfiles';
+import { DEFAULT_TTS_PROFILE_ID, TTS_EXECUTION_PROFILES, type TtsExecutionProfile } from '../../src/services/TtsExecutionProfiles';
 
 jest.mock('../../src/services/LLMEngineService', () => ({ llmEngineService: {
   getState: jest.fn(() => ({ activeModelId: 'chat/a' })),
@@ -174,7 +174,7 @@ it('invalidates a binding when a different file replaces the chosen variant', ()
   expect(getSettings().activeModelId).toBe('chat/a');
 });
 
-const preferredTtsProfile = TTS_EXECUTION_PROFILES.find(profile => profile.id === 'outetts-1.0-0.6b-q4_k_m-dac-speech-f16')!;
+const preferredTtsProfile = TTS_EXECUTION_PROFILES.find(profile => profile.id === DEFAULT_TTS_PROFILE_ID)!;
 function installedTtsModel(profile: TtsExecutionProfile = preferredTtsProfile, id = 'tts/oute'): ModelMetadata {
   const base = { ...model(id), size: profile.backbone.bytes, sha256: profile.backbone.sha256,
     downloadUrl: `https://huggingface.co/${profile.backbone.repository}/resolve/${profile.backbone.revision}/${profile.backbone.filename}`,

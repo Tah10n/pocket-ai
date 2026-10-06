@@ -1461,7 +1461,7 @@
     "chooseModel": "Choose a speech model",
     "setup": {
       "title": "Recommended voice",
-      "description": "OuteTTS 1.0 (0.6B) · English. Download the model and audio decoder to use this voice locally.",
+      "description": "{{model}} · English. Download the model and audio decoder to use this voice locally.",
       "use": "Use recommended voice",
       "download": "Download recommended voice (about {{mib}} MiB)",
       "cancel": "Cancel voice download",

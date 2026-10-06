@@ -446,7 +446,7 @@ it('admits sufficient OS allocatable memory after detaching A even when free pag
   });
 });
 
-it('admits the automatically selected legacy builtin profile with its full allocation policy and exact installed pair', async () => {
+it('admits the automatically selected legacy builtin profile within the observed phone budget', async () => {
   const preferred = TTS_EXECUTION_PROFILES.find(profile => profile.id === DEFAULT_TTS_PROFILE_ID)!;
   registry.saveModels([chatModel(), ttsModel(preferred)]);
   updateSettings({ auxiliaryModels: {}, autoSelectTtsModel: true });
@@ -455,17 +455,26 @@ it('admits the automatically selected legacy builtin profile with its full alloc
     uri: String(uri), size: preferred.codec.bytes, modificationTime: 1 }));
   jest.mocked(RNFS.hash).mockResolvedValue(preferred.codec.sha256);
   const requiredBytes = estimateTtsPeakBytes(preferred);
-  const thresholdBytes = 256 * 2 ** 20;
-  jest.mocked(getSystemMemorySnapshot).mockResolvedValueOnce({ availableBytes: requiredBytes + thresholdBytes,
-    freeBytes: 1, thresholdBytes, lowMemory: false, pressureLevel: 'normal' } as never);
+  const availableBytes = 2_814_287_872;
+  const freeBytes = 161_202_176;
+  const thresholdBytes = 452_984_832;
+  const budgetBytes = 2_361_303_040;
+  jest.mocked(getSystemMemorySnapshot).mockImplementationOnce(async () => {
+    expect(state.status).toBe(EngineStatus.IDLE);
+    expect(events).toEqual(['detach-a']);
+    return { availableBytes, freeBytes, thresholdBytes, lowMemory: false, pressureLevel: 'normal' } as never;
+  });
   await service.start({ text: 'Hello.', language: 'en', voice: { kind: 'builtin', voice: 'default' },
     playAfterSynthesis: false });
-  expect(requiredBytes).toBe(2_378_644_640);
+  expect(requiredBytes).toBe(2_020_891_040);
   expect(contextRequests[0].initParams).toMatchObject({ n_ctx: 3840, n_batch: 128,
-    embedding: false, cache_type_k: 'f16', cache_type_v: 'f16', n_gpu_layers: 0 });
+    embedding: false, cache_type_k: 'f16', cache_type_v: 'f16', n_gpu_layers: 0,
+    use_mmap: true, use_mlock: false, no_extra_bufts: true });
   expect(synthesize).toHaveBeenCalledWith(context, preferred, expect.objectContaining({
     voice: { kind: 'builtin', voice: 'default' } }));
-  expect(service.getState().memoryAdmission).toMatchObject({ requiredBytes, budgetBytes: requiredBytes });
+  expect(service.getState().memoryAdmission).toMatchObject({ requiredBytes, availableBytes, freeBytes,
+    thresholdBytes, budgetBytes, lowMemory: false, pressureLevel: 'normal' });
+  expect(budgetBytes).toBeGreaterThan(requiredBytes);
   expect(getSystemMemorySnapshot).toHaveBeenCalledTimes(1);
   expect(state.activeModelId).toBe(chatId);
 });

@@ -22,7 +22,7 @@ import { referenceVoiceStore, type TemporaryReferenceSource } from '../../servic
 import { prepareManagedAudio, discardPreparedAudio, waitForAudioPreparationDrain, type PreparedAudio } from '../../services/AudioPreparationService';
 import { audioSamplePreviewService } from '../../services/AudioSamplePreviewService';
 import phonemizerNotices from '../../thirdParty/phonemize-notices.json';
-import { getInstalledRecommendedTtsModel, RECOMMENDED_TTS_DOWNLOAD_MIB, TtsModelSetupService } from '../../services/TtsModelSetupService';
+import { getInstalledRecommendedTtsModel, getRecommendedTtsModelMetadata, RECOMMENDED_TTS_DOWNLOAD_MIB, TtsModelSetupService } from '../../services/TtsModelSetupService';
 
 export interface TtsPreviewSheetProps {
   initialText: string;
@@ -329,7 +329,7 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
               </ScreenPressableCard>
               {showVoiceOptions || showModelRecovery || setup.phase !== 'idle' ? <ScreenCard variant="inset" className="gap-2" testID="tts-recommended-voice-card">
                 <Text className="font-semibold">{t('tts.setup.title')}</Text>
-                <Text colorRole="secondary">{t('tts.setup.description')}</Text>
+                <Text colorRole="secondary">{t('tts.setup.description', { model: getRecommendedTtsModelMetadata().name })}</Text>
                 {setup.phase !== 'idle' ? <Text testID="tts-setup-phase" colorRole="secondary" accessibilityLiveRegion="polite">
                   {t('tts.setup.phases.' + setup.phase)}
                   {setupActive ? ' · ' + t('tts.setup.progress', { percent: Math.round(setup.progress * 100) }) : ''}

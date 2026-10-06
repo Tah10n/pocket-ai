@@ -41,6 +41,8 @@ export interface TtsExecutionProfile {
   readonly kvCache?: Readonly<{ heads: number; keyDimension: number; valueDimension: number }>;
   readonly backboneEmbeddings?: boolean;
   readonly backboneBatchTokens?: number;
+  /** Disable native extra buffer types for the validated CPU mmap backbone policy. */
+  readonly backboneNoExtraBufferTypes?: boolean;
   /** Stored codec owners in the guarded native build, separate from decode casts. */
   readonly codecStoredCopies?: 1 | 2;
   readonly graphReserveBytes: number;
@@ -89,6 +91,8 @@ export const TTS_EXECUTION_PROFILES: readonly TtsExecutionProfile[] = Object.fre
     contextTokens: 3840, hiddenDimension: 896, layers: 24,
     kvCache: Object.freeze({ heads: 2, keyDimension: 64, valueDimension: 64 }),
     backboneEmbeddings: false, backboneBatchTokens: 128,
+    // rc.3 CPU mmap wraps the existing mapping; no_extra_bufts prevents CPU_REPACK copies.
+    backboneNoExtraBufferTypes: true,
     // Guarded rc.3 skips the unused audio_lm owner for plain WavTokenizer metadata.
     codecStoredCopies: 1, graphReserveBytes: 768 * MiB,
     // Pinned rc.3 TTS example uses top_k=4 and leaves repetition at its native default.
@@ -157,6 +161,7 @@ export function getTtsInitParameters(profile: TtsExecutionProfile, path: string)
   return { model: path, n_ctx: profile.contextTokens, n_batch: profile.backboneBatchTokens ?? 512, n_ubatch: 128, n_threads: 4,
     n_gpu_layers: 0, embedding: profile.backboneEmbeddings ?? true, embd_normalize: -1, pooling_type: 'none', ctx_shift: false,
     ...(profile.kvCache ? { cache_type_k: 'f16' as const, cache_type_v: 'f16' as const } : {}),
+    ...(profile.backboneNoExtraBufferTypes === true ? { no_extra_bufts: true } : {}),
     use_mmap: true, use_mlock: false, n_parallel: 1,
     state_cache_budget_mb: 0, state_cache_max_checkpoints: 8 };
 }
@@ -166,6 +171,10 @@ export function estimateTtsPeakBytes(profile: TtsExecutionProfile): number {
   // Reserve full-file F32 casts in addition to stored F16 weights for DAC decode,
   // working graphs, KV/hidden states, native output + JS number[] + encoded WAV + player buffers.
   // This is deliberately low-confidence; unknown artifact pairs receive no estimate/admission.
+  const initParams = getTtsInitParameters(profile, '<managed-backbone>');
+  const backboneCopies = profile.backboneNoExtraBufferTypes === true
+    && initParams.no_extra_bufts === true && initParams.n_gpu_layers === 0
+    && initParams.use_mmap === true && initParams.use_mlock === false ? 1 : 2;
   const kvAndHiddens = profile.kvCache
     ? profile.contextTokens * profile.layers * profile.kvCache.heads
       * (profile.kvCache.keyDimension + profile.kvCache.valueDimension) * 2
@@ -177,7 +186,7 @@ export function estimateTtsPeakBytes(profile: TtsExecutionProfile): number {
   // TTS, account for retained PCM + JSON/F32 bridge copies and ECAPA/bake workspace too.
   // The profile graph reserve still covers full codec/LM working graphs and possible F32 weights.
   const reference = profile.reference ? profile.reference.maxSamples * 64 + 64 * MiB : 0;
-  return Math.ceil(profile.backbone.bytes * 2 + profile.codec.bytes * ((profile.codecStoredCopies ?? 2) + 2)
+  return Math.ceil(profile.backbone.bytes * backboneCopies + profile.codec.bytes * ((profile.codecStoredCopies ?? 2) + 2)
     + profile.graphReserveBytes + kvAndHiddens + payload + reference + 256 * MiB);
 }
 

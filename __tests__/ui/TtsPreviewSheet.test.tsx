@@ -62,7 +62,8 @@ const mockSetupListeners = new Set<() => void>();
 const mockStartRecommended = jest.fn();
 const mockCancelModelSetup = jest.fn();
 jest.mock('../../src/services/TtsModelSetupService', () => ({
-  RECOMMENDED_TTS_DOWNLOAD_MIB: 524,
+  RECOMMENDED_TTS_DOWNLOAD_MIB: 503,
+  getRecommendedTtsModelMetadata: () => ({ name: 'OuteTTS 0.3 (0.5B)' }),
   getInstalledRecommendedTtsModel: () => mockRecommendedInstalled ? { id: 'installed-oute' } : undefined,
   TtsModelSetupService: class {
     getState = () => mockSetupState;
@@ -721,6 +722,7 @@ it('localizes setup stages and failures in English and Russian', () => {
   expect(Object.keys(en.tts.setup.phases)).toEqual(Object.keys(ru.tts.setup.phases));
   expect(Object.keys(en.tts.setup.errors)).toEqual(Object.keys(ru.tts.setup.errors));
   for (const messages of [en.tts.setup, ru.tts.setup]) {
+    expect(messages.description).toContain('{{model}}');
     expect(messages.download).toContain('{{mib}}');
     expect(messages.progress).toContain('{{percent}}');
     expect(Object.values(messages.phases).every(value => value.length > 0)).toBe(true);

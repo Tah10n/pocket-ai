@@ -8,6 +8,7 @@ it('keeps the full legacy builtin prompt and generation in an isolated CPU conte
   const params = getTtsInitParameters(preferred, '/managed/voice.gguf');
   expect(params).toMatchObject({ n_ctx: 3840, n_batch: 128, n_ubatch: 128,
     n_gpu_layers: 0, embedding: false, cache_type_k: 'f16', cache_type_v: 'f16',
+    no_extra_bufts: true, use_mmap: true, use_mlock: false,
     ctx_shift: false, n_parallel: 1, state_cache_budget_mb: 0, state_cache_max_checkpoints: 8 });
   expect(preferred.contextTokens).toBe(preferred.maxPromptTokens! + preferred.generationSteps);
   expect(preferred.generationSteps).toBe(2304);
@@ -18,10 +19,25 @@ it('keeps the full legacy builtin prompt and generation in an isolated CPU conte
 it('uses exact Qwen2 KV dimensions and retains codec casts, global payload and workspace headroom', () => {
   expect(preferred.kvCache).toEqual({ heads: 2, keyDimension: 64, valueDimension: 64 });
   expect(preferred.graphReserveBytes).toBe(768 * 1024 * 1024);
-  expect(estimateTtsPeakBytes(preferred)).toBe(2_378_644_640);
+  expect(estimateTtsPeakBytes(preferred)).toBe(2_020_891_040);
   // Losing the native duplicate-owner guard must restore its stored-weight cost.
   expect(estimateTtsPeakBytes({ ...preferred, codecStoredCopies: 2 }))
     .toBe(estimateTtsPeakBytes(preferred) + preferred.codec.bytes);
+});
+
+it.each([undefined, false])('retains the full backbone-copy allowance when the validated extra-buffer flag is %s', flag => {
+  const profile = { ...preferred, backboneNoExtraBufferTypes: flag };
+  expect(getTtsInitParameters(profile, '/managed/voice.gguf')).not.toHaveProperty('no_extra_bufts');
+  expect(estimateTtsPeakBytes(profile)).toBe(2_378_644_640);
+  expect(estimateTtsPeakBytes(profile) - estimateTtsPeakBytes(preferred)).toBe(preferred.backbone.bytes);
+});
+
+it('opts only the exact default profile into the validated extra-buffer policy', () => {
+  expect(preferred.backboneNoExtraBufferTypes).toBe(true);
+  for (const profile of TTS_EXECUTION_PROFILES.filter(value => value.id !== DEFAULT_TTS_PROFILE_ID)) {
+    expect(profile.backboneNoExtraBufferTypes).toBeUndefined();
+    expect(getTtsInitParameters(profile, '/managed/voice.gguf')).not.toHaveProperty('no_extra_bufts');
+  }
 });
 
 it('pins the builtin-capable legacy artifacts and upstream sampling policy', () => {
@@ -29,7 +45,7 @@ it('pins the builtin-capable legacy artifacts and upstream sampling policy', () 
     family: 'outetts', promptKind: 'outetts_v0_3', flow: 'tokens', languages: ['en'],
     voiceModes: ['builtin'], builtinLanguage: 'en-us', builtinVoices: ['default'],
     maxPromptTokens: 1536, sampleRate: 24000, samplesPerFrame: 320, codebooks: 1, codebookSize: 4096,
-    hiddenDimension: 896, layers: 24, codecStoredCopies: 1,
+    hiddenDimension: 896, layers: 24, codecStoredCopies: 1, backboneNoExtraBufferTypes: true,
     sampling: { temperature: 0.7, top_k: 4, top_p: 0.9 },
     backbone: { repository: 'OuteAI/OuteTTS-0.3-500M-GGUF',
       revision: 'ae0577d4386cfb6f442a610a1ec5f2a27d935fc4', filename: 'OuteTTS-0.3-500M-Q4_0.gguf',

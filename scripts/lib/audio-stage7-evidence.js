@@ -37,7 +37,7 @@ const FAILURES = ['qa_operation_failed', 'host_continuation_timeout', 'isolated_
 const FAILURE_STAGES = ['adapter_prepare', 'base_lora_load', 'tts_fixture_prepare', 'tts_admission', 'tts_setup', 'tts_detach',
   'tts_backbone_init', 'vocoder_init', 'getTTSCapabilities', 'builtin_voice_lookup', 'phonemizer', 'speaker_create',
   'speaker_bake', 'formatter', 'prompt_prepare', 'completion', 'completion_stop', 'decode', 'speaker_release',
-  'vocoder_release', 'context_release', 'restore', 'qa_voice_sequence'];
+  'vocoder_release', 'context_release', 'restore', 'wav_encode', 'qa_voice_sequence'];
 function sanitizeAudioStage7Evidence(value) {
   const source = value && typeof value === 'object' ? value : {};
   const result = { schemaVersion: source.schemaVersion === 1 ? 1 : null,

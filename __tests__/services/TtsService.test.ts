@@ -228,6 +228,123 @@ afterEach(async () => {
   await cleanup.catch(() => undefined);
 });
 
+it('converts native float overshoot into a usable WAV and publishes only scalar normalization evidence', async () => {
+  choose();
+  const samples = [2, -1, 0.5, -4, 4];
+  Object.freeze(samples);
+  synthesize.mockResolvedValueOnce({ ...pcm(), samples });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(samples).toEqual([2, -1, 0.5, -4, 4]);
+  expect(playback.setClip).toHaveBeenCalledTimes(1);
+  const [wav, metadata] = playback.setClip.mock.calls[0];
+  const view = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
+  expect(String.fromCharCode(...wav.subarray(0, 4))).toBe('RIFF');
+  expect(String.fromCharCode(...wav.subarray(8, 12))).toBe('WAVE');
+  expect(wav.length).toBe(54); expect(view.getUint32(40, true)).toBe(10);
+  expect(view.getUint32(24, true)).toBe(tokensProfile.sampleRate);
+  expect(metadata).toEqual({ sampleRate: tokensProfile.sampleRate, sampleCount: 5 });
+  expect(Array.from({ length: 5 }, (_, index) => view.getInt16(44 + index * 2, true)))
+    .toEqual([16384, -8192, 4096, -32768, 32767]);
+  expect(service.getState()).toMatchObject({ phase: 'ready', clipAvailable: true, sampleCount: 5,
+    pcmNormalization: { sourcePeakAbs: 4, outOfRangeSamples: 3, gain: 0.25 } });
+  expect(service.getState()).not.toHaveProperty('samples');
+  expect(service.getState().pcmNormalization).toEqual({ sourcePeakAbs: 4, outOfRangeSamples: 3, gain: 0.25 });
+  expect(releaseContext).toHaveBeenCalledTimes(1); expect(restoreA).toHaveBeenCalledTimes(1);
+  expect(playback.play).not.toHaveBeenCalled();
+});
+
+it('resets normalization evidence before a fresh decode and after malformed PCM rejects', async () => {
+  choose();
+  synthesize.mockResolvedValueOnce({ ...pcm(), samples: [2, -4] });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().pcmNormalization?.sourcePeakAbs).toBe(4);
+  const gate = deferred<TtsPcmResult>(); synthesize.mockReturnValueOnce(gate.promise);
+  const next = service.start({ text: 'Hello again.', language: 'en', playAfterSynthesis: false });
+  await until(() => synthesize.mock.calls.length === 2);
+  expect(service.getState().pcmNormalization).toBeUndefined();
+  gate.resolve(pcm()); await next;
+  expect(service.getState().pcmNormalization).toEqual({ sourcePeakAbs: 0.25, outOfRangeSamples: 0, gain: 1 });
+  synthesize.mockResolvedValueOnce({ ...pcm(), samples: [NaN] });
+  await expect(service.start({ text: 'Hello again.', language: 'en', playAfterSynthesis: false }))
+    .rejects.toMatchObject({ code: 'decode_failed' });
+  expect(service.getState().pcmNormalization).toBeUndefined(); expect(playback.setClip).toHaveBeenCalledTimes(2);
+});
+
+it('records a distinct WAV encode failure after native decode and exact chat restoration', async () => {
+  choose();
+  synthesize.mockResolvedValueOnce({ ...pcm(), samples: [2, NaN] });
+  const observe = jest.fn();
+  await expect(service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false, observe }))
+    .rejects.toMatchObject({ code: 'decode_failed' });
+  expect(observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure'))
+    .toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: 'wav_encode' }]);
+  expect(releaseContext).toHaveBeenCalledTimes(1); expect(restoreA).toHaveBeenCalledTimes(1);
+  expect(playback.setClip).not.toHaveBeenCalled(); expect(playback.play).not.toHaveBeenCalled();
+  expect(service.getState().pcmNormalization).toBeUndefined();
+});
+
+it('retains bounded native counters and measures completion time without including chat restoration', async () => {
+  choose();
+  let clock = 10_000; jest.spyOn(Date, 'now').mockImplementation(() => clock);
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    options.observe?.({ operation: 'completion', phase: 'started' });
+    clock = 11_200;
+    options.observe?.({ operation: 'completion', phase: 'settled', tokensPredicted: 42, tokensEvaluated: 875, elapsedMs: 99_999 });
+    return pcm();
+  });
+  restoreA.mockImplementationOnce(async () => { clock += 9_000; });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().nativeCompletion).toEqual({ tokensPredicted: 42, tokensEvaluated: 875, elapsedMs: 1_200 });
+  const gate = deferred<TtsPcmResult>(); synthesize.mockReturnValueOnce(gate.promise);
+  const next = service.start({ text: 'Hello again.', language: 'en', playAfterSynthesis: false });
+  await until(() => synthesize.mock.calls.length === 2);
+  expect(service.getState().nativeCompletion).toBeUndefined();
+  gate.resolve(pcm()); await next;
+  expect(service.getState().nativeCompletion).toBeUndefined();
+});
+
+it('drops invalid counters and unbounded elapsed time instead of fabricating native completion evidence', async () => {
+  choose();
+  let clock = 10_000; jest.spyOn(Date, 'now').mockImplementation(() => clock);
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    options.observe?.({ operation: 'completion', phase: 'started' });
+    clock += 300_001;
+    options.observe?.({ operation: 'completion', phase: 'settled', tokensPredicted: NaN, tokensEvaluated: 1_000_001 });
+    return pcm();
+  });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().nativeCompletion).toBeUndefined();
+});
+
+it('ignores stale native completion callbacks after cancellation and a fresh generation', async () => {
+  choose();
+  let clock = 1_000; jest.spyOn(Date, 'now').mockImplementation(() => clock);
+  const oldCompletion: { observe?: (event: TtsObservation) => void } = {};
+  const gate = deferred<TtsPcmResult>();
+  synthesize.mockImplementationOnce((_context, _profile, options) => {
+    oldCompletion.observe = options.observe;
+    options.observe?.({ operation: 'completion', phase: 'started' });
+    return gate.promise;
+  });
+  const old = service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  const rejected = expect(old).rejects.toMatchObject({ code: 'cancelled' });
+  await until(() => Boolean(oldCompletion.observe));
+  const cleanup = service.cancelAndClear();
+  oldCompletion.observe?.({ operation: 'completion', phase: 'settled', tokensPredicted: 99, tokensEvaluated: 99 });
+  gate.resolve(pcm()); await rejected; await cleanup;
+  expect(service.getState().nativeCompletion).toBeUndefined();
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    clock = 2_000; options.observe?.({ operation: 'completion', phase: 'started' });
+    clock = 2_010; options.observe?.({ operation: 'completion', phase: 'settled', tokensPredicted: 12, tokensEvaluated: 200 });
+    return pcm();
+  });
+  await service.start({ text: 'Hello again.', language: 'en', playAfterSynthesis: false });
+  const current = { tokensPredicted: 12, tokensEvaluated: 200, elapsedMs: 10 };
+  expect(service.getState().nativeCompletion).toEqual(current);
+  oldCompletion.observe?.({ operation: 'completion', phase: 'settled', tokensPredicted: 999, tokensEvaluated: 999 });
+  expect(service.getState().nativeCompletion).toEqual(current);
+});
+
 function chooseReference() {
   registry.saveModels([chatModel(), ttsModel(qwenProfile)]);
   choose(qwenProfile);

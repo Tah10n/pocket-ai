@@ -8,9 +8,10 @@ import { getCompanionSourceIdentity, getSelectedManagedCompanions } from '../uti
 import { fileUriToNativePath, safeJoinModelPath } from '../utils/safeFilePath';
 import { validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
-import { encodeMonoPcmWav, TtsWavError } from '../utils/ttsWav';
+import { encodeDecodedMonoPcmWav, TtsWavError, type TtsPcmNormalization } from '../utils/ttsWav';
 import { prepareSpeechText, TtsTextError } from '../utils/ttsText';
-import { TTS_LIMITS, TtsError, isTtsFailureStage, type TtsFailureStage, type TtsErrorCode, type TtsPhase, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
+import { TTS_LIMITS, TtsError, isTtsFailureStage, sanitizeTtsNativeCompletion, type TtsNativeCompletion,
+  type TtsFailureStage, type TtsErrorCode, type TtsPhase, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
 import { getAuxiliarySelection, validateAuxiliaryFile } from './AuxiliaryModelService';
 import { registry } from './LocalStorageRegistry';
 import { getSettings, subscribeSettings } from './SettingsStore';
@@ -73,6 +74,10 @@ export interface TtsServiceState {
   duration?: number;
   sampleRate?: number;
   sampleCount?: number;
+  /** Whole-clip native float-to-PCM16 conversion; never carries an audio payload. */
+  pcmNormalization?: TtsPcmNormalization;
+  /** Existing native completion counters and measured started-to-settled wall time. */
+  nativeCompletion?: TtsNativeCompletion;
   /** True only while the service owns a validated clip; cleanup errors still block reuse. */
   clipAvailable?: boolean;
 }
@@ -210,6 +215,7 @@ export class TtsService {
   }
 
   private async performFileCheck(controller: AbortController, generation: number): Promise<void> {
+    this.publish({ ...this.state, pcmNormalization: undefined, nativeCompletion: undefined });
     try {
       this.unsubscribe();
       await this.playback.clear();
@@ -243,15 +249,28 @@ export class TtsService {
 
   private async perform(request: TtsRequest, controller: AbortController, generation: number): Promise<void> {
     this.unsubscribe();
+    this.publish({ ...this.state, pcmNormalization: undefined, nativeCompletion: undefined });
     this.executionIdentity = null;
     this.playbackGeneration = null;
     let clipInstalled = false;
     let failureStage: TtsFailureStage = 'tts_admission';
     let failureObserved = false;
+    let completionStartedAt: number | undefined;
+    let completionSettled = false;
     const observe = (event: TtsObservation) => {
       if (event.operation === 'first_failure') {
         if (failureObserved || event.phase !== 'failed' || !isTtsFailureStage(event.failureStage)) return;
         failureObserved = true;
+      }
+      if (event.operation === 'completion' && generation === this.generation
+        && this.controller === controller && !controller.signal.aborted && !completionSettled) {
+        if (event.phase === 'started' && completionStartedAt === undefined) completionStartedAt = Date.now();
+        else if (event.phase === 'settled' && completionStartedAt !== undefined) {
+          completionSettled = true;
+          const nativeCompletion = sanitizeTtsNativeCompletion({ tokensPredicted: event.tokensPredicted,
+            tokensEvaluated: event.tokensEvaluated, elapsedMs: Date.now() - completionStartedAt });
+          this.publish({ ...this.state, nativeCompletion });
+        }
       }
       try { request.observe?.(event); } catch { /* Diagnostics cannot alter synthesis or cleanup. */ }
     };
@@ -445,19 +464,21 @@ export class TtsService {
         }
       });
       check(); // runWithAuxiliarySequence has confirmed codec/context cleanup and exact A restore.
-      failureStage = 'tts_setup';
-      const wav = encodeMonoPcmWav(result.samples, result.sampleRate, {
+      failureStage = 'wav_encode';
+      const encoded = encodeDecodedMonoPcmWav(result.samples, result.sampleRate, {
         maxSamples: TTS_LIMITS.pcmSamples, maxDurationSeconds: TTS_LIMITS.durationSeconds, maxBytes: TTS_LIMITS.wavBytes,
       });
       const metadata = { sampleRate: result.sampleRate, sampleCount: result.samples.length };
       result.samples = []; // No large audio array reaches observable state or persisted messages.
       check();
-      await this.playback.setClip(wav, metadata, publicationCurrent);
+      failureStage = 'tts_setup';
+      await this.playback.setClip(encoded.wav, metadata, publicationCurrent);
       check();
       clipInstalled = true;
       this.playbackGeneration = generation;
       this.publish({ ...this.state, phase: 'ready', clipAvailable: true, sampleRate: metadata.sampleRate,
-        sampleCount: metadata.sampleCount, position: 0, duration: metadata.sampleCount / metadata.sampleRate });
+        sampleCount: metadata.sampleCount, pcmNormalization: encoded.pcmNormalization,
+        position: 0, duration: metadata.sampleCount / metadata.sampleRate });
       if (request.playAfterSynthesis !== false) {
         await this.playback.play();
         check();

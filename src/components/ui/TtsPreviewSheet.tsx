@@ -16,7 +16,7 @@ import { isAndroidQaGenerationEvidenceEnabled } from '../../services/AndroidQaGe
 import { subscribeSettings } from '../../services/SettingsStore';
 import { registry } from '../../services/LocalStorageRegistry';
 import { prepareSpeechText, type PreparedSpeechText } from '../../utils/ttsText';
-import { TTS_LIMITS, TtsError, type TtsErrorCode } from '../../types/tts';
+import { TTS_LIMITS, TtsError, sanitizeTtsNativeCompletion, type TtsErrorCode } from '../../types/tts';
 import { AudioRecordingSheet } from './AudioRecordingSheet';
 import { referenceVoiceStore, type TemporaryReferenceSource } from '../../services/ReferenceVoiceStore';
 import { prepareManagedAudio, discardPreparedAudio, waitForAudioPreparationDrain, type PreparedAudio } from '../../services/AudioPreparationService';
@@ -41,6 +41,20 @@ export function getTtsQaPlaybackMarker(state: TtsServiceState): string {
   const bytes = (value: number | undefined) => typeof value === 'number' && Number.isSafeInteger(value)
     && value >= 0 && value <= 64 * 1024 ** 3 ? value : undefined;
   const admission = state.memoryAdmission;
+  const nativeCompletion = sanitizeTtsNativeCompletion(state.nativeCompletion);
+  const normalization = state.pcmNormalization;
+  const pcmNormalization = normalization && typeof normalization.sourcePeakAbs === 'number'
+    && Number.isFinite(normalization.sourcePeakAbs) && normalization.sourcePeakAbs >= 0
+    && typeof normalization.outOfRangeSamples === 'number' && Number.isSafeInteger(normalization.outOfRangeSamples)
+    && normalization.outOfRangeSamples >= 0 && normalization.outOfRangeSamples <= TTS_LIMITS.pcmSamples
+    && (state.sampleCount === undefined || (Number.isSafeInteger(state.sampleCount)
+      && state.sampleCount > 0 && state.sampleCount <= TTS_LIMITS.pcmSamples && normalization.outOfRangeSamples <= state.sampleCount))
+    && typeof normalization.gain === 'number' && Number.isFinite(normalization.gain)
+    && normalization.gain > 0 && normalization.gain <= 1
+    && normalization.gain === 1 / Math.max(1, normalization.sourcePeakAbs)
+    && (normalization.sourcePeakAbs > 1) === (normalization.outOfRangeSamples > 0)
+    ? { sourcePeakAbs: normalization.sourcePeakAbs, outOfRangeSamples: normalization.outOfRangeSamples,
+        gain: normalization.gain } : undefined;
   return JSON.stringify({
     phase: state.phase,
     ...(seconds(state.position) ? { position: state.position } : {}),
@@ -57,6 +71,8 @@ export function getTtsQaPlaybackMarker(state: TtsServiceState): string {
       pressureLevel: ['normal', 'warning', 'critical', 'unknown'].includes(admission.pressureLevel ?? '')
         ? admission.pressureLevel : undefined,
     } } : {}),
+    ...(pcmNormalization ? { pcmNormalization } : {}),
+    ...(nativeCompletion ? { nativeCompletion } : {}),
     errorCode: state.errorCode ?? null,
   });
 }

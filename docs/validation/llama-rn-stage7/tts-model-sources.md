@@ -1,10 +1,18 @@
 # Voice execution source record
 
-The exact artifact identities are in [tts-fixtures.json](tts-fixtures.json). This record describes source contracts and bounded execution profiles. It does not establish native inference, intelligibility, speaker similarity, peak memory or device acceptance. Existing Stage 6 OuteTTS and BlueMagpie profiles and decoder bounds remain unchanged.
+The historical Stage 7 fixture identities are in [tts-fixtures.json](tts-fixtures.json). This record describes source contracts and bounded execution profiles. It does not establish native inference, intelligibility, speaker similarity, peak memory or device acceptance. Current recommendation and memory policies are also documented in [local TTS](../../local-tts.md); the 240-character and 16-second output limits remain in force.
+
+## Recommended English default
+
+The default download pairs [OuteTTS 0.3 500M Q4_0](https://huggingface.co/OuteAI/OuteTTS-0.3-500M-GGUF/blob/ae0577d4386cfb6f442a610a1ec5f2a27d935fc4/OuteTTS-0.3-500M-Q4_0.gguf) with [WavTokenizer large speech F16](https://huggingface.co/BricksDisplay/codec.cpp-gguf/blob/4cd6ecf17367ebc03bba4b2ce8186268a6ce7436/wavtokenizer-large-speech-75tokens.gguf), totaling 527,265,760 bytes (503 MiB). The explicit builtin default uses the pinned registry's legacy word/code payload under `en-us`, with synthesis admission `en`; it does not create a reference-speaker handle or require phonemization. Unknown voices are not silently replaced.
+
+Its CPU profile uses a 3,840-token context, F16 KV, 1,536 prompt tokens, 2,304 generation steps and one 4,096-entry codebook. The 24 kHz decoder hop of 320 bounds output to 1,200 frames/16 seconds. Memory-mapped default CPU buffers with `no_extra_bufts: true` avoid an additional repacked backbone allocation. A guarded native path omits the unused duplicate audio-LM owner only for metadata-confirmed plain WavTokenizer/DAC codecs. The resulting 2,020,891,040-byte conservative policy retains graph, workspace, PCM and bridge reserves; this is not a measured peak or a speed guarantee. These artifact identities and source settings do not establish native speech quality.
+
+The OuteTTS weights declare CC-BY-SA-4.0; the selected WavTokenizer conversion declares MIT. The default is English-only in the application.
 
 ## Builtin voice and offline phonemes
 
-[NeuTTS Nano GGUF](https://huggingface.co/BricksDisplay/NeuTTS-Nano-GGUF/tree/857e272b903daf826606567c9ceaef574bfa793b) plus its NeuCodec Q8 artifact is the selected English builtin profile. Unique artifacts total 551,290,944 bytes; the two codec-loading paths in rc.3 bring the artifact baseline to 893,010,112 bytes before graphs and dequantization. The GGUF decoder hop is 480 samples at 24 kHz, hence 800 frames for the existing 16-second clip limit.
+[NeuTTS Nano GGUF](https://huggingface.co/BricksDisplay/NeuTTS-Nano-GGUF/tree/857e272b903daf826606567c9ceaef574bfa793b) plus its NeuCodec Q8 artifact is an additional English builtin profile requiring offline phonemization. Unique artifacts total 551,290,944 bytes; the two codec-loading paths in rc.3 bring the artifact baseline to 893,010,112 bytes before graphs and dequantization. The GGUF decoder hop is 480 samples at 24 kHz, hence 800 frames for the existing 16-second clip limit.
 
 The [rc.3 voice registry](https://github.com/mybigday/llama.rn/blob/v0.13.0-rc.3/src/tts-voices.ts) provides `default`, `dave`, `jo` under `en-us`; `default` aliases Jo. It also provides German and French entries, but those do not admit German/French speech from this English Nano backbone. Speech admission `en`, builtin lookup `en-us` and phonemizer `en-us` are separate fields. The runtime intersects all three public voice/language helpers with the profile and verifies native capabilities before formatting.
 

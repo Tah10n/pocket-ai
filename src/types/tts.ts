@@ -40,6 +40,23 @@ export function sanitizePhonemizerFailure(value: unknown): PhonemizerFailure | u
     ...(source.moduleInitMs === undefined ? {} : { moduleInitMs: source.moduleInitMs as number }) });
 }
 
+export interface TtsNativeCompletion {
+  readonly tokensPredicted?: number;
+  readonly tokensEvaluated?: number;
+  readonly elapsedMs?: number;
+}
+/** Closed numeric diagnostics only; these bounds do not change native admission. */
+export function sanitizeTtsNativeCompletion(value: unknown): TtsNativeCompletion | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const source = value as Record<string, unknown>;
+  const bounded = (field: unknown, maximum: number): number | undefined => typeof field === 'number'
+    && Number.isSafeInteger(field) && field >= 0 && field <= maximum ? field : undefined;
+  const result = { tokensPredicted: bounded(source.tokensPredicted, 1_000_000),
+    tokensEvaluated: bounded(source.tokensEvaluated, 1_000_000), elapsedMs: bounded(source.elapsedMs, 300_000) };
+  if (Object.values(result).every(field => field === undefined)) return undefined;
+  return Object.freeze(result);
+}
+
 /** Never exposes native error messages, input, audio payloads or private paths. */
 export class TtsError extends Error {
   readonly phonemizerFailure?: PhonemizerFailure;
@@ -73,7 +90,7 @@ export const TTS_FAILURE_STAGES = [
   'adapter_prepare', 'base_lora_load', 'tts_fixture_prepare', 'tts_admission', 'tts_setup', 'tts_detach',
   'tts_backbone_init', 'vocoder_init', 'getTTSCapabilities', 'builtin_voice_lookup', 'phonemizer',
   'speaker_create', 'speaker_bake', 'formatter', 'prompt_prepare', 'completion', 'completion_stop',
-  'decode', 'speaker_release', 'vocoder_release', 'context_release', 'restore', 'qa_voice_sequence',
+  'decode', 'wav_encode', 'speaker_release', 'vocoder_release', 'context_release', 'restore', 'qa_voice_sequence',
 ] as const;
 export type TtsFailureStage = typeof TTS_FAILURE_STAGES[number];
 export function isTtsFailureStage(value: unknown): value is TtsFailureStage {

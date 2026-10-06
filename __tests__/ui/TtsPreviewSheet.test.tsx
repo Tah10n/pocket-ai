@@ -1,7 +1,7 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { TtsPreviewSheet, getTtsQaPlaybackMarker } from '../../src/components/ui/TtsPreviewSheet';
-import { ttsService, getTtsSelectionStatus } from '../../src/services/TtsService';
+import { ttsService, getTtsSelectionStatus, type TtsServiceState } from '../../src/services/TtsService';
 import * as DocumentPicker from 'expo-document-picker';
 import { referenceVoiceStore, type TemporaryReferenceSource } from '../../src/services/ReferenceVoiceStore';
 import { prepareManagedAudio, discardPreparedAudio, waitForAudioPreparationDrain, type PreparedAudio } from '../../src/services/AudioPreparationService';
@@ -10,6 +10,75 @@ import type { AudioRecordingSheet } from '../../src/components/ui/AudioRecording
 import en from '../../src/i18n/locales/en.json';
 import ru from '../../src/i18n/locales/ru.json';
 import type { TtsModelSetupState } from '../../src/services/TtsModelSetupService';
+
+it('allowlists three valid PCM normalization scalars without exposing native samples or extra fields', () => {
+  const pcmNormalization = { sourcePeakAbs: 4, outOfRangeSamples: 3, gain: 0.25,
+    samples: [2, -4, 4], sourcePath: '/private/audio.wav', text: 'private speech' };
+  const marker = getTtsQaPlaybackMarker({ phase: 'ready', sampleRate: 24_000, sampleCount: 5, pcmNormalization });
+  expect(JSON.parse(marker)).toEqual({ phase: 'ready', sampleRate: 24_000, sampleCount: 5, errorCode: null,
+    pcmNormalization: { sourcePeakAbs: 4, outOfRangeSamples: 3, gain: 0.25 } });
+  expect(marker).not.toContain('samples'); expect(marker).not.toContain('private');
+});
+
+it.each([
+  { sourcePeakAbs: NaN, outOfRangeSamples: 1, gain: 0.25 },
+  { sourcePeakAbs: Infinity, outOfRangeSamples: 1, gain: 0.25 },
+  { sourcePeakAbs: -4, outOfRangeSamples: 1, gain: 0.25 },
+  { sourcePeakAbs: '4', outOfRangeSamples: 1, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: -1, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1.5, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: Infinity, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 768_001, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 6, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 0, gain: 0.25 },
+  { sourcePeakAbs: 0.5, outOfRangeSamples: 1, gain: 1 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: NaN },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: Infinity },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: 0 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: -0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: 1.1 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: 0.5 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: '0.25' },
+])('rejects malformed or inconsistent PCM normalization diagnostic %j', pcmNormalization => {
+  const marker = getTtsQaPlaybackMarker({ phase: 'ready', sampleCount: 5,
+    pcmNormalization: pcmNormalization as unknown as NonNullable<TtsServiceState['pcmNormalization']> });
+  expect(JSON.parse(marker)).not.toHaveProperty('pcmNormalization');
+});
+
+it('retains valid unity gain and finite extreme PCM normalization evidence', () => {
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: 'ready', sampleCount: 1,
+    pcmNormalization: { sourcePeakAbs: 0, outOfRangeSamples: 0, gain: 1 } })).pcmNormalization)
+    .toEqual({ sourcePeakAbs: 0, outOfRangeSamples: 0, gain: 1 });
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: 'ready', sampleCount: 1,
+    pcmNormalization: { sourcePeakAbs: Number.MAX_VALUE, outOfRangeSamples: 1, gain: 1 / Number.MAX_VALUE } })).pcmNormalization)
+    .toEqual({ sourcePeakAbs: Number.MAX_VALUE, outOfRangeSamples: 1, gain: 1 / Number.MAX_VALUE });
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: null }))).not.toHaveProperty('pcmNormalization');
+});
+
+it('allowlists bounded native completion scalars including zero and exact diagnostic limits', () => {
+  const nativeCompletion = { tokensPredicted: 0, tokensEvaluated: 1_000_000, elapsedMs: 300_000,
+    tokens: [1, 2], sourcePath: '/private/model.gguf', text: 'private speech' };
+  const marker = getTtsQaPlaybackMarker({ phase: 'ready', nativeCompletion });
+  expect(JSON.parse(marker)).toEqual({ phase: 'ready', errorCode: null,
+    nativeCompletion: { tokensPredicted: 0, tokensEvaluated: 1_000_000, elapsedMs: 300_000 } });
+  expect(marker).not.toContain('private'); expect(marker).not.toContain('tokens"');
+});
+
+it.each([NaN, Infinity, -1, 1.5, '12', false])('omits forged native completion numbers %s', invalid => {
+  const marker = getTtsQaPlaybackMarker({ phase: 'ready', nativeCompletion: {
+    tokensPredicted: invalid, tokensEvaluated: invalid, elapsedMs: invalid,
+  } as unknown as NonNullable<TtsServiceState['nativeCompletion']> });
+  expect(JSON.parse(marker)).not.toHaveProperty('nativeCompletion');
+});
+
+it('omits exceeded native completion bounds while retaining other valid scalars', () => {
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: 'ready', nativeCompletion: {
+    tokensPredicted: 1_000_001, tokensEvaluated: 1_000_001, elapsedMs: 300_001,
+  } }))).not.toHaveProperty('nativeCompletion');
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: 'ready', nativeCompletion: {
+    tokensPredicted: 1_000_001, tokensEvaluated: 0, elapsedMs: 0,
+  } })).nativeCompletion).toEqual({ tokensEvaluated: 0, elapsedMs: 0 });
+});
 
 it('serializes only bounded admission fields from the existing QA playback marker', () => {
   const memoryAdmission = { availableBytes: 2_440_790_016, freeBytes: 211_845_120,

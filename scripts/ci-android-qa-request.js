@@ -52,6 +52,11 @@ function evaluateQaRequest(eventName, event) {
 function main(environment = process.env) {
   const event = JSON.parse(fs.readFileSync(environment.GITHUB_EVENT_PATH, "utf8"));
   const result = evaluateQaRequest(environment.GITHUB_EVENT_NAME, event);
+  // Log only public trigger identity, never PR prose or the complete payload.
+  const action = ["opened", "reopened", "synchronize", "edited", "labeled", "unlabeled"].includes(event.action)
+    ? event.action : "other";
+  const sha = (value) => /^[a-f0-9]{40}$/i.test(value || "") ? value : "missing";
+  console.log(`CI trigger action=${action} head=${sha(event.pull_request?.head?.sha)} base=${sha(event.pull_request?.base?.sha)}`);
   fs.appendFileSync(environment.GITHUB_OUTPUT,
     `run=${result.run}\npack=${result.pack}\ndiagnostics=${result.diagnostics}\n`);
   console.log(`Android QA pack=${result.pack || "none"}; requested run=${result.run}; retain diagnostics=${result.diagnostics}`);

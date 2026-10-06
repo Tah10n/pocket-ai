@@ -133,11 +133,17 @@ describe('optional Android QA event routing', () => {
     try {
       const eventPath = path.join(directory, 'event.json');
       const outputPath = path.join(directory, 'output.txt');
-      fs.writeFileSync(eventPath, JSON.stringify(event('opened', pr([], '- [x] Run Android checks\n$(exit 1)\npack=all'))));
-      execFileSync(process.execPath, [path.resolve(__dirname, '../../scripts/ci-android-qa-request.js')], {
+      const pullRequest = { ...pr([], '- [x] Run Android checks\n$(exit 1)\npack=all'),
+        head: { sha: '379866fbfa04918e33beb8cc8aeb8b40bb35523e' },
+        base: { sha: 'fb970529608beeac90f272106f45ad7a97a330df' } };
+      fs.writeFileSync(eventPath, JSON.stringify(event('opened', pullRequest)));
+      const stdout = execFileSync(process.execPath, [path.resolve(__dirname, '../../scripts/ci-android-qa-request.js')], {
         env: { ...process.env, GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath },
-      });
+      }).toString('utf8');
       expect(fs.readFileSync(outputPath, 'utf8')).toBe('run=true\npack=runtime\ndiagnostics=true\n');
+      expect(stdout).toContain('CI trigger action=opened head=379866fbfa04918e33beb8cc8aeb8b40bb35523e base=fb970529608beeac90f272106f45ad7a97a330df');
+      expect(stdout).not.toContain('$(exit 1)');
+      expect(stdout).not.toContain('pack=all');
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

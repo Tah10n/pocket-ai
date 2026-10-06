@@ -51,6 +51,20 @@ Native scope still examines the whole PR. A docs/report-only push to a PR with
 native changes conservatively reruns Android API 32–35 and iOS. Reusing native
 proof across such revisions and sharing one APK across emulator jobs are deferred.
 
+Native builds cache Rust dependencies separately for Android and iOS, keyed by
+the pinned toolchain, Cargo inputs and native build scripts. Workspace crates are
+rebuilt. Android native and requested QA jobs share only Gradle dependency downloads
+and wrapper distributions from the isolated QA Gradle home, restored after `npm ci`.
+Generated app/build outputs, APKs, provenance and prior verification results are
+not cached. A cold or missing cache still runs the complete build and verification.
+Docs/report edits leave these dependency keys unchanged; lockfile/build-policy
+changes select new primary keys. Download-only Gradle fallback restores can still
+reuse content-addressed dependencies. Native patch and SDK/setup-script edits remain in native scope.
+
+The scope and QA request logs record the public action and head/base commit IDs
+without dumping PR prose or the full event payload. This distinguishes future
+source/base events from metadata events when diagnosing duplicate runs.
+
 PRs are expected to keep `main` green. Typical required checks include:
 
 - CI (typecheck + lint + tests)

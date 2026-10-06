@@ -61,6 +61,10 @@ jobs:
               - '.github/workflows/android-qa.yml'
               - '.github/workflows/release-please.yml'
               - 'scripts/android-*.js'
+              - 'scripts/llama-hexagon-sdk.js'
+              - 'scripts/llama-hexagon-sdk-manifest.json'
+              - 'scripts/eas-llama-build-setup.js'
+              - 'patches/**'
               - 'scripts/build-android-release.js'
               - 'scripts/verify-ci-gate-results.js'
               - 'scripts/ci-android-qa-request.js'
@@ -155,6 +159,13 @@ jobs:
         with:
           targets: aarch64-linux-android, x86_64-linux-android
 
+      - name: Cache AnyDoc Android dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: modules/pocket-anydoc/rust -> target
+          shared-key: anydoc-android-cargo-ndk-4.1.2-${{ hashFiles('modules/pocket-anydoc/scripts/build-android.mjs', 'modules/pocket-anydoc/scripts/build-utils.mjs') }}
+          cache-workspace-crates: false
+
       - name: Install pinned cargo-ndk
         run: cargo install cargo-ndk --version 4.1.2 --locked
 
@@ -166,6 +177,17 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # npm ci clears node_modules, including this isolated Gradle home. Restore
+      # afterwards; retain downloads only, never generated app/build outputs.
+      - name: Cache isolated Gradle downloads
+        uses: actions/cache@v5
+        with:
+          path: |
+            node_modules/.cache/pocket-ai-android/gradle-user-home/caches/modules-2/files-2.1
+            node_modules/.cache/pocket-ai-android/gradle-user-home/wrapper/dists
+          key: android-gradle-downloads-v1-${{ runner.os }}-${{ hashFiles('package-lock.json', 'app.json', 'eas.json', 'plugins/**', 'modules/*/android/**/*.gradle', 'modules/*/android/**/gradle.properties', 'scripts/android-build-provenance.js') }}
+          restore-keys: android-gradle-downloads-v1-${{ runner.os }}-
 
       - name: Build and run native release pack
         uses: reactivecircus/android-emulator-runner@v2
@@ -227,6 +249,13 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+
+      - name: Cache AnyDoc iOS dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: modules/pocket-anydoc/rust -> target
+          shared-key: anydoc-ios-${{ hashFiles('modules/pocket-anydoc/scripts/build-ios.mjs', 'modules/pocket-anydoc/scripts/build-utils.mjs') }}
+          cache-workspace-crates: false
 
       - name: Install dependencies
         shell: bash

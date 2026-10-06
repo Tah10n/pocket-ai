@@ -131,8 +131,8 @@ const mockSetupListeners = new Set<() => void>();
 const mockStartRecommended = jest.fn();
 const mockCancelModelSetup = jest.fn();
 jest.mock('../../src/services/TtsModelSetupService', () => ({
-  RECOMMENDED_TTS_DOWNLOAD_MIB: 503,
-  getRecommendedTtsModelMetadata: () => ({ name: 'OuteTTS 0.3 (0.5B)' }),
+  RECOMMENDED_TTS_DOWNLOAD_MIB: 524,
+  getRecommendedTtsModelMetadata: () => ({ name: 'OuteTTS 1.0 (0.6B)' }),
   getInstalledRecommendedTtsModel: () => mockRecommendedInstalled ? { id: 'installed-oute' } : undefined,
   TtsModelSetupService: class {
     getState = () => mockSetupState;

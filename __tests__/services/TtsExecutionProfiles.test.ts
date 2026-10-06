@@ -3,72 +3,71 @@ import { DEFAULT_TTS_PROFILE_ID, TTS_EXECUTION_PROFILES, estimateTtsPeakBytes,
 import { TTS_LIMITS } from '../../src/types/tts';
 
 const preferred = TTS_EXECUTION_PROFILES.find(profile => profile.id === DEFAULT_TTS_PROFILE_ID)!;
+const legacy = TTS_EXECUTION_PROFILES.find(profile => profile.promptKind === 'outetts_v0_3')!;
 
-it('keeps the full legacy builtin prompt and generation in an isolated CPU context', () => {
-  const params = getTtsInitParameters(preferred, '/managed/voice.gguf');
-  expect(params).toMatchObject({ n_ctx: 3840, n_batch: 128, n_ubatch: 128,
-    n_gpu_layers: 0, embedding: false, cache_type_k: 'f16', cache_type_v: 'f16',
-    no_extra_bufts: true, use_mmap: true, use_mlock: false,
-    ctx_shift: false, n_parallel: 1, state_cache_budget_mb: 0, state_cache_max_checkpoints: 8 });
-  expect(preferred.contextTokens).toBe(preferred.maxPromptTokens! + preferred.generationSteps);
-  expect(preferred.generationSteps).toBe(2304);
-  expect(preferred.maxFrames).toBe(1200);
+it.each([preferred, legacy])('keeps the complete $promptKind prompt and generation in one CPU context', profile => {
+  expect(getTtsInitParameters(profile, '/managed/voice.gguf')).toMatchObject({ n_ctx: profile.contextTokens,
+    n_batch: 128, n_ubatch: 128, n_gpu_layers: 0, embedding: false,
+    cache_type_k: 'f16', cache_type_v: 'f16', no_extra_bufts: true,
+    use_mmap: true, use_mlock: false, ctx_shift: false, n_parallel: 1,
+    state_cache_budget_mb: 0, state_cache_max_checkpoints: 8 });
+  expect(profile.contextTokens).toBe((profile.maxPromptTokens ?? 512) + profile.generationSteps);
+  expect(profile.generationSteps).toBe(2304);
+  expect(profile.maxFrames).toBe(1200);
   expect(TTS_LIMITS).toMatchObject({ textCharacters: 240, durationSeconds: 16 });
 });
 
-it('uses exact Qwen2 KV dimensions and retains codec casts, global payload and workspace headroom', () => {
-  expect(preferred.kvCache).toEqual({ heads: 2, keyDimension: 64, valueDimension: 64 });
+it('selects the previously content-verified speakerless Oute1.0 pair with its accepted sampler', () => {
+  expect(preferred).toMatchObject({ id: 'outetts-1.0-0.6b-q4_k_m-dac-speech-f16',
+    family: 'outetts', promptKind: 'outetts_v1_0', flow: 'tokens', languages: ['en'],
+    sampleRate: 24000, samplesPerFrame: 320, codebooks: 2, codebookSize: 1024,
+    contextTokens: 2816, hiddenDimension: 1024, layers: 28, codecStoredCopies: 1,
+    sampling: { temperature: 0.4, top_k: 40, top_p: 0.9, penalty_repeat: 1.1 },
+    backbone: { repository: 'OuteAI/OuteTTS-1.0-0.6B-GGUF',
+      revision: '7e8de3b4d95e100812fd7e6f4372510d0830a798', filename: 'OuteTTS-1.0-0.6B-Q4_K_M.gguf',
+      sha256: 'a0e2afa131b8a5029de0c653d55b71aab99744226234fcf1d80c55dade21020b', bytes: 401741952 },
+    codec: { repository: 'BricksDisplay/codec.cpp-gguf', revision: '4cd6ecf17367ebc03bba4b2ce8186268a6ce7436',
+      filename: 'ibm-research--DAC.speech.gguf',
+      sha256: 'f58e57eabef8d574f4d08828f0116d93341bd91a26413390b780c6f1e8491337', bytes: 147786400 } });
+  expect(preferred.voiceModes).toBeUndefined();
+  expect(preferred.builtinLanguage).toBeUndefined();
+  expect(preferred.kvCache).toEqual({ heads: 8, keyDimension: 128, valueDimension: 128 });
   expect(preferred.graphReserveBytes).toBe(768 * 1024 * 1024);
-  expect(estimateTtsPeakBytes(preferred)).toBe(2_020_891_040);
-  // Losing the native duplicate-owner guard must restore its stored-weight cost.
+  expect(estimateTtsPeakBytes(preferred)).toBe(2_275_477_600);
   expect(estimateTtsPeakBytes({ ...preferred, codecStoredCopies: 2 }))
     .toBe(estimateTtsPeakBytes(preferred) + preferred.codec.bytes);
 });
 
-it.each([undefined, false])('retains the full backbone-copy allowance when the validated extra-buffer flag is %s', flag => {
-  const profile = { ...preferred, backboneNoExtraBufferTypes: flag };
-  expect(getTtsInitParameters(profile, '/managed/voice.gguf')).not.toHaveProperty('no_extra_bufts');
-  expect(estimateTtsPeakBytes(profile)).toBe(2_378_644_640);
-  expect(estimateTtsPeakBytes(profile) - estimateTtsPeakBytes(preferred)).toBe(preferred.backbone.bytes);
+it.each([undefined, false])('restores both full-file backbone allowances without the native opt-in: %s', flag => {
+  for (const profile of [preferred, legacy]) {
+    const fallback = { ...profile, backboneNoExtraBufferTypes: flag };
+    expect(getTtsInitParameters(fallback, '/managed/voice.gguf')).not.toHaveProperty('no_extra_bufts');
+    expect(estimateTtsPeakBytes(fallback) - estimateTtsPeakBytes(profile)).toBe(profile.backbone.bytes);
+  }
+  expect(estimateTtsPeakBytes({ ...preferred, backboneNoExtraBufferTypes: flag })).toBe(2_677_219_552);
+  expect(estimateTtsPeakBytes({ ...legacy, backboneNoExtraBufferTypes: flag })).toBe(2_378_644_640);
 });
 
-it('opts only the exact default profile into the validated extra-buffer policy', () => {
-  expect(preferred.backboneNoExtraBufferTypes).toBe(true);
-  for (const profile of TTS_EXECUTION_PROFILES.filter(value => value.id !== DEFAULT_TTS_PROFILE_ID)) {
+it('limits CPU mapping opt-in to the two exact plain-code Oute artifact profiles', () => {
+  for (const profile of TTS_EXECUTION_PROFILES.filter(value => value !== preferred && value !== legacy)) {
     expect(profile.backboneNoExtraBufferTypes).toBeUndefined();
     expect(getTtsInitParameters(profile, '/managed/voice.gguf')).not.toHaveProperty('no_extra_bufts');
   }
 });
 
-it('pins the builtin-capable legacy artifacts and upstream sampling policy', () => {
-  expect(preferred).toMatchObject({ id: 'outetts-0.3-500m-q4_0-wavtokenizer-large-f16',
-    family: 'outetts', promptKind: 'outetts_v0_3', flow: 'tokens', languages: ['en'],
-    voiceModes: ['builtin'], builtinLanguage: 'en-us', builtinVoices: ['default'],
-    maxPromptTokens: 1536, sampleRate: 24000, samplesPerFrame: 320, codebooks: 1, codebookSize: 4096,
+it('retains the legacy builtin artifacts and exact Qwen2 geometry separately from the default', () => {
+  expect(legacy).toMatchObject({ voiceModes: ['builtin'], builtinLanguage: 'en-us', builtinVoices: ['default'],
+    maxPromptTokens: 1536, contextTokens: 3840, codebooks: 1, codebookSize: 4096,
     hiddenDimension: 896, layers: 24, codecStoredCopies: 1, backboneNoExtraBufferTypes: true,
-    sampling: { temperature: 0.1, top_k: 4, top_p: 0.9, penalty_repeat: 1.1 },
-    backbone: { repository: 'OuteAI/OuteTTS-0.3-500M-GGUF',
-      revision: 'ae0577d4386cfb6f442a610a1ec5f2a27d935fc4', filename: 'OuteTTS-0.3-500M-Q4_0.gguf',
-      sha256: '086667b32948d618c4ddc3a36d2bdb5f40f7afbb721e51cd32b318680543965f', bytes: 357753600 },
-    codec: { repository: 'BricksDisplay/codec.cpp-gguf', revision: '4cd6ecf17367ebc03bba4b2ce8186268a6ce7436',
-      filename: 'wavtokenizer-large-speech-75tokens.gguf',
-      sha256: '9b08679358a172b1bf1d4f3394c8bad2779a077a9395d7cd0148dff989feb99f', bytes: 169512160 } });
-  expect(preferred.sampling.penalty_repeat).toBe(1.1);
+    sampling: { temperature: 0.1, top_k: 4, top_p: 0.9, penalty_repeat: 1.1 } });
+  expect(legacy.kvCache).toEqual({ heads: 2, keyDimension: 64, valueDimension: 64 });
+  expect(estimateTtsPeakBytes(legacy)).toBe(2_020_891_040);
 });
 
-it('admits the preferred configuration only for its exact backbone and codec hashes', () => {
-  expect(getTtsExecutionProfile(preferred.backbone.sha256, preferred.codec.sha256)).toBe(preferred);
-  expect(getTtsExecutionProfile(preferred.backbone.sha256, '0'.repeat(64))).toBeNull();
-  expect(getTtsExecutionProfile('0'.repeat(64), preferred.codec.sha256)).toBeNull();
-});
-
-it('retains the previous Oute 1.0 allocation policy and exact artifact lookup', () => {
-  const previous = TTS_EXECUTION_PROFILES.find(profile => profile.id === 'outetts-1.0-0.6b-q4_k_m-dac-speech-f16')!;
-  expect(getTtsExecutionProfile(previous.backbone.sha256, previous.codec.sha256)).toBe(previous);
-  expect(getTtsInitParameters(previous, '/managed/voice.gguf')).toMatchObject({ n_ctx: 2816,
-    n_batch: 128, embedding: false, cache_type_k: 'f16', cache_type_v: 'f16' });
-  expect(previous.kvCache).toEqual({ heads: 8, keyDimension: 128, valueDimension: 128 });
-  expect(estimateTtsPeakBytes(previous)).toBe(2_677_219_552);
+it.each([preferred, legacy])('admits $promptKind only for its exact backbone and codec hashes', profile => {
+  expect(getTtsExecutionProfile(profile.backbone.sha256, profile.codec.sha256)).toBe(profile);
+  expect(getTtsExecutionProfile(profile.backbone.sha256, '0'.repeat(64))).toBeNull();
+  expect(getTtsExecutionProfile('0'.repeat(64), profile.codec.sha256)).toBeNull();
 });
 
 it('retains existing conservative allocation and hidden-state policies for other families', () => {

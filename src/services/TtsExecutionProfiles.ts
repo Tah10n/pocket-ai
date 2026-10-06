@@ -50,7 +50,7 @@ export interface TtsExecutionProfile {
 }
 
 const MiB = 1024 * 1024;
-export const DEFAULT_TTS_PROFILE_ID = 'outetts-0.3-500m-q4_0-wavtokenizer-large-f16';
+export const DEFAULT_TTS_PROFILE_ID = 'outetts-1.0-0.6b-q4_k_m-dac-speech-f16';
 export const TTS_EXECUTION_PROFILES: readonly TtsExecutionProfile[] = Object.freeze([
   Object.freeze({
     id: 'outetts-1.0-0.6b-q4_k_m-dac-speech-f16',
@@ -68,6 +68,8 @@ export const TTS_EXECUTION_PROFILES: readonly TtsExecutionProfile[] = Object.fre
     kvCache: Object.freeze({ heads: 8, keyDimension: 128, valueDimension: 128 }),
     // CODEC_CODES uses sampled codes, not retained backbone hidden states.
     backboneEmbeddings: false, backboneBatchTokens: 128,
+    // The exact plain-code CPU profile uses mmap without an additional repacked owner.
+    backboneNoExtraBufferTypes: true,
     // Guarded rc.3 patch skips the unused audio_lm owner for plain DAC metadata.
     codecStoredCopies: 1,
     graphReserveBytes: 768 * MiB,

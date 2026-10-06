@@ -563,7 +563,7 @@ it('admits sufficient OS allocatable memory after detaching A even when free pag
   });
 });
 
-it('admits the automatically selected legacy builtin profile within the observed phone budget', async () => {
+it('admits the automatically selected speakerless default within the observed phone budget', async () => {
   const preferred = TTS_EXECUTION_PROFILES.find(profile => profile.id === DEFAULT_TTS_PROFILE_ID)!;
   registry.saveModels([chatModel(), ttsModel(preferred)]);
   updateSettings({ auxiliaryModels: {}, autoSelectTtsModel: true });
@@ -581,14 +581,14 @@ it('admits the automatically selected legacy builtin profile within the observed
     expect(events).toEqual(['detach-a']);
     return { availableBytes, freeBytes, thresholdBytes, lowMemory: false, pressureLevel: 'normal' } as never;
   });
-  await service.start({ text: 'Hello.', language: 'en', voice: { kind: 'builtin', voice: 'default' },
+  await service.start({ text: 'Hello.', language: 'en', voice: { kind: 'speakerless' },
     playAfterSynthesis: false });
-  expect(requiredBytes).toBe(2_020_891_040);
-  expect(contextRequests[0].initParams).toMatchObject({ n_ctx: 3840, n_batch: 128,
+  expect(requiredBytes).toBe(2_275_477_600);
+  expect(contextRequests[0].initParams).toMatchObject({ n_ctx: 2816, n_batch: 128,
     embedding: false, cache_type_k: 'f16', cache_type_v: 'f16', n_gpu_layers: 0,
     use_mmap: true, use_mlock: false, no_extra_bufts: true });
   expect(synthesize).toHaveBeenCalledWith(context, preferred, expect.objectContaining({
-    voice: { kind: 'builtin', voice: 'default' } }));
+    voice: { kind: 'speakerless' } }));
   expect(service.getState().memoryAdmission).toMatchObject({ requiredBytes, availableBytes, freeBytes,
     thresholdBytes, budgetBytes, lowMemory: false, pressureLevel: 'normal' });
   expect(budgetBytes).toBeGreaterThan(requiredBytes);

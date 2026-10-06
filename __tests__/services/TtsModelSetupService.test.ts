@@ -107,11 +107,11 @@ describe('explicit recommended TTS setup', () => {
 
   it('keeps installed lookups and pinned metadata free of download side effects', () => {
     expect(getInstalledRecommendedTtsModel()).toBeUndefined();
-    expect(getRecommendedTtsModelMetadata()).toMatchObject({ id: RECOMMENDED_TTS_MODEL_ID, name: 'OuteTTS 0.3 (0.5B)',
-      parameterSizeLabel: '0.5B', license: 'cc-by-sa-4.0', hfRevision: 'ae0577d4386cfb6f442a610a1ec5f2a27d935fc4',
-      sha256: '086667b32948d618c4ddc3a36d2bdb5f40f7afbb721e51cd32b318680543965f', size: 357753600,
+    expect(getRecommendedTtsModelMetadata()).toMatchObject({ id: RECOMMENDED_TTS_MODEL_ID, name: 'OuteTTS 1.0 (0.6B)',
+      parameterSizeLabel: '0.6B', license: 'apache-2.0', hfRevision: '7e8de3b4d95e100812fd7e6f4372510d0830a798',
+      sha256: 'a0e2afa131b8a5029de0c653d55b71aab99744226234fcf1d80c55dade21020b', size: 401741952,
       roleEvidence: [{ role: 'tts', source: 'model_card', confidence: 'declared' }] });
-    expect(RECOMMENDED_TTS_DOWNLOAD_MIB).toBe(503);
+    expect(RECOMMENDED_TTS_DOWNLOAD_MIB).toBe(524);
     expect(mockRegistryUpdate).not.toHaveBeenCalled(); expect(mockAddToQueue).not.toHaveBeenCalled(); expect(mockSelect).not.toHaveBeenCalled();
   });
 
@@ -141,8 +141,8 @@ describe('explicit recommended TTS setup', () => {
     removeJob(base.id); await tick();
     expect(mockPrepareCompanion).toHaveBeenCalledTimes(1); expect(mockSelect).not.toHaveBeenCalled();
     expect(mockPrepareCompanion).toHaveBeenCalledWith(expect.objectContaining({ artifacts: expect.arrayContaining([
-      expect.objectContaining({ kind: 'tts_codec', sizeBytes: 169512160,
-        sha256: '9b08679358a172b1bf1d4f3394c8bad2779a077a9395d7cd0148dff989feb99f',
+      expect.objectContaining({ kind: 'tts_codec', sizeBytes: 147786400,
+        sha256: 'f58e57eabef8d574f4d08828f0116d93341bd91a26413390b780c6f1e8491337',
         hfRevision: '4cd6ecf17367ebc03bba4b2ce8186268a6ce7436' }),
     ]) }), expect.any(String));
     expect(setup.getState().phase).toBe('downloading_codec');

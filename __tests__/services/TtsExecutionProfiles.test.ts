@@ -46,14 +46,14 @@ it('pins the builtin-capable legacy artifacts and upstream sampling policy', () 
     voiceModes: ['builtin'], builtinLanguage: 'en-us', builtinVoices: ['default'],
     maxPromptTokens: 1536, sampleRate: 24000, samplesPerFrame: 320, codebooks: 1, codebookSize: 4096,
     hiddenDimension: 896, layers: 24, codecStoredCopies: 1, backboneNoExtraBufferTypes: true,
-    sampling: { temperature: 0.7, top_k: 4, top_p: 0.9 },
+    sampling: { temperature: 0.1, top_k: 4, top_p: 0.9, penalty_repeat: 1.1 },
     backbone: { repository: 'OuteAI/OuteTTS-0.3-500M-GGUF',
       revision: 'ae0577d4386cfb6f442a610a1ec5f2a27d935fc4', filename: 'OuteTTS-0.3-500M-Q4_0.gguf',
       sha256: '086667b32948d618c4ddc3a36d2bdb5f40f7afbb721e51cd32b318680543965f', bytes: 357753600 },
     codec: { repository: 'BricksDisplay/codec.cpp-gguf', revision: '4cd6ecf17367ebc03bba4b2ce8186268a6ce7436',
       filename: 'wavtokenizer-large-speech-75tokens.gguf',
       sha256: '9b08679358a172b1bf1d4f3394c8bad2779a077a9395d7cd0148dff989feb99f', bytes: 169512160 } });
-  expect(preferred.sampling.penalty_repeat).toBeUndefined();
+  expect(preferred.sampling.penalty_repeat).toBe(1.1);
 });
 
 it('admits the preferred configuration only for its exact backbone and codec hashes', () => {

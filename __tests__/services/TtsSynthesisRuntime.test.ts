@@ -197,6 +197,21 @@ it('intersects builtin voice and language helpers with English admission and pho
   expect(native.createSpeaker).not.toHaveBeenCalled();
 });
 
+it('passes the explicit Oute0.3 builtin sampling policy through the native completion adapter', async () => {
+  const profile = TTS_EXECUTION_PROFILES.find(value => value.promptKind === 'outetts_v0_3')!;
+  const { native, context } = nativeContext(profile);
+  const payload = { words: [{ word: 'hello', duration: 0.5, codes: [1, 2] }] };
+  jest.mocked(requireLlamaModule).mockReturnValue({
+    listTTSVoices: jest.fn(() => ['default']), getTTSVoice: jest.fn(() => payload),
+    listTTSLanguages: jest.fn(() => ['en-us']),
+  } as unknown as ReturnType<typeof requireLlamaModule>);
+  await synthesizeTtsOnContext(context, profile, { ...options(profile), voice: { kind: 'builtin', voice: 'default' } });
+  expect(native.getFormattedAudioCompletion).toHaveBeenCalledWith(expect.objectContaining({ speaker: payload, language: 'en-us' }));
+  expect(native.completion).toHaveBeenCalledTimes(1);
+  expect(native.completion.mock.calls[0][0]).toMatchObject({ temperature: 0.1, penalty_repeat: 1.1,
+    top_k: 4, top_p: 0.9, min_p: 0.05, seed: 42, n_threads: 4 });
+});
+
 it('maps the formatter prompt/grammar/embedding to one completion and decodes only its actual audio_tokens', async () => {
   const { native, context } = nativeContext();
   const source = completed({ text: '<|c1_999|><|c2_998|>', audio_tokens: [11, 12, 13, 14] });

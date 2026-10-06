@@ -95,8 +95,9 @@ export const TTS_EXECUTION_PROFILES: readonly TtsExecutionProfile[] = Object.fre
     backboneNoExtraBufferTypes: true,
     // Guarded rc.3 skips the unused audio_lm owner for plain WavTokenizer metadata.
     codecStoredCopies: 1, graphReserveBytes: 768 * MiB,
-    // Pinned rc.3 TTS example uses top_k=4 and leaves repetition at its native default.
-    sampling: Object.freeze({ temperature: 0.7, top_k: 4, top_p: 0.9 }),
+    // OuteTTS 0.3.2 examples recommend temperature=0.1 and repetition_penalty=1.1.
+    // https://github.com/edwko/OuteTTS/blob/0.3.2/docs/interface_v2_usage.md
+    sampling: Object.freeze({ temperature: 0.1, top_k: 4, top_p: 0.9, penalty_repeat: 1.1 }),
   }),
   Object.freeze({
     id: 'bluemagpie-barbet-1b-q4_k_m-audiovae-q8_0',

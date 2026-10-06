@@ -22,6 +22,7 @@ import { referenceVoiceStore, type TemporaryReferenceSource } from '../../servic
 import { prepareManagedAudio, discardPreparedAudio, waitForAudioPreparationDrain, type PreparedAudio } from '../../services/AudioPreparationService';
 import { audioSamplePreviewService } from '../../services/AudioSamplePreviewService';
 import phonemizerNotices from '../../thirdParty/phonemize-notices.json';
+import { getInstalledRecommendedTtsModel, RECOMMENDED_TTS_DOWNLOAD_MIB, TtsModelSetupService } from '../../services/TtsModelSetupService';
 
 export interface TtsPreviewSheetProps {
   initialText: string;
@@ -56,6 +57,8 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
   const state = useSyncExternalStore(ttsService.subscribe, ttsService.getState, ttsService.getState);
   const samplePreview = useSyncExternalStore(audioSamplePreviewService.subscribe, audioSamplePreviewService.getState, audioSamplePreviewService.getState);
   const [selection, setSelection] = useState(getTtsSelectionStatus);
+  const [modelSetup] = useState(() => new TtsModelSetupService());
+  const setup = useSyncExternalStore(modelSetup.subscribe, modelSetup.getState, modelSetup.getState);
   const [draft, setDraft] = useState(initialText);
   const [language, setLanguage] = useState(() => getTtsSelectionStatus().languages?.[0] ?? 'en');
   const saved = useSyncExternalStore(referenceVoiceStore.subscribe, referenceVoiceStore.getState, referenceVoiceStore.getState);
@@ -115,6 +118,12 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
     return work;
   }, [onCleanupFailure, referencePreviewOwner]);
 
+  const drainForClose = useCallback(async (): Promise<void> => {
+    const settled = await Promise.allSettled([clear(), modelSetup.cancel()]);
+    const failed = settled.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+  }, [clear, modelSetup]);
+
   useEffect(() => {
     mounted.current = true;
     current.current = true;
@@ -140,10 +149,10 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
       mounted.current = false;
       removeSettings();
       removeModels();
-      void clear().then(async () => { await temporaryOwner.current?.release(); temporaryOwner.current = undefined; })
+      void drainForClose().then(async () => { await temporaryOwner.current?.release(); temporaryOwner.current = undefined; })
         .catch(() => onCleanupFailure());
     };
-  }, [clear, onCleanupFailure]);
+  }, [clear, drainForClose, onCleanupFailure]);
   useEffect(() => { try { referenceVoiceStore.hydrate(); } catch { setLocalError('storage_failed'); } }, []);
 
   let prepared: PreparedSpeechText | undefined;
@@ -160,7 +169,8 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
   const tooLong = (prepared?.text.length ?? draft.length) > TTS_LIMITS.textCharacters;
   const needsReview = Boolean(reason);
   const fatalCleanup = cleanupFailed.current || ['release_failed', 'restore_failed', 'storage_failed'].includes(state.errorCode ?? '');
-  const blocked = pending || clearing || sampleStopping || fatalCleanup;
+  const setupActive = ['checking', 'downloading_model', 'downloading_codec', 'selecting', 'cancelling'].includes(setup.phase);
+  const blocked = pending || clearing || sampleStopping || fatalCleanup || setupActive;
   const error = localError ?? inputError ?? selection.errorCode ?? state.errorCode;
   const audioReady = !fatalCleanup && Boolean(state.sampleCount)
     && (state.clipAvailable || ['ready', 'playing', 'paused', 'stopped'].includes(state.phase ?? ''));
@@ -184,7 +194,7 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
   };
   const close = (next: () => void) => {
     current.current = false;
-    void clear().then(async () => { await temporaryOwner.current?.release(); temporaryOwner.current = undefined; next(); },
+    void drainForClose().then(async () => { await temporaryOwner.current?.release(); temporaryOwner.current = undefined; next(); },
       () => { onCleanupFailure(); next(); }).catch(() => { onCleanupFailure(); next(); });
   };
   const assertReferenceCurrent = (captured: number) => {
@@ -251,6 +261,13 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
   const voiceLabel = voiceMode === 'builtin' ? builtinLabel(builtinVoice) : voiceMode === 'reference'
     ? selectedSavedVoice?.name ?? t(temporary ? 'tts.sampleSelected' : 'tts.modes.reference') : t('tts.modes.speakerless');
   const speechActive = Boolean(state.phase && !['ready', 'stopped', 'error'].includes(state.phase));
+  const recommendedInstalled = Boolean(getInstalledRecommendedTtsModel());
+  const showModelRecovery = ['selection_missing', 'files_missing', 'codec_incompatible', 'profile_unverified'].includes(selection.errorCode ?? state.errorCode ?? '');
+  const setupCleanupFailed = () => {
+    cleanupFailed.current = true;
+    if (mounted.current) setLocalError('storage_failed');
+    onCleanupFailure();
+  };
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={() => close(onClose)}>
@@ -299,6 +316,27 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
                     <Text colorRole="secondary">{languageLabel(language)} · {selection.modelName ?? t('tts.chooseModel')}</Text></Box>
                   <MaterialSymbols name={showVoiceOptions ? 'expand-less' : 'expand-more'} colorRole="secondary" /></Box>
               </ScreenPressableCard>
+              {showVoiceOptions || showModelRecovery || setup.phase !== 'idle' ? <ScreenCard variant="inset" className="gap-2" testID="tts-recommended-voice-card">
+                <Text className="font-semibold">{t('tts.setup.title')}</Text>
+                <Text colorRole="secondary">{t('tts.setup.description')}</Text>
+                {setup.phase !== 'idle' ? <Text testID="tts-setup-phase" colorRole="secondary" accessibilityLiveRegion="polite">
+                  {t('tts.setup.phases.' + setup.phase)}
+                  {setupActive ? ' · ' + t('tts.setup.progress', { percent: Math.round(setup.progress * 100) }) : ''}
+                </Text> : null}
+                {setup.errorCode ? <Text testID="tts-setup-error" colorRole="danger" accessibilityLiveRegion="polite">{t('tts.setup.errors.' + setup.errorCode)}</Text> : null}
+                {setupActive ? <Button action="secondary" testID="tts-cancel-model-setup" disabled={setup.phase === 'cancelling'}
+                  onPress={() => void modelSetup.cancel().catch(setupCleanupFailed)}><ButtonText>{t('tts.setup.cancel')}</ButtonText></Button>
+                  : <Button action="secondary" testID="tts-use-recommended-voice" disabled={blocked || speechActive}
+                    onPress={() => {
+                      if (busy.current || clearDrain.current || cleanupFailed.current) return;
+                      void clear().then(() => {
+                        if (!current.current || !mounted.current || !isPreviewCurrent()) return;
+                        return modelSetup.startRecommended(() => current.current && mounted.current && isPreviewCurrent());
+                      }).catch(failure => {
+                        if (failure && typeof failure === 'object' && 'code' in failure && failure.code === 'cleanup_failed') setupCleanupFailed();
+                      });
+                    }}><ButtonText>{t(recommendedInstalled ? 'tts.setup.use' : 'tts.setup.download', { mib: RECOMMENDED_TTS_DOWNLOAD_MIB })}</ButtonText></Button>}
+              </ScreenCard> : null}
               {showVoiceOptions ? <Box testID="tts-voice-options-content" className="gap-3">
                 <Text className="font-semibold">{t('tts.language')}</Text>
               <Box className="flex-row flex-wrap gap-2">

@@ -1459,6 +1459,32 @@
     "subtitle": "Write, choose a voice, and listen.",
     "language": "Language",
     "chooseModel": "Choose a speech model",
+    "setup": {
+      "title": "Recommended voice",
+      "description": "OuteTTS 1.0 (0.6B) · English. Download the model and audio decoder to use this voice locally.",
+      "use": "Use recommended voice",
+      "download": "Download recommended voice (about {{mib}} MiB)",
+      "cancel": "Cancel voice download",
+      "progress": "{{percent}}%",
+      "phases": {
+        "checking": "Checking installed voice…",
+        "downloading_model": "Downloading speech model…",
+        "downloading_codec": "Downloading audio decoder…",
+        "selecting": "Selecting voice…",
+        "ready": "Recommended voice selected",
+        "cancelling": "Cancelling and waiting for cleanup…",
+        "cancelled": "Voice setup cancelled",
+        "error": "Voice setup could not finish"
+      },
+      "errors": {
+        "download_failed": "The download stopped or failed. Check Downloads and your connection, then try again.",
+        "timeout": "The voice download took too long. Check your connection and try again.",
+        "conflict": "These resources are already used by a different file or download. Check them in Models first.",
+        "selection_changed": "Your selected speech resources changed. Your new choice was kept.",
+        "storage_failed": "Voice setup could not save its files or settings. Check available storage and try again.",
+        "cleanup_failed": "The download could not finish cleanup. Restart the app before trying again."
+      }
+    },
     "sampleHint": "Record or choose a clear voice sample. Up to 8 seconds and 2 MiB; WAV, MP3 or M4A.",
     "temporaryHint": "This sample is temporary and is removed when you close this screen.",
     "saveForLater": "Save this voice for later",

@@ -197,6 +197,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     ['cpp/rn-tts.cpp', '147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f'],
     ['cpp/rn-tts.cpp', '30c41e9ee214171f20ab11191317954c7f13d3bc3c8508d4f14901d27f05abe0'],
     ['cpp/rn-tts.cpp', 'ac3acbe44c5a84b60144f79105cbd6902af0e3548a5f3ac53c4a9e1ce2546ad3'],
+    ['cpp/rn-tts.cpp', 'dc55dac2ee2da8d49f4a04c2a82f647b4d0ee9e37e3da271dbf9d90ae8129fdb'],
   ])('upgrades the exact accepted pre-TTS privacy source: %s', (source, previousHash) => {
     const patch = SOURCE_PATCHES.find(entry => entry.source === source);
     const migration = patch.intermediates.find(entry => entry.sha256 === previousHash);
@@ -209,6 +210,63 @@ describe('pinned serial sampling and template clock corrections', () => {
     patchLlamaBridge(root);
     expect(hashSource(fs.readFileSync(file, 'utf8'))).toBe(patch.afterSha256);
     expect(patchLlamaBridge(root).status).toBe('already-applied');
+  });
+
+  it('applies the exact pristine TTS source and keeps the direct decoder owner idempotently', () => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === 'cpp/rn-tts.cpp');
+    const file = path.join(root, 'node_modules/llama.rn', patch.source);
+    const original = fs.readFileSync(file, 'utf8');
+    expect(hashSource(original)).toBe(patch.beforeSha256);
+    const expected = applyReplacements(original, patch.replacements);
+    expect(hashSource(expected)).toBe(patch.afterSha256);
+    patchLlamaBridge(root);
+    expect(fs.readFileSync(file, 'utf8')).toBe(expected);
+    const constructor = expected.slice(expected.indexOf('llama_rn_context_tts::llama_rn_context_tts('),
+      expected.indexOf('llama_rn_context_tts::~llama_rn_context_tts()'));
+    const guard = constructor.indexOf('if (rn_tts_needs_audio_lm(codec_model)) {');
+    expect(guard).toBeGreaterThan(constructor.indexOf('codec_ctx = codec_init_from_model(codec_model, context_params);'));
+    expect(guard).toBeLessThan(constructor.indexOf('audio_lm_ctx = codec_common::audio_lm_init(alm_params, &alm_err);'));
+    expect(expected).toContain('codec_decode(codec_ctx, &token_buffer, &pcm, decode_params)');
+    expect(patchLlamaBridge(root, { check: true }).status).toBe('already-applied');
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+    expect(fs.readFileSync(file, 'utf8')).toBe(expected);
+    let reversed = expected;
+    for (const [before, after] of [...patch.replacements].reverse()) reversed = reversed.replace(after, before);
+    expect(reversed).toBe(original);
+  });
+
+  it.each([
+    ['plain DAC', { arch: 'dac', meta: { items: [{ key: 'codec.architecture' }, { key: 'codec.dac.hop_size' }], n_items: 2 } }, false],
+    ['other codec', { arch: 'neucodec', meta: { items: [{ key: 'codec.architecture' }], n_items: 1 } }, true],
+    ['unknown model', null, true],
+    ['missing metadata', { arch: 'dac', meta: null }, true],
+    ['missing metadata items', { arch: 'dac', meta: { items: null, n_items: 1 } }, true],
+    ['empty metadata', { arch: 'dac', meta: { items: [], n_items: 0 } }, true],
+    ['unreadable metadata key', { arch: 'dac', meta: { items: [{ key: null }], n_items: 1 } }, true],
+    ['DAC with LM first', { arch: 'dac', meta: { items: [{ key: 'codec.lm.type' }, { key: 'codec.dac.hop_size' }], n_items: 2 } }, true],
+    ['DAC with LM last', { arch: 'dac', meta: { items: [{ key: 'codec.dac.hop_size' }, { key: 'codec.lm.hidden_size', value: null }], n_items: 2 } }, true],
+    ['DAC with a different prefix', { arch: 'dac', meta: { items: [{ key: 'codec.lm_extra' }], n_items: 1 } }, false],
+  ])('uses actual native metadata and retains optional LM initialization for %s', (_label, model, needsAudioLm) => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn/cpp/rn-tts.cpp'), 'utf8');
+    const match = source.match(/static bool rn_tts_needs_audio_lm\(::codec_model \*model\) \{([\s\S]*?)\n\}/u);
+    expect(match).not.toBeNull();
+    // Execute the native guard's actual branch body, translating only C++ declarations/access.
+    const body = match[1]
+      .replace(/::codec_model_arch/gu, 'codec_model_arch')
+      .replace(/const struct codec_lm_gguf_metadata \*meta/gu, 'const meta')
+      .replace(/const char \*key/gu, 'const key')
+      .replace(/for \(size_t i/gu, 'for (let i')
+      .replace(/meta->/gu, 'meta.')
+      .replace(/std::strncmp/gu, 'strncmp')
+      .replace(/\bnullptr\b/gu, 'null');
+    const actual = vm.runInNewContext('(function(model) {' + body + '\n})(model)', {
+      model, CODEC_ARCH_DAC: 'dac',
+      codec_model_arch: value => value.arch,
+      codec_model_metadata: value => value.meta,
+      strncmp: (left, right, length) => left.slice(0, length).localeCompare(right.slice(0, length)),
+    });
+    expect(actual).toBe(needsAudioLm);
   });
 
   it('destroys registry speakers and pending selection before fallback context codec teardown', () => {
@@ -274,13 +332,11 @@ describe('pinned serial sampling and template clock corrections', () => {
 
   it.each(['pristine', 'applied'])('rejects unknown %s TTS bounds source before writing any guarded file', state => {
     if (state === 'applied') patchLlamaBridge(root);
-    const before = fs.readFileSync(sourcePath);
     const file = path.join(root, 'node_modules/llama.rn/cpp/rn-tts.cpp');
     fs.appendFileSync(file, '\n// unreviewed TTS decode drift\n');
-    const drifted = fs.readFileSync(file);
+    const before = SOURCE_PATCHES.map(patch => [patch.source, fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source))]);
     expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch: cpp\/rn-tts\.cpp/u);
-    expect(fs.readFileSync(sourcePath)).toEqual(before);
-    expect(fs.readFileSync(file)).toEqual(drifted);
+    for (const [source, bytes] of before) expect(fs.readFileSync(path.join(root, 'node_modules/llama.rn', source))).toEqual(bytes);
   });
 
   it.each(['pristine', 'applied'])('preflights unknown %s backbone privacy source before every write', state => {

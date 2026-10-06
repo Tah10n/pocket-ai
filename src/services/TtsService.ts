@@ -380,7 +380,9 @@ export class TtsService {
               check();
               const memory = await getSystemMemorySnapshot();
               check();
-              const budget = memory ? resolveConservativeAvailableMemoryBudget(memory, { strictFreeCap: true }) : null;
+              // A is detached. Use OS allocatable memory; free pages exclude reclaimable file caches.
+              // The budget still reserves the OS threshold and caps critical/low-memory snapshots.
+              const budget = memory ? resolveConservativeAvailableMemoryBudget(memory) : null;
               if (budget === null) throw new TtsError('memory_unknown');
               if (memory?.lowMemory || budget < estimateTtsPeakBytes(binding.profile)) throw new TtsError('memory_insufficient');
               this.publish({ ...this.state, phase: 'loading' });

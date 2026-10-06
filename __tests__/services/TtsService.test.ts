@@ -279,7 +279,7 @@ it('waits for late native preparation and deletes its derivative before stop res
   expect(discard).toHaveBeenCalledWith(prepared); expect(synthesize).not.toHaveBeenCalled();
 });
 
-it('admits reference preparation before decrypting a saved source while A is loaded', async () => {
+it('keeps the free-memory cap before decrypting a saved reference while A is loaded', async () => {
   const { prepare } = chooseReference();
   const voice = { id: 'saved-voice', name: 'Saved', sourceSha256: 'c'.repeat(64), durationMs: 200,
     sourceBytes: 9644, sourceMimeType: 'audio/wav' as const, createdAt: 1, consentRecordedAt: 1 };
@@ -288,7 +288,7 @@ it('admits reference preparation before decrypting a saved source while A is loa
     materialize: jest.fn(async () => ({ uri: 'file:///saved-materialized.wav', release: jest.fn(async () => undefined) })),
     release: jest.fn(async () => undefined) };
   jest.spyOn(referenceVoiceStore, 'acquire').mockReturnValue(lease);
-  jest.mocked(getSystemMemorySnapshot).mockResolvedValue({ availableBytes: 1024, freeBytes: 1024,
+  jest.mocked(getSystemMemorySnapshot).mockResolvedValue({ availableBytes: 32 * 2 ** 30, freeBytes: 1024,
     thresholdBytes: 0, lowMemory: false } as never);
   await expect(service.start({ text: 'Hello.', language: 'en', voice: { kind: 'reference',
     source: { kind: 'saved', voiceId: voice.id, sourceSha256: voice.sourceSha256 } } }))
@@ -331,7 +331,8 @@ it.each(['deletion', 'reselection'] as const)('releases a saved source lease aft
   expect(getSettings().modelLoadParamsByModelId?.[chatId]).toEqual(unchangedChatProfile);
 });
 
-it('requires an explicit selection and never falls back to the active chat model', async () => {
+it('honors an explicitly cleared TTS selection and never falls back to the active chat model', async () => {
+  updateSettings({ auxiliaryModels: {}, autoSelectTtsModel: false });
   expect(getTtsSelectionStatus()).toEqual({ errorCode: 'selection_missing' });
   await expect(service.start({ text: 'Hello.', language: 'en' })).rejects.toMatchObject({ code: 'selection_missing' });
   expect(engine.runWithAuxiliarySequence).not.toHaveBeenCalled();
@@ -355,7 +356,7 @@ it('checks the original bound files without claiming synthesis or changing chat 
   const settings = getSettings();
   const threads = useChatStore.getState().threads;
   choose();
-  expect(getSettings()).toEqual({ ...settings, auxiliaryModels: { tts: expect.any(Object) } });
+  expect(getSettings()).toEqual({ ...settings, auxiliaryModels: { tts: expect.any(Object) }, autoSelectTtsModel: false });
   expect(useChatStore.getState().threads).toBe(threads);
   expect(useChatStore.getState().activeThreadId).toBe(source.threadId);
   await service.checkFiles();
@@ -422,11 +423,39 @@ it.each(TTS_EXECUTION_PROFILES.filter(profile => !profile.voiceModes))('uses a f
   expect(playback.play).not.toHaveBeenCalled();
 });
 
+it('admits sufficient OS allocatable memory after detaching A even when free pages are scarce', async () => {
+  choose();
+  const requiredBytes = estimateTtsPeakBytes(tokensProfile);
+  const thresholdBytes = 256 * 2 ** 20;
+  jest.mocked(getSystemMemorySnapshot).mockImplementationOnce(async () => {
+    expect(state.status).toBe(EngineStatus.IDLE);
+    expect(events).toEqual(['detach-a']);
+    return { availableBytes: requiredBytes + thresholdBytes, freeBytes: 1,
+      thresholdBytes, lowMemory: false, pressureLevel: 'normal' } as never;
+  });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(initContext).toHaveBeenCalledTimes(1);
+  expect(synthesize).toHaveBeenCalledTimes(1);
+  expect(playback.setClip).toHaveBeenCalledTimes(1);
+  expect(state.activeModelId).toBe(chatId);
+});
+
 it.each([
-  { memory: null, code: 'memory_unknown' },
-  { memory: { availableBytes: 32 * 2 ** 30, freeBytes: 1, thresholdBytes: 0, lowMemory: false }, code: 'memory_insufficient' },
-  { memory: { availableBytes: 32 * 2 ** 30, freeBytes: 32 * 2 ** 30, thresholdBytes: 0, lowMemory: true }, code: 'memory_insufficient' },
-])('refuses $code before context initialization even if chat estimates would fit', async ({ memory, code }) => {
+  { reason: 'missing snapshot', memory: null, code: 'memory_unknown' },
+  { reason: 'zero available memory', memory: { availableBytes: 0, freeBytes: 0,
+    thresholdBytes: 0, lowMemory: false }, code: 'memory_unknown' },
+  { reason: 'insufficient allocatable memory', memory: { availableBytes: estimateTtsPeakBytes(tokensProfile) - 1,
+    freeBytes: 32 * 2 ** 30, thresholdBytes: 0, lowMemory: false, pressureLevel: 'normal' }, code: 'memory_insufficient' },
+  { reason: 'reserved OS threshold', memory: { availableBytes: estimateTtsPeakBytes(tokensProfile) + 1024,
+    freeBytes: 32 * 2 ** 30, thresholdBytes: 1025, lowMemory: false, pressureLevel: 'normal' }, code: 'memory_insufficient' },
+  { reason: 'insufficient process headroom', memory: { availableBytes: 32 * 2 ** 30,
+    freeBytes: 32 * 2 ** 30, processAvailableBytes: estimateTtsPeakBytes(tokensProfile) - 1,
+    thresholdBytes: 0, lowMemory: false, pressureLevel: 'normal' }, code: 'memory_insufficient' },
+  { reason: 'low-memory state', memory: { availableBytes: 32 * 2 ** 30,
+    freeBytes: 32 * 2 ** 30, thresholdBytes: 0, lowMemory: true }, code: 'memory_insufficient' },
+  { reason: 'critical pressure free-page cap', memory: { availableBytes: 32 * 2 ** 30,
+    freeBytes: 1, thresholdBytes: 0, lowMemory: false, pressureLevel: 'critical' }, code: 'memory_insufficient' },
+])('refuses $reason before context initialization', async ({ memory, code }) => {
   choose();
   jest.mocked(getSystemMemorySnapshot).mockResolvedValueOnce(memory as never);
   await expect(service.start({ text: 'Hello.', language: 'en' })).rejects.toMatchObject({ code });

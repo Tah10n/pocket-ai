@@ -9,6 +9,7 @@ import { audioSamplePreviewService } from '../../src/services/AudioSamplePreview
 import type { AudioRecordingSheet } from '../../src/components/ui/AudioRecordingSheet';
 import en from '../../src/i18n/locales/en.json';
 import ru from '../../src/i18n/locales/ru.json';
+import type { TtsModelSetupState } from '../../src/services/TtsModelSetupService';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -32,6 +33,21 @@ jest.mock('../../src/services/SettingsStore', () => ({ subscribeSettings: (liste
   mockSettingsListeners.add(listener); return () => mockSettingsListeners.delete(listener);
 } }));
 jest.mock('../../src/services/LocalStorageRegistry', () => ({ registry: { subscribeModels: () => () => undefined } }));
+let mockSetupState: TtsModelSetupState = { phase: 'idle', progress: 0 };
+let mockRecommendedInstalled = false;
+const mockSetupListeners = new Set<() => void>();
+const mockStartRecommended = jest.fn();
+const mockCancelModelSetup = jest.fn();
+jest.mock('../../src/services/TtsModelSetupService', () => ({
+  RECOMMENDED_TTS_DOWNLOAD_MIB: 524,
+  getInstalledRecommendedTtsModel: () => mockRecommendedInstalled ? { id: 'installed-oute' } : undefined,
+  TtsModelSetupService: class {
+    getState = () => mockSetupState;
+    subscribe = (listener: () => void) => { mockSetupListeners.add(listener); return () => mockSetupListeners.delete(listener); };
+    startRecommended = (...args: unknown[]) => mockStartRecommended(...args);
+    cancel = () => mockCancelModelSetup();
+  },
+}));
 
 let mockSavedState = { voices: [] as any[], selectedVoiceId: null as string | null };
 const mockSavedListeners = new Set<() => void>();
@@ -89,12 +105,17 @@ beforeEach(() => {
   mockState = { phase: null };
   mockListeners.clear();
   mockSettingsListeners.clear();
+  mockSetupState = { phase: 'idle', progress: 0 };
+  mockRecommendedInstalled = false;
+  mockSetupListeners.clear();
   mockSavedState = { voices: [], selectedVoiceId: null };
   mockSavedListeners.clear();
   mockSampleState = { phase: 'idle' };
   mockSampleListeners.clear();
   mockRecordingProps = undefined;
   jest.clearAllMocks();
+  mockStartRecommended.mockReset().mockResolvedValue(undefined);
+  mockCancelModelSetup.mockReset().mockResolvedValue(undefined);
   for (const method of ['start', 'checkFiles', 'cancelAndClear', 'play', 'pause', 'replay', 'stop'] as const) {
     service[method].mockResolvedValue(undefined);
   }
@@ -576,7 +597,112 @@ it('opens Models directly from a missing-model summary without revealing empty v
   fireEvent.press(view.getByTestId('tts-voice-options'));
   await waitFor(() => expect(onOpenModels).toHaveBeenCalledTimes(1));
   expect(view.queryByTestId('tts-voice-options-content')).toBeNull();
+  expect(view.getByTestId('tts-use-recommended-voice')).toBeTruthy();
+  expect(mockStartRecommended).not.toHaveBeenCalled();
   expect(service.start).not.toHaveBeenCalled();
+});
+
+it('starts recommended setup only from its explicit button without starting speech', async () => {
+  const view = renderSheet(props());
+  expect(view.getByTestId('tts-use-recommended-voice')).toHaveTextContent('tts.setup.download');
+  expect(mockStartRecommended).not.toHaveBeenCalled();
+  fireEvent.press(view.getByTestId('tts-use-recommended-voice'));
+  await waitFor(() => expect(mockStartRecommended).toHaveBeenCalledTimes(1));
+  expect(mockStartRecommended.mock.calls[0][0]()).toBe(true);
+  expect(service.cancelAndClear).toHaveBeenCalled();
+  expect(service.start).not.toHaveBeenCalled();
+});
+
+it('offers Use for an already installed recommended voice', () => {
+  mockRecommendedInstalled = true;
+  const view = renderSheet(props());
+  expect(view.getByTestId('tts-use-recommended-voice')).toHaveTextContent('tts.setup.use');
+  expect(mockStartRecommended).not.toHaveBeenCalled();
+});
+
+it('offers the explicit download from missing-model recovery while retaining Models', async () => {
+  mockSelection = { languages: [], errorCode: 'selection_missing' };
+  const options = props();
+  const view = render(<TtsPreviewSheet {...options} />);
+  expect(view.getByTestId('tts-use-recommended-voice')).toBeEnabled();
+  expect(view.getByTestId('tts-error-models')).toBeTruthy();
+  fireEvent.press(view.getByTestId('tts-use-recommended-voice'));
+  await waitFor(() => expect(mockStartRecommended).toHaveBeenCalledTimes(1));
+  expect(options.onOpenModels).not.toHaveBeenCalled();
+  expect(service.start).not.toHaveBeenCalled();
+});
+
+it('offers recommended setup when a runtime file check reports missing files', () => {
+  mockState = { phase: 'error', errorCode: 'files_missing' };
+  const view = render(<TtsPreviewSheet {...props()} />);
+  expect(view.getByTestId('tts-use-recommended-voice')).toBeEnabled();
+  expect(view.getByTestId('tts-error-models')).toBeTruthy();
+  expect(mockStartRecommended).not.toHaveBeenCalled();
+});
+
+it('shows setup progress and cancellation and blocks synthesis until setup completes', async () => {
+  mockSetupState = { phase: 'downloading_codec', progress: 0.85 };
+  const view = render(<TtsPreviewSheet {...props()} />);
+  expect(view.getByTestId('tts-setup-phase')).toHaveTextContent('tts.setup.phases.downloading_codec · tts.setup.progress');
+  expect(view.getByTestId('tts-synthesize')).toBeDisabled();
+  expect(view.queryByTestId('tts-use-recommended-voice')).toBeNull();
+  fireEvent.press(view.getByTestId('tts-cancel-model-setup'));
+  await waitFor(() => expect(mockCancelModelSetup).toHaveBeenCalledTimes(1));
+});
+
+it('invalidates its setup guard immediately and waits for setup drain before closing', async () => {
+  const options = props();
+  const view = renderSheet(options);
+  fireEvent.press(view.getByTestId('tts-use-recommended-voice'));
+  await waitFor(() => expect(mockStartRecommended).toHaveBeenCalledTimes(1));
+  const guard = mockStartRecommended.mock.calls[0][0];
+  const drain = deferred(); mockCancelModelSetup.mockReturnValueOnce(drain.promise);
+  fireEvent.press(view.getByTestId('tts-close'));
+  expect(guard()).toBe(false); expect(options.onClose).not.toHaveBeenCalled();
+  await act(async () => { drain.resolve(); });
+  await waitFor(() => expect(options.onClose).toHaveBeenCalledTimes(1));
+});
+
+it('waits for setup cancellation before closing even when audio cleanup rejects first', async () => {
+  const options = props();
+  const view = render(<TtsPreviewSheet {...options} />);
+  const drain = deferred();
+  mockCancelModelSetup.mockReturnValueOnce(drain.promise);
+  service.cancelAndClear.mockRejectedValueOnce(new Error('audio cleanup failed'));
+  fireEvent.press(view.getByTestId('tts-close'));
+  await act(async () => { await Promise.resolve(); });
+  expect(mockCancelModelSetup).toHaveBeenCalledTimes(1);
+  expect(options.onClose).not.toHaveBeenCalled();
+  await act(async () => { drain.resolve(); });
+  await waitFor(() => expect(options.onClose).toHaveBeenCalledTimes(1));
+  expect(options.onCleanupFailure).toHaveBeenCalled();
+});
+
+it('cancels its setup owner when the sheet unmounts', async () => {
+  const view = render(<TtsPreviewSheet {...props()} />);
+  view.unmount();
+  await waitFor(() => expect(mockCancelModelSetup).toHaveBeenCalledTimes(1));
+});
+
+it('reports uncertain setup cleanup and disables further speech actions', async () => {
+  mockSetupState = { phase: 'downloading_model', progress: 0.1 };
+  mockCancelModelSetup.mockRejectedValueOnce({ code: 'cleanup_failed' });
+  const options = props(); const view = render(<TtsPreviewSheet {...options} />);
+  fireEvent.press(view.getByTestId('tts-cancel-model-setup'));
+  await waitFor(() => expect(options.onCleanupFailure).toHaveBeenCalled());
+  expect(view.getByTestId('tts-synthesize')).toBeDisabled();
+  expect(view.getByTestId('tts-error')).toHaveTextContent('tts.errors.storage_failed');
+});
+
+it('localizes setup stages and failures in English and Russian', () => {
+  expect(Object.keys(en.tts.setup.phases)).toEqual(Object.keys(ru.tts.setup.phases));
+  expect(Object.keys(en.tts.setup.errors)).toEqual(Object.keys(ru.tts.setup.errors));
+  for (const messages of [en.tts.setup, ru.tts.setup]) {
+    expect(messages.download).toContain('{{mib}}');
+    expect(messages.progress).toContain('{{percent}}');
+    expect(Object.values(messages.phases).every(value => value.length > 0)).toBe(true);
+    expect(Object.values(messages.errors).every(value => value.length > 0)).toBe(true);
+  }
 });
 
 it('exposes the checked builtin radio state to assistive technology', async () => {

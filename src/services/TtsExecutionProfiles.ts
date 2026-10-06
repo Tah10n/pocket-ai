@@ -37,11 +37,18 @@ export interface TtsExecutionProfile {
   readonly contextTokens: number;
   readonly hiddenDimension: number;
   readonly layers: number;
+  /** Exact GGUF attention dimensions; the init below pins both caches to F16. */
+  readonly kvCache?: Readonly<{ heads: number; keyDimension: number; valueDimension: number }>;
+  readonly backboneEmbeddings?: boolean;
+  readonly backboneBatchTokens?: number;
+  /** Stored codec owners in the guarded native build, separate from decode casts. */
+  readonly codecStoredCopies?: 1 | 2;
   readonly graphReserveBytes: number;
   readonly sampling: Readonly<{ temperature: number; top_k: number; top_p: number; penalty_repeat: number }>;
 }
 
 const MiB = 1024 * 1024;
+export const DEFAULT_TTS_PROFILE_ID = 'outetts-1.0-0.6b-q4_k_m-dac-speech-f16';
 export const TTS_EXECUTION_PROFILES: readonly TtsExecutionProfile[] = Object.freeze([
   Object.freeze({
     id: 'outetts-1.0-0.6b-q4_k_m-dac-speech-f16',
@@ -54,7 +61,13 @@ export const TTS_EXECUTION_PROFILES: readonly TtsExecutionProfile[] = Object.fre
     family: 'outetts' as const, promptKind: 'outetts_v1_0' as const, flow: 'tokens' as const,
     languages: Object.freeze(['en']), sampleRate: 24000, samplesPerFrame: 320,
     codebooks: 2, codebookSize: 1024, generationSteps: 2304, maxFrames: 1200,
-    contextTokens: 4096, hiddenDimension: 1024, layers: 28,
+    // Complete prompt (512) + generation (2304), with no context shifting.
+    contextTokens: 2816, hiddenDimension: 1024, layers: 28,
+    kvCache: Object.freeze({ heads: 8, keyDimension: 128, valueDimension: 128 }),
+    // CODEC_CODES uses sampled codes, not retained backbone hidden states.
+    backboneEmbeddings: false, backboneBatchTokens: 128,
+    // Guarded rc.3 patch skips the unused audio_lm owner for plain DAC metadata.
+    codecStoredCopies: 1,
     graphReserveBytes: 768 * MiB,
     sampling: Object.freeze({ temperature: 0.4, top_k: 40, top_p: 0.9, penalty_repeat: 1.1 }),
   }),
@@ -117,24 +130,31 @@ export function getTtsExecutionProfile(backboneSha: unknown, codecSha: unknown):
 }
 
 export function getTtsInitParameters(profile: TtsExecutionProfile, path: string): ContextParams {
-  // Codec-LM and continuous backbones need hidden states; this is not retrieval embedding().
-  return { model: path, n_ctx: profile.contextTokens, n_batch: 512, n_ubatch: 128, n_threads: 4,
-    n_gpu_layers: 0, embedding: true, embd_normalize: -1, pooling_type: 'none', ctx_shift: false,
+  // Codec-LM and continuous backbones need hidden states. Plain Oute DAC uses codes.
+  return { model: path, n_ctx: profile.contextTokens, n_batch: profile.backboneBatchTokens ?? 512, n_ubatch: 128, n_threads: 4,
+    n_gpu_layers: 0, embedding: profile.backboneEmbeddings ?? true, embd_normalize: -1, pooling_type: 'none', ctx_shift: false,
+    ...(profile.kvCache ? { cache_type_k: 'f16' as const, cache_type_v: 'f16' as const } : {}),
     use_mmap: true, use_mlock: false, n_parallel: 1,
     state_cache_budget_mb: 0, state_cache_max_checkpoints: 8 };
 }
 
 export function estimateTtsPeakBytes(profile: TtsExecutionProfile): number {
-  // rc.3 loads codec weights twice through codec + audio_lm. Reserve additional dequantization,
+  // The guarded plain-DAC path retains one codec; other rc.3 paths retain two.
+  // Reserve full-file F32 casts in addition to stored F16 weights for DAC decode,
   // working graphs, KV/hidden states, native output + JS number[] + encoded WAV + player buffers.
   // This is deliberately low-confidence; unknown artifact pairs receive no estimate/admission.
-  const kvAndHiddens = profile.contextTokens * profile.hiddenDimension * profile.layers * 8;
+  const kvAndHiddens = profile.kvCache
+    ? profile.contextTokens * profile.layers * profile.kvCache.heads
+      * (profile.kvCache.keyDimension + profile.kvCache.valueDimension) * 2
+      + (profile.backboneEmbeddings === false ? 0
+        : (profile.contextTokens + profile.generationSteps) * profile.hiddenDimension * 16)
+    : profile.contextTokens * profile.hiddenDimension * profile.layers * 8;
   const payload = TTS_LIMITS.pcmSamples * (4 + 8 + 2 + 8) + 16 * MiB;
   // Saved materialization/preparation can overlap A and is admitted separately. During
   // TTS, account for retained PCM + JSON/F32 bridge copies and ECAPA/bake workspace too.
   // The profile graph reserve still covers full codec/LM working graphs and possible F32 weights.
   const reference = profile.reference ? profile.reference.maxSamples * 64 + 64 * MiB : 0;
-  return Math.ceil(profile.backbone.bytes * 2 + profile.codec.bytes * 4
+  return Math.ceil(profile.backbone.bytes * 2 + profile.codec.bytes * ((profile.codecStoredCopies ?? 2) + 2)
     + profile.graphReserveBytes + kvAndHiddens + payload + reference + 256 * MiB);
 }
 

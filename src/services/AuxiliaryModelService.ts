@@ -5,8 +5,8 @@ import { getThreadActiveModelId } from '../types/chat';
 import { useChatStore } from '../store/chatStore';
 import { useDownloadStore } from '../store/downloadStore';
 import { getModelFileIdentity, getModelRoleEvidence, mergeModelRoleEvidence } from '../utils/modelRoles';
-import { isManagedCompanionArtifact, mergeModelArtifacts } from '../utils/modelArtifacts';
-import { fileUriToNativePath, safeJoinModelPath } from '../utils/safeFilePath';
+import { getSelectedManagedCompanions, isManagedCompanionArtifact, mergeModelArtifacts } from '../utils/modelArtifacts';
+import { fileUriToNativePath, isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
 import { validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { resolveConservativeAvailableMemoryBudget } from '../memory/budget';
@@ -16,6 +16,7 @@ import { runWithIdleModelDownloads } from './ModelDownloadManager';
 import { getModelsDir } from './FileSystemSetup';
 import { getSystemMemorySnapshot } from './SystemMetricsService';
 import { assertPrivateStorageWritable, isPrivateStorageWritable } from './storage';
+import { DEFAULT_TTS_PROFILE_ID, TTS_EXECUTION_PROFILES } from './TtsExecutionProfiles';
 import {
   getSettings, subscribeSettings, updateSettings,
   type AuxiliaryModelRole,
@@ -69,13 +70,35 @@ export function selectAuxiliaryModel(role: AuxiliaryModelRole, model: ModelMetad
     if (selected !== registry.getModel(model.id)) registry.updateModel(selected);
     auxiliaryModels[role] = { modelId: model.id, fileIdentity: getModelFileIdentity(selected) };
   }
-  updateSettings({ auxiliaryModels });
+  updateSettings({ auxiliaryModels, ...(role === 'tts' ? { autoSelectTtsModel: false } : {}) });
+}
+
+/** Resolve installed metadata only; file integrity and memory admission remain with TtsService. */
+function getPreferredInstalledTtsModel(): ModelMetadata | undefined {
+  const profile = TTS_EXECUTION_PROFILES.find(entry => entry.id === DEFAULT_TTS_PROFILE_ID);
+  if (!profile) return undefined;
+  const candidates = registry.getModels().filter(model => {
+    if (![LifecycleStatus.DOWNLOADED, LifecycleStatus.ACTIVE].includes(model.lifecycleStatus)
+      || !isValidLocalFileName(model.localPath) || model.size !== profile.backbone.bytes
+      || normalizeSha256Digest(model.sha256) !== profile.backbone.sha256
+      || !getModelRoleEvidence(model).some(entry => entry.role === 'tts')) return false;
+    // Match the same first selected codec that TtsService resolves, including its base binding.
+    const codec = getSelectedManagedCompanions(model).find(artifact => artifact.kind === 'tts_codec');
+    return codec?.installState === 'installed' && isValidLocalFileName(codec.localPath)
+      && codec.sizeBytes === profile.codec.bytes && normalizeSha256Digest(codec.sha256) === profile.codec.sha256;
+  });
+  // Catalog/registry ordering changes must not change the automatic selection.
+  return candidates.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)[0];
 }
 
 export function getAuxiliarySelection(role: AuxiliaryModelRole): ModelMetadata | undefined {
-  const binding = getSettings().auxiliaryModels?.[role];
-  const model = binding ? registry.getModel(binding.modelId) : undefined;
-  return model && getModelFileIdentity(model) === binding?.fileIdentity ? model : undefined;
+  const settings = getSettings();
+  const binding = settings.auxiliaryModels?.[role];
+  if (binding) {
+    const model = registry.getModel(binding.modelId);
+    return model && getModelFileIdentity(model) === binding.fileIdentity ? model : undefined;
+  }
+  return role === 'tts' && settings.autoSelectTtsModel !== false ? getPreferredInstalledTtsModel() : undefined;
 }
 
 // Small CPU embedding/rank checks use a bounded context and explicit workspace reserve.

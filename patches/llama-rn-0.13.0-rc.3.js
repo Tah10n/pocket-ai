@@ -314,7 +314,41 @@ const TTS_SOURCE = 'cpp/rn-tts.cpp';
 const TTS_BEFORE_SHA256 = '2e02fd6d1acaeac7a7f321baeb6ea99dac4503ba78b70439ee2c9de8effe488c';
 const TTS_PRIVACY_SHA256 = '30c41e9ee214171f20ab11191317954c7f13d3bc3c8508d4f14901d27f05abe0';
 const TTS_SPEAKER_PREVIOUS_SHA256 = 'ac3acbe44c5a84b60144f79105cbd6902af0e3548a5f3ac53c4a9e1ce2546ad3';
-const TTS_AFTER_SHA256 = 'dc55dac2ee2da8d49f4a04c2a82f647b4d0ee9e37e3da271dbf9d90ae8129fdb';
+const TTS_DAC_MEMORY_PREVIOUS_SHA256 = 'dc55dac2ee2da8d49f4a04c2a82f647b4d0ee9e37e3da271dbf9d90ae8129fdb';
+const TTS_AFTER_SHA256 = '5b2759c889c37641ce41e350f5a4a4d522c7c0f95fc251c4ab751255db1ea164';
+const TTS_DAC_MEMORY_REPLACEMENTS = [
+  [
+    "// Constructor and destructor implementations\n",
+    `// A plain DAC decoder already owns the required model and context.
+// Preserve the optional audio LM path unless actual metadata proves it absent.
+static bool rn_tts_needs_audio_lm(::codec_model *model) {
+    if (model == nullptr || ::codec_model_arch(model) != CODEC_ARCH_DAC) return true;
+    const struct codec_lm_gguf_metadata *meta = codec_model_metadata(model);
+    if (meta == nullptr || meta->items == nullptr || meta->n_items == 0) return true;
+    for (size_t i = 0; i < meta->n_items; ++i) {
+        const char *key = meta->items[i].key;
+        if (key == nullptr || std::strncmp(key, "codec.lm.", 9) == 0) return true;
+    }
+    return false;
+}
+
+// Constructor and destructor implementations
+`
+  ],
+  [
+    `  // Initialize the codec_common audio_lm context alongside the codec.
+  // audio_lm_init re-uses the same GGUF file (just loads it again through
+  // the codec_common abstraction); it will return nullptr without error for
+  // GGUFs that have no codec.lm section — that's fine, those stay on the
+  // direct codec_decode path.
+  {
+      codec_common::audio_lm_params alm_params;`,
+    `  // Avoid loading a second decoder for a metadata-confirmed plain DAC.
+  // Other architectures and uncertain metadata retain their audio LM path.
+  if (rn_tts_needs_audio_lm(codec_model)) {
+      codec_common::audio_lm_params alm_params;`
+  ],
+];
 const TTS_SPEAKER_REPLACEMENTS = [[
   'llama_rn_context_tts::~llama_rn_context_tts() {\n',
   'llama_rn_context_tts::~llama_rn_context_tts() {\n    // Speaker registry owns conditioning buffers; destroy them while codecs are live.\n    speakers.clear();\n    pending_speaker_id = -1;\n',
@@ -522,11 +556,12 @@ const SOURCE_PATCHES = [
   {"source": "cpp/rn-slot-manager.h", "beforeSha256": "76b457c59ae574134094e203c38d411f1dc7243b6616c4fd13d32d3c80b88dce", "afterSha256": "882150b9bb69c8b4cb4da71b1433b42adf161caa256e6c7c4dc058731ead2c3e", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
   {"source": "cpp/rn-slot.h", "beforeSha256": "6c44d5d937212addb9e31ec629953937e77be26ba0427047190992e2bf2794d2", "afterSha256": "cd89f60afb06a0c819fac99f8f8a036c83826484e2a03276d7b151848151c7a0", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
   { source: TTS_SOURCE, beforeSha256: TTS_BEFORE_SHA256, afterSha256: TTS_AFTER_SHA256,
-    replacements: [["#include \"common.h\"", "#include \"common/common.h\""], ...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS],
+    replacements: [["#include \"common.h\"", "#include \"common/common.h\""], ...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS, ...TTS_DAC_MEMORY_REPLACEMENTS],
     intermediates: [
-      { sha256: '147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f', replacements: [...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS] },
-      { sha256: TTS_PRIVACY_SHA256, replacements: [...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS] },
-      { sha256: TTS_SPEAKER_PREVIOUS_SHA256, replacements: TTS_SPEAKER_REPLACEMENTS },
+      { sha256: '147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f', replacements: [...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS, ...TTS_DAC_MEMORY_REPLACEMENTS] },
+      { sha256: TTS_PRIVACY_SHA256, replacements: [...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS, ...TTS_DAC_MEMORY_REPLACEMENTS] },
+      { sha256: TTS_SPEAKER_PREVIOUS_SHA256, replacements: [...TTS_SPEAKER_REPLACEMENTS, ...TTS_DAC_MEMORY_REPLACEMENTS] },
+      { sha256: TTS_DAC_MEMORY_PREVIOUS_SHA256, replacements: TTS_DAC_MEMORY_REPLACEMENTS },
     ] },
   {"source": "cpp/ggml-cpu/arch/arm/quants.c", "beforeSha256": "edb15b62111d41fa68e8f4c069eb50a8ce1c2de8a9525a3cd02b1cd5aca7391b", "afterSha256": "bce5e39eaffbde886d74f822115b1f925ab5b40c6877aee8a3a3b90269fc2be6", "replacements": [["#define LM_GGML_COMMON_IMPL_C", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM) || defined(_M_ARM64))\n#define LM_GGML_COMMON_IMPL_C"], [");\n    }\n\n    *s = sumf;\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n\n", ");\n    }\n\n    *s = sumf;\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n\n\n#endif // compile-target CPU architecture\n"]]},
   {"source": "cpp/ggml-cpu/arch/arm/repack.cpp", "beforeSha256": "f36e53ebde15b39147eb77d444ebf5c494af7aefed096444256fdf2836722e98", "afterSha256": "c12d2f0ab327a04341868205b5b7d83ee08c55d6b38aa61bdb768e128004e6bf", "replacements": [["#define LM_GGML_COMMON_IMPL_CPP", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM) || defined(_M_ARM64))\n#define LM_GGML_COMMON_IMPL_CPP"], ["endif  // defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_MATMUL_INT8)\n    lm_ggml_gemm_q8_0_4x8_q8_0_generic(n, s, bs, vx, vy, nr, nc);\n}\n", "endif  // defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_MATMUL_INT8)\n    lm_ggml_gemm_q8_0_4x8_q8_0_generic(n, s, bs, vx, vy, nr, nc);\n}\n\n#endif // compile-target CPU architecture\n"]]},

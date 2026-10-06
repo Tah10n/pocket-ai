@@ -30,6 +30,8 @@ import { llmEngineService } from '../../services/LLMEngineService';
 import { getErrorMessage } from '../../services/AppError';
 import { getAppStorageMetrics, type AppStorageMetrics } from '../../services/StorageManagerService';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
+import { getAuxiliarySelection } from '../../services/AuxiliaryModelService';
+import { registry } from '../../services/LocalStorageRegistry';
 import { screenLayoutMetrics, semanticColorTokens, withAlpha, type ThemeTone } from '../../utils/themeTokens';
 
 function clampPercentage(value: number) {
@@ -257,9 +259,9 @@ const SettingsScreenContent = () => {
     const storageAccentSoft = isDark ? semanticColorTokens.success[300] : semanticColorTokens.success[400];
 
     useEffect(() => {
-        return subscribeSettings((nextSettings) => {
-            setSettings(nextSettings);
-        });
+        const unsubscribeSettings = subscribeSettings(setSettings);
+        const unsubscribeModels = registry.subscribeModels(() => setSettings(getSettings()));
+        return () => { unsubscribeSettings(); unsubscribeModels(); };
     }, []);
 
     useEffect(() => {
@@ -700,12 +702,13 @@ const SettingsScreenContent = () => {
                                     <Text className="text-lg font-semibold">{t('resources.title')}</Text>
                                     {(['embedding', 'reranker', 'tts'] as const).map((role) => {
                                         const binding = settings.auxiliaryModels?.[role];
+                                        const modelId = (role === 'tts' ? getAuxiliarySelection(role)?.id : undefined) ?? binding?.modelId;
                                         return <Box key={role} className="gap-2">
-                                            <Text>{t(`resources.roles.${role}`)}: {binding?.modelId ?? t('resources.notSelected')}</Text>
-                                            <Button size="sm" action="secondary" onPress={() => {
-                                                if (binding) router.push({ pathname: '/model-details', params: { modelId: binding.modelId } });
+                                            <Text testID={`settings-resource-${role}`}>{t(`resources.roles.${role}`)}: {modelId ?? t('resources.notSelected')}</Text>
+                                            <Button size="sm" action="secondary" testID={`settings-resource-details-${role}`} onPress={() => {
+                                                if (modelId) router.push({ pathname: '/model-details', params: { modelId } });
                                                 else router.push('/(tabs)/models');
-                                            }}><ButtonText>{t(binding ? 'models.details' : 'resources.select')}</ButtonText></Button>
+                                            }}><ButtonText>{t(modelId ? 'models.details' : 'resources.select')}</ButtonText></Button>
                                         </Box>;
                                     })}
                                     <Text colorRole="secondary">{t('resources.futureFunctions')}</Text>

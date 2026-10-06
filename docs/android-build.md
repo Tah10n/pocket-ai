@@ -256,6 +256,14 @@ supported document extension plus one-prepare/two-selection session reuse. Use
 see [Document QA and Benchmarks](./document-qa-benchmarks.md) for exact preconditions and
 cleanup rules.
 
+For a separate named QA instance, use `--isolated-qa-install --qa-instance stage7`
+and set `POCKET_AI_ANDROID_QA_INSTANCE=stage7` for the build environment. The default
+remains `<base>.qa`; the named instance uses exactly `<base>.stage7.qa`. Instance names
+must be one lowercase alphanumeric segment starting with a letter, 1–32 characters.
+Named instances require the exact selected package, nonshipping mode, and
+`EXPO_PUBLIC_ANDROID_QA=1`. Existing private-file access guards still require local
+debug-fallback release signing and reject upload signing and shipping builds.
+
 The branch-regeneration pack is intentionally local-only and is not dispatched by GitHub
 Actions. Use `--emulator` instead of `--serial` for an emulator. Do not add `--skip-build`
 or `--preserve-running-app`: branch regeneration requires a current-input,

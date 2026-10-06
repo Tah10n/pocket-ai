@@ -1184,6 +1184,26 @@ describe('android-smoke target ABI contract', () => {
     })).toThrow(/repository package or its isolated \.qa package/);
   });
 
+  it('binds the selected named QA instance through CLI, resolver and Gradle arguments', () => {
+    const options = parseCliOptions(['--isolated-qa-install', '--qa-instance', 'stage7']);
+    const applicationId = resolveAndroidQaApplicationId('com.github.tah10n.pocketai', options.isolatedQaInstall, options.qaInstance);
+    expect(applicationId).toBe('com.github.tah10n.pocketai.stage7.qa');
+    expect(buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a', { applicationId, qaInstance: options.qaInstance }))
+      .toContain('-PpocketAiApplicationId=com.github.tah10n.pocketai.stage7.qa');
+    expect(() => parseCliOptions(['--qa-instance', 'stage7'])).toThrow(/requires --isolated-qa-install/);
+    for (const wrong of ['com.github.tah10n.pocketai', 'com.github.tah10n.pocketai.qa', 'com.github.tah10n.pocketai.other.qa', 'com.other.stage7.qa']) {
+      expect(() => buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a', {
+        applicationId: wrong, env: { POCKET_AI_ANDROID_QA_INSTANCE: 'stage7' },
+      })).toThrow(/repository package or its isolated/);
+    }
+  });
+
+  it.each(['', 'Stage7', 'stage.7', 'stage-7', ' stage7', 'stage7 ', 'stage7\n', 'stage/7', '7stage', 'a'.repeat(33)])(
+    'rejects malformed QA instance %j at the public resolver boundary', instance => {
+      expect(() => resolveAndroidQaApplicationId('com.github.tah10n.pocketai', true, instance)).toThrow(/QA instance/);
+    },
+  );
+
   it('cleans generated native intermediates before invoking a fresh provenance build', () => {
     const source = fs.readFileSync(path.join(__dirname, '../../scripts/android-smoke.js'), 'utf8');
     const cleanupIndex = source.indexOf('cleanAndroidNativeBuildIntermediates(projectRoot)');

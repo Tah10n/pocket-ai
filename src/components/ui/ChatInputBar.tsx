@@ -55,6 +55,7 @@ interface ChatInputBarProps {
     onAttachImages?: () => Promise<void> | void;
     onAttachDocuments?: () => Promise<void> | void;
     onAttachAudio?: () => Promise<void> | void;
+    onRecordAudio?: () => Promise<void> | void;
     onRemoveAttachmentDraft?: (draft: AttachmentDraft, index: number) => void;
     onRemoveDocumentAttachmentDraft?: (draft: ChatDocumentAttachmentDraft, index: number) => void;
     onRemoveMediaAttachmentDraft?: (draft: ChatMediaAttachmentDraft, index: number) => void;
@@ -246,6 +247,7 @@ export const ChatInputBar = ({
     onAttachImages,
     onAttachDocuments,
     onAttachAudio,
+    onRecordAudio,
     onRemoveAttachmentDraft,
     onRemoveDocumentAttachmentDraft,
     onRemoveMediaAttachmentDraft,
@@ -700,6 +702,18 @@ export const ChatInputBar = ({
             accessibilityHint: !canAttachAudio && attachAudioDisabledContext ? attachAudioDisabledContext : undefined,
             accessibilityState: attachAudioAccessibilityState,
             testID: 'chat-attach-audio-button',
+        } : null,
+        onRecordAudio ? {
+            key: 'record-audio',
+            title: t('audioRecording.record'),
+            description: !canAttachAudio ? t(audioAttachmentsDisabledReason ?? 'chat.attachments.audioModelUnsupported') : undefined,
+            iconName: 'mic',
+            disabled: !canAttachAudio,
+            onPress: () => selectAttachmentMenuAction(async () => { await onRecordAudio(); }),
+            accessibilityLabel: t('audioRecording.record'),
+            accessibilityHint: !canAttachAudio ? t(audioAttachmentsDisabledReason ?? 'chat.attachments.audioModelUnsupported') : undefined,
+            accessibilityState: attachAudioAccessibilityState,
+            testID: 'chat-record-audio-button',
         } : null,
     ] as (ListPickerSheetItem | null)[]).filter((item): item is ListPickerSheetItem => item !== null);
     const hasAttachmentMenuItems = attachmentMenuItems.length > 0;

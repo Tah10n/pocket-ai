@@ -402,7 +402,10 @@ export interface AuxiliaryContextRequest {
   readonly isCurrent: () => boolean;
 }
 
+export type AuxiliaryFailureStage = 'detach' | 'before_init' | 'backbone_init' | 'native_callback' | 'context_release' | 'restore';
 export interface AuxiliarySequenceRequest {
+  /** Nonthrowing observation only; no error object or change to native ownership. */
+  readonly observeFailure?: (stage: AuxiliaryFailureStage) => void;
   readonly runOwner?: symbol;
   readonly signal?: AbortSignal;
   /** Selection/permission check independent of the temporarily suspended chat context. */
@@ -3908,6 +3911,12 @@ class LLMEngineService {
       if (!isCurrent()) throw new AppError('engine_busy', 'The auxiliary model check was cancelled.');
     };
     owner.isCurrent = selectionCurrent;
+    let failureObserved = false;
+    const observeFailure = (stage: AuxiliaryFailureStage) => {
+      if (failureObserved) return;
+      failureObserved = true;
+      try { request.observeFailure?.(stage); } catch { /* Diagnostics cannot change the transaction. */ }
+    };
     // Notify auto-load observers before detaching A. No native handles are published.
     this.updateState(this.state);
     try {
@@ -3976,12 +3985,14 @@ class LLMEngineService {
           const work = (async () => {
             let phaseOperationFailed = false;
             let phaseOperationError: unknown;
+            let failureStage: AuxiliaryFailureStage = 'before_init';
             try {
               assertPhaseCurrent();
               await phase.beforeInit?.();
               assertPhaseCurrent();
               this.assertNoOrphanedContextReleasePending();
               initStarted = true;
+              failureStage = 'backbone_init';
               auxiliaryContext = await this.awaitModelInitWithProgressWatchdog(
                 progress => initLlamaContext({ ...phase.initParams, n_parallel: 1,
                   state_cache_budget_mb: DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
@@ -3992,6 +4003,7 @@ class LLMEngineService {
               // actual callback, retaining native ownership throughout its drain.
               let value!: R;
               let nativeOperationError: unknown;
+              failureStage = 'native_callback';
               const nativeOperation = Promise.resolve().then(() => nativeCallback(auxiliaryContext!)).then(
                 next => { value = next; }, error => { nativeOperationError = error; },
               );
@@ -4010,6 +4022,7 @@ class LLMEngineService {
               assertPhaseCurrent();
               return value;
             } catch (error) {
+              observeFailure(failureStage);
               phaseOperationFailed = true;
               phaseOperationError = error;
               throw error;
@@ -4018,6 +4031,7 @@ class LLMEngineService {
                 if (auxiliaryContext) await this.releaseNativeContextsConfirmed(auxiliaryContext);
                 else if (initStarted && !this.orphanedContextReleaseError) await this.releaseNativeContextsConfirmed();
               } catch (cleanupError) {
+                observeFailure('context_release');
                 if (phaseOperationFailed) throw new AuxiliaryContextCleanupError(phaseOperationError, cleanupError);
                 throw cleanupError;
               } finally { phaseActive = false; }
@@ -4029,6 +4043,7 @@ class LLMEngineService {
           void work.catch(() => undefined);
           return work;
         };
+        let sequenceFailureStage: AuxiliaryFailureStage = 'detach';
         try {
           // Completion admission observes auxiliaryOperation synchronously, so no
           // new user generation can start between this check and the detach.
@@ -4036,9 +4051,11 @@ class LLMEngineService {
           if (toolOwner) toolOwner.handoffActive = true;
           if (this.context) await this.unloadInternal({ preservePromptPreparation: true });
           assertCurrent();
+          sequenceFailureStage = 'native_callback';
           result = await operation({ withContext });
           assertCurrent();
         } catch (error) {
+          observeFailure(sequenceFailureStage);
           operationError = error;
         } finally {
           sequenceFinished = true;
@@ -4079,6 +4096,7 @@ class LLMEngineService {
                 restoredContextIdentity: this.getPromptContextIdentity(), modelId: previousModelId };
             }
           } catch (error) {
+            observeFailure('restore');
             if (this.orphanedContextReleaseError) throw error;
             this.auxiliaryRestoreError = 'The auxiliary check ended, but the previous chat model could not be restored.';
             this.updateState({ ...this.state, status: EngineStatus.ERROR, lastError: this.auxiliaryRestoreError });

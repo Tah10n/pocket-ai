@@ -1,0 +1,607 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "scope": "Recommended speakerless English voice on physical Android CPU; Stage 7 reference conditioning remains incomplete",
+  "publicSource": "8338889bd4d579e6da92f26ceab08eff53ae45de",
+  "apkSha256": "24ad9c0ee90003b7cd59ebf02b8c08f3f10839ff539d3c522dc10729534c2ac1",
+  "sourceAppTree": "c77fb24e4e540506b2e756e0ba1e2248d0dccf43",
+  "apkBytes": 145704589,
+  "buildDigest": "4f759275def3ec9ae6fd7b282c4da91a915c3c8c67ad6d4be51357943410d3cf",
+  "reportIdentity": "The commit containing this file; it does not replace the source or APK identity",
+  "compile": "passed",
+  "install": "passed",
+  "abi": "arm64-v8a",
+  "physicalDeviceScope": "One physical Android CPU device; hardware routes are not generalized",
+  "runtime": {
+    "llamaRn": "0.13.0-rc.3",
+    "expoAudio": "55.0.18",
+    "threads": 4,
+    "gpuLayers": 0,
+    "oneHeavyContext": true
+  },
+  "defaultProfile": {
+    "id": "outetts-1.0-0.6b-q4_k_m-dac-speech-f16",
+    "modelId": "pocket-ai/default-tts-outetts-1.0-q4_k_m",
+    "language": "en",
+    "voiceMode": "speakerless",
+    "admissionRequiredBytes": 2275477600,
+    "nativeSourceSha256": "fd32040a76cbf769242c686fed5493647d1cb85ca0e37b448c7a814709e0ba9c",
+    "canonicalNativePatchSha256": "640cf514ef3d628e6231556bcdcf805fdd93d7495a7cecbce2db499f006448f5",
+    "backbone": {
+      "repository": "OuteAI/OuteTTS-1.0-0.6B-GGUF",
+      "revision": "7e8de3b4d95e100812fd7e6f4372510d0830a798",
+      "file": "OuteTTS-1.0-0.6B-Q4_K_M.gguf",
+      "bytes": 401741952,
+      "sha256": "a0e2afa131b8a5029de0c653d55b71aab99744226234fcf1d80c55dade21020b"
+    },
+    "codec": {
+      "repository": "BricksDisplay/codec.cpp-gguf",
+      "revision": "4cd6ecf17367ebc03bba4b2ce8186268a6ce7436",
+      "file": "ibm-research--DAC.speech.gguf",
+      "bytes": 147786400,
+      "sha256": "f58e57eabef8d574f4d08828f0116d93341bd91a26413390b780c6f1e8491337"
+    },
+    "sampling": {
+      "topK": 40,
+      "penaltyRepeat": 1.1,
+      "temperature": 0.4,
+      "seed": 42,
+      "topP": 0.9,
+      "minP": 0.05
+    },
+    "bounds": {
+      "sampleRate": 24000,
+      "textCharacters": 240,
+      "contextTokens": 2816,
+      "promptTokens": 512,
+      "hopSamples": 320,
+      "audioSeconds": 16,
+      "generationTokens": 2304
+    }
+  },
+  "legacyAttemptProfile": {
+    "id": "outetts-0.3-500m-q4_0-wavtokenizer-large-f16",
+    "modelId": "pocket-ai/default-tts-outetts-0.3-q4_0",
+    "language": "en",
+    "catalogLanguage": "en-us",
+    "voice": "default",
+    "admissionRequiredBytes": 2020891040,
+    "nativeSourceSha256": "fd32040a76cbf769242c686fed5493647d1cb85ca0e37b448c7a814709e0ba9c",
+    "canonicalNativePatchSha256": "640cf514ef3d628e6231556bcdcf805fdd93d7495a7cecbce2db499f006448f5",
+    "backbone": {
+      "repository": "OuteAI/OuteTTS-0.3-500M-GGUF",
+      "revision": "ae0577d4386cfb6f442a610a1ec5f2a27d935fc4",
+      "file": "OuteTTS-0.3-500M-Q4_0.gguf",
+      "bytes": 357753600,
+      "sha256": "086667b32948d618c4ddc3a36d2bdb5f40f7afbb721e51cd32b318680543965f"
+    },
+    "codec": {
+      "repository": "BricksDisplay/codec.cpp-gguf",
+      "revision": "4cd6ecf17367ebc03bba4b2ce8186268a6ce7436",
+      "file": "wavtokenizer-large-speech-75tokens.gguf",
+      "bytes": 169512160,
+      "sha256": "9b08679358a172b1bf1d4f3394c8bad2779a077a9395d7cd0148dff989feb99f"
+    },
+    "sampling": {
+      "topK": 4,
+      "penaltyRepeat": 1.1,
+      "temperature": 0.1,
+      "seed": 42,
+      "topP": 0.9,
+      "minP": 0.05
+    },
+    "bounds": {
+      "sampleRate": 24000,
+      "textCharacters": 240,
+      "contextTokens": 3840,
+      "promptTokens": 1536,
+      "hopSamples": 320,
+      "audioSeconds": 16,
+      "generationTokens": 2304
+    }
+  },
+  "contentMethod": {
+    "target": "The quiet river flows beside the old bridge.",
+    "criterion": "Unchanged normalized WER at most 0.125 over eight words; no target hint or initial prompt",
+    "evaluatorSha256": "f002defc87515bd7a63966f4e221e2e5130d7530aaf3c00b44e56b2adf481903",
+    "asrRepository": "Systran/faster-whisper-tiny.en",
+    "asrRevision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+    "runtime": "faster-whisper 1.2.1, PyAV 18.1.0, CPU int8, four threads, one worker, local_files_only",
+    "fullAudioAndModelHashesBeforeAfter": true,
+    "naturalness": "not_evaluated",
+    "voiceSimilarity": "not_evaluated"
+  },
+  "freshNativeCases": [
+    {
+      "id": "v6-fresh1",
+      "status": "passed",
+      "startedAt": "2026-10-06T17:07:39.2870057Z",
+      "finishedAt": "2026-10-06T17:08:37.5576861Z",
+      "receiptSha256": "6ae7e65cbdbeb0d4868cbc58e4301324ef5589df8cffb4e4c325bc85e3845872",
+      "nativeCompletion": {
+        "tokensPredicted": 579,
+        "tokensEvaluated": 16,
+        "elapsedMs": 17186
+      },
+      "elapsedUntilObservedSeconds": 47.0,
+      "elapsedScope": "Includes decode, player progression and host probing; not isolated synthesis latency",
+      "memoryAdmission": {
+        "availableBytes": 3063300096,
+        "freeBytes": 220073984,
+        "thresholdBytes": 452984832,
+        "budgetBytes": 2610315264,
+        "requiredBytes": 2275477600,
+        "lowMemory": false,
+        "pressureLevel": "normal"
+      },
+      "pcmNormalization": {
+        "sourcePeakAbs": 0.5263545513153076,
+        "outOfRangeSamples": 0,
+        "gain": 1
+      },
+      "wav": {
+        "sha256": "7a6668e6184eba856b5f324f5388cdf03e9fd76cd9d7b06b27948da98ea8aa70",
+        "bytes": 158748,
+        "samples": 79352,
+        "sampleRate": 24000,
+        "channels": 1,
+        "bitsPerSample": 16,
+        "durationSeconds": 3.3063333333333333,
+        "fullHashesBeforeAfter": true
+      },
+      "content": {
+        "status": "content_passed",
+        "wordErrors": 0,
+        "referenceWords": 8,
+        "wordErrorRate": 0.0,
+        "contentPassed": true,
+        "evaluatorSha256": "f002defc87515bd7a63966f4e221e2e5130d7530aaf3c00b44e56b2adf481903",
+        "originalOracleSha256": "7d8e1272b31008a7ca5954a4f22936f42ff394a5216c49936f415b77a144f63b",
+        "modelRepository": "Systran/faster-whisper-tiny.en",
+        "modelRevision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+        "fullInputAndModelHashesBeforeAfter": true,
+        "runtime": "faster-whisper 1.2.1 CPU int8, 4 threads, 1 worker",
+        "elapsedSeconds": 0.3785085678100586,
+        "naturalness": "not_evaluated",
+        "voiceSimilarity": "not_evaluated"
+      }
+    },
+    {
+      "id": "v6-after-stop",
+      "status": "passed",
+      "startedAt": "2026-10-06T17:24:10.3537166Z",
+      "finishedAt": "2026-10-06T17:25:02.5594861Z",
+      "receiptSha256": "97bf8b88adb5a27d26bb905873e58b6b274d4c3f541016ccf7ef498965442ad4",
+      "nativeCompletion": {
+        "tokensPredicted": 579,
+        "tokensEvaluated": 16,
+        "elapsedMs": 17026
+      },
+      "elapsedUntilObservedSeconds": 46.0,
+      "elapsedScope": "Includes decode, player progression and host probing; not isolated synthesis latency",
+      "memoryAdmission": {
+        "availableBytes": 2961960960,
+        "freeBytes": 393781248,
+        "thresholdBytes": 452984832,
+        "budgetBytes": 2508976128,
+        "requiredBytes": 2275477600,
+        "lowMemory": false,
+        "pressureLevel": "normal"
+      },
+      "pcmNormalization": {
+        "sourcePeakAbs": 0.5263545513153076,
+        "outOfRangeSamples": 0,
+        "gain": 1
+      },
+      "wav": {
+        "sha256": "7a6668e6184eba856b5f324f5388cdf03e9fd76cd9d7b06b27948da98ea8aa70",
+        "bytes": 158748,
+        "samples": 79352,
+        "sampleRate": 24000,
+        "channels": 1,
+        "bitsPerSample": 16,
+        "durationSeconds": 3.3063333333333333,
+        "fullHashesBeforeAfter": true
+      },
+      "content": {
+        "status": "content_passed",
+        "wordErrors": 0,
+        "referenceWords": 8,
+        "wordErrorRate": 0.0,
+        "contentPassed": true,
+        "evaluatorSha256": "f002defc87515bd7a63966f4e221e2e5130d7530aaf3c00b44e56b2adf481903",
+        "originalOracleSha256": "7d8e1272b31008a7ca5954a4f22936f42ff394a5216c49936f415b77a144f63b",
+        "modelRepository": "Systran/faster-whisper-tiny.en",
+        "modelRevision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+        "fullInputAndModelHashesBeforeAfter": true,
+        "runtime": "faster-whisper 1.2.1 CPU int8, 4 threads, 1 worker",
+        "elapsedSeconds": 0.34914422035217285,
+        "naturalness": "not_evaluated",
+        "voiceSimilarity": "not_evaluated"
+      }
+    },
+    {
+      "id": "v6-cold-new",
+      "status": "passed",
+      "startedAt": "2026-10-06T17:35:55.1129479Z",
+      "finishedAt": "2026-10-06T17:36:52.9093802Z",
+      "receiptSha256": "83db895c384713b957623d50324425d9ad82ab37c0d6b16bccc5dd07a3c4a588",
+      "nativeCompletion": {
+        "tokensPredicted": 579,
+        "tokensEvaluated": 16,
+        "elapsedMs": 16976
+      },
+      "elapsedUntilObservedSeconds": 46.0,
+      "elapsedScope": "Includes decode, player progression and host probing; not isolated synthesis latency",
+      "memoryAdmission": {
+        "availableBytes": 3307790336,
+        "freeBytes": 670072832,
+        "thresholdBytes": 452984832,
+        "budgetBytes": 2854805504,
+        "requiredBytes": 2275477600,
+        "lowMemory": false,
+        "pressureLevel": "normal"
+      },
+      "pcmNormalization": {
+        "sourcePeakAbs": 0.5263545513153076,
+        "outOfRangeSamples": 0,
+        "gain": 1
+      },
+      "wav": {
+        "sha256": "7a6668e6184eba856b5f324f5388cdf03e9fd76cd9d7b06b27948da98ea8aa70",
+        "bytes": 158748,
+        "samples": 79352,
+        "sampleRate": 24000,
+        "channels": 1,
+        "bitsPerSample": 16,
+        "durationSeconds": 3.3063333333333333,
+        "fullHashesBeforeAfter": true
+      },
+      "content": {
+        "status": "content_passed",
+        "wordErrors": 0,
+        "referenceWords": 8,
+        "wordErrorRate": 0.0,
+        "contentPassed": true,
+        "evaluatorSha256": "f002defc87515bd7a63966f4e221e2e5130d7530aaf3c00b44e56b2adf481903",
+        "originalOracleSha256": "7d8e1272b31008a7ca5954a4f22936f42ff394a5216c49936f415b77a144f63b",
+        "modelRepository": "Systran/faster-whisper-tiny.en",
+        "modelRevision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+        "fullInputAndModelHashesBeforeAfter": true,
+        "runtime": "faster-whisper 1.2.1 CPU int8, 4 threads, 1 worker",
+        "elapsedSeconds": 0.36184167861938477,
+        "naturalness": "not_evaluated",
+        "voiceSimilarity": "not_evaluated"
+      }
+    }
+  ],
+  "contentSummary": {
+    "wordErrorRate": 0,
+    "independentEvaluations": 3,
+    "wordErrors": 0,
+    "deterministicWavMatchDoesNotReplaceFreshInference": true,
+    "referenceWordsPerCase": 8
+  },
+  "stop": {
+    "drainEvidence": "Terminal stopped and clip absence, followed by a successful fresh native completion",
+    "status": "passed",
+    "errorCode": "cancelled",
+    "nativeActivePhase": "synthesizing",
+    "noWavAfterStop": true,
+    "terminalPhase": "stopped"
+  },
+  "replay": {
+    "muted": false,
+    "priorHostFailurePreserved": true,
+    "playerType": "android.media.AudioTrack",
+    "sameWavSha256": "7a6668e6184eba856b5f324f5388cdf03e9fd76cd9d7b06b27948da98ea8aa70",
+    "nativeCompletionUnchanged": true,
+    "currentPlaybackObservations": 2,
+    "state": "started",
+    "probeSha256": [
+      "43b6bf0072b2d9196df06470cb6344f50fcfbcae3bd81ba870f4a0ff730ef3cd",
+      "d258882629f74dc977f626d4cbd42d05b5a79f381abc50d050d05616da7ce9b6"
+    ],
+    "sampleRate": 24000,
+    "status": "passed"
+  },
+  "cold": {
+    "preGenerationMeaning": "No TTS state; not an idle phase",
+    "status": "passed",
+    "sameDeterministicWav": "Not cache reuse proof",
+    "defaultConfiguration": "Root-observed English OuteTTS 1.0 speakerless default",
+    "preGenerationPhase": null,
+    "automaticSynthesisObservedBeforeExplicitAction": false,
+    "freshIndependentContent": "passed"
+  },
+  "ordinaryChatRestoration": {
+    "status": "passed",
+    "freshCompletedAnswer": true,
+    "restoredModelId": "android-qa-smollm2-135m-instruct-q8",
+    "nativeCounterSource": "generation-runtime-tokens",
+    "nativeCounters": {
+      "tokensPredicted": 20,
+      "tokensEvaluated": 35
+    },
+    "loRaRestore": "not_run"
+  },
+  "verification": {
+    "fullRelease": {
+      "status": "passed",
+      "typecheck": "passed",
+      "rustUnitTests": 68,
+      "lint": "passed",
+      "rustIntegrationTests": 3,
+      "nativeConfiguration": "passed",
+      "jestTests": 6924,
+      "jestSuites": 296
+    },
+    "targeted": {
+      "suites": 14,
+      "status": "passed",
+      "tests": 625
+    },
+    "basis": "Root-reviewed exact-source checks",
+    "finalUi": {
+      "status": "passed",
+      "tests": 75
+    }
+  },
+  "sourceCi": {
+    "publicSource": "8338889bd4d579e6da92f26ceab08eff53ae45de",
+    "observedAt": "2026-10-06T17:41:19.0000000Z",
+    "snapshotStatus": "failed_attempt_one_retry_requested",
+    "allRequiredSourceJobsPassed": false,
+    "workflows": [
+      {
+        "name": "CI",
+        "runId": 37497353268,
+        "status": "completed",
+        "conclusion": "failure",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/37497353268"
+      }
+    ],
+    "jobs": [
+      {
+        "name": "native scope",
+        "id": 112385200759,
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/37497353268/job/112385200759"
+      },
+      {
+        "name": "deterministic",
+        "id": 112385200972,
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/37497353268/job/112385200972"
+      },
+      {
+        "name": "ios native release",
+        "id": 112389340944,
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/37497353268/job/112389340944"
+      },
+      {
+        "name": "android native release (API 34)",
+        "id": 112389341009,
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/37497353268/job/112389341009"
+      },
+      {
+        "name": "android native release (API 33)",
+        "id": 112389341123,
+        "status": "completed",
+        "conclusion": "failure",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/37497353268/job/112389341123"
+      },
+      {
+        "name": "android native release (API 35)",
+        "id": 112389341172,
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/37497353268/job/112389341172"
+      },
+      {
+        "name": "android native release (API 32)",
+        "id": 112389341497,
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/37497353268/job/112389341497"
+      },
+      {
+        "name": "android (qa)",
+        "id": 112389343274,
+        "status": "completed",
+        "conclusion": "skipped",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/37497353268/job/112389343274"
+      },
+      {
+        "name": "verify",
+        "id": 112412200622,
+        "status": "completed",
+        "conclusion": "failure",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/37497353268/job/112412200622"
+      }
+    ],
+    "failedJobDiagnosis": {
+      "jobId": 112389341123,
+      "stage": ":app:packageRelease",
+      "cause": "java.lang.OutOfMemoryError: Java heap space in Zipflinger/ApkFlinger",
+      "nativeScenarios": "not_run",
+      "configuredGradleHeapMiB": 2048,
+      "actualMaximumHeapInLog": "not_observed"
+    },
+    "retry": {
+      "kind": "failed_jobs_only",
+      "sameSource": true,
+      "result": "API 33 retry job 112413115486 in progress at 2026-10-06T17:59Z; attempt-one job failures remain historical observations; retry outcome pending"
+    },
+    "nativePhoneResult": "Separate physical ARM64 APK acceptance; CI packaging failures are not native scenario failures"
+  },
+  "earlierAttempts": [
+    {
+      "id": "v1",
+      "source": "4bb6e392bb420e9027a266c576c80fab6a90f58d",
+      "apkSha256": "73f8fb6e2a643e91dbbaa123b423eb02684208d23dea5291e89c1792b23418a2",
+      "result": "failed",
+      "scope": "memory admission",
+      "requiredBytes": 2677219552,
+      "nativeInference": "not_run"
+    },
+    {
+      "id": "v2",
+      "source": "e957ff5565c9f0ac0a87015642ac1bd5c6ec016f",
+      "apkSha256": "7ab95ce27f0a1e06d8b3c18c50baf7de5bf7ea47a689a5ba769686a705c70a37",
+      "result": "failed",
+      "scope": "memory admission",
+      "requiredBytes": 2378644640,
+      "budgetBytes": 2361303040,
+      "nativeInference": "not_run"
+    },
+    {
+      "id": "v3",
+      "source": "9d97836fbeb426ba0389c18b8765766668484893",
+      "apkSha256": "b2c5f9743c18eba627cf11d9d1f24974535eea7526a922936d1cf80c8fdcf950",
+      "result": "failed",
+      "scope": "WAV publication after native completion/decode",
+      "errorCode": "decode_failed",
+      "wavPublished": false,
+      "singleAttemptLatency": "not_established; an earlier sequence contained an unattributed second tap"
+    },
+    {
+      "id": "v4",
+      "source": "465e9ab9b4eb37bdf92ad4a6dc83c22937367299",
+      "apkSha256": "8c78eb96189c049a1efc7e551667e12697fd272398c2284a95b0090edb45878b",
+      "result": "content_failed",
+      "scope": "real generated speech",
+      "wavSha256": "ca8923143bad0267dff3de35f01540a01a4b3dd1eadeee88e11d4407b57bf4d2",
+      "durationSeconds": 3.5866666666666664,
+      "tinyEnWordErrors": 6,
+      "tinyEnWer": 0.75,
+      "baseEnWordErrors": 6,
+      "baseEnWer": 0.75,
+      "nativeCompletionMs": 15712,
+      "replay": "passed",
+      "stop": "passed",
+      "normalization": {
+        "sourcePeakAbs": 1.0874078273773193,
+        "outOfRangeSamples": 6,
+        "gain": 0.9196181734426768
+      }
+    },
+    {
+      "id": "host_asr_v4_initial_and_retry1",
+      "result": "failed",
+      "scope": "independent ASR host environment",
+      "reason": "PyAV 19 removed metadata_errors used by faster-whisper 1.2.1; no content pass inferred",
+      "repair": "Only temporary evaluation environment pinned to PyAV 18.1.0; phrase and oracle unchanged"
+    },
+    {
+      "id": "host_ui_transport",
+      "result": "failed_then_recovered",
+      "scope": "host controller",
+      "reason": "Offscreen coordinate calculation, intermittent ADB enumeration, quoted shell command and truncated exec-out PNG; corrected bounded coordinate parser and full-SHA screenshot pull retained separately"
+    },
+    {
+      "id": "host_v5_ui_open",
+      "result": "failed_then_recovered",
+      "scope": "host controller",
+      "reason": "A reserved PowerShell variable rejected the first preflight; the task-owned ADB server then reached its three-hour deadline. A generation guard blocked stale commands; exact stale console stopped and fresh owned ADB/queue created. An intervening exclusive request identity rejection made no phone mutation."
+    },
+    {
+      "id": "v5",
+      "source": "ef8aeb4deb44128611eea9ea59e3a05c32ab511a",
+      "apkSha256": "8f473ad97237562c14ab2d8113e71c5c743089b152a95ee961bea0790517df43",
+      "result": "content_failed",
+      "scope": "real generated speech after upstream sampler",
+      "wavSha256": "e8207f9523ddc174e855b5d33b789a51e9b5ffe70c71665100c1a0a32965a18e",
+      "durationSeconds": 3.3066666666666666,
+      "wordErrors": 6,
+      "wer": 0.75,
+      "cause": "not_established; no codec incompatibility or quantization cause inferred"
+    },
+    {
+      "id": "host_verify_v7",
+      "result": "failed",
+      "scope": "two stale test scenarios after recommendation change",
+      "reason": "Unsupported legacy builtin request and previous codec expected identity; corrected test input/expected artifact without weakening runtime guards"
+    }
+  ],
+  "v6HostFailures": [
+    {
+      "scope": "host controller",
+      "status": "failed",
+      "reason": "The Replay control was outside the observed viewport",
+      "applicationResult": "not_inferred",
+      "id": "v6_offscreen_replay"
+    },
+    {
+      "scope": "host controller",
+      "status": "failed_then_recovered",
+      "reason": "An end-anchored regex rejected CRLF; two original current started unmuted AudioTracks were recovered without another Replay tap",
+      "id": "v6_replay_crlf"
+    },
+    {
+      "scope": "host file sharing",
+      "status": "failed",
+      "applicationResult": "not_inferred",
+      "id": "v6_preflight_readlines_sharing"
+    },
+    {
+      "scope": "host screenshot transport",
+      "status": "failed",
+      "applicationResult": "not_inferred",
+      "id": "v6_cold_screenshot_pull"
+    },
+    {
+      "scope": "host controller",
+      "status": "failed_then_recovered",
+      "reason": "The controller expected idle and rejected phase null; null represented no TTS state, and fresh synthesis succeeded without another restart",
+      "id": "v6_cold_null_phase_expectation"
+    },
+    {
+      "scope": "host screenshot transport",
+      "sendIssued": false,
+      "status": "failed",
+      "reason": "ADB screenshot pull failed before Send; the original failed acceptance receipt is preserved separately from the later ordinary chat outcome",
+      "applicationResult": "not_inferred",
+      "id": "v6_chat_screenshot_pull"
+    },
+    {
+      "scope": "host UI selector",
+      "status": "failed_then_recovered",
+      "reason": "The content wrapper was flattened by accessibility. The actual new completed answer was visible in its unique message bubble shell; the same fresh message and prepared request pair were validated separately without another Send.",
+      "id": "v6_chat_flattened_content_selector"
+    },
+    {
+      "scope": "host report writer",
+      "status": "failed_then_recovered",
+      "reason": "A byte limit was incorrectly applied to GitHub numeric job identifiers. Identifiers now use a positive safe-integer limit; audio, duration, token and memory bounds are unchanged.",
+      "id": "v6_report_numeric_ci_identifier_bound"
+    }
+  ],
+  "notRun": [
+    {
+      "case": "russian_synthesis",
+      "reason": "This default profile confirms English only"
+    },
+    {
+      "case": "reference_conditioning_and_phonemizer",
+      "reason": "Different profiles; no successful physical native reference speech established"
+    },
+    {
+      "case": "A_with_LoRA_restore",
+      "reason": "Ordinary chat restoration is separate from a LoRA-conditioned context"
+    },
+    {
+      "case": "physical_iOS_Bluetooth_GPU",
+      "reason": "This follow-up targets physical Android CPU"
+    }
+  ],
+  "stage7Complete": false,
+  "stage7": "Incomplete; speakerless English speech does not establish reference create/bake/release, conditioning or successful required phonemizer speech",
+  "privacyScope": "No raw logs, audio, user records or transcripts are embedded in this report; no new universal privacy claim"
+}

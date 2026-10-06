@@ -1,4 +1,6 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { prepareManagedAudio, discardPreparedAudio } from '../../src/services/AudioPreparationService';
+jest.mock('../../src/services/AudioPreparationService', () => ({ prepareManagedAudio: jest.fn(), discardPreparedAudio: jest.fn(async () => undefined) }));
 import { manipulateAsync } from 'expo-image-manipulator';
 import {
   ChatAttachmentStorageService,
@@ -302,10 +304,14 @@ describe('ChatAttachmentStorageService', () => {
     expect(FileSystem.copyAsync).not.toHaveBeenCalled();
   });
 
-  it('copies picked WAV/MP3 audio into app-owned chat attachment storage', async () => {
+  it('prepares picked WAV/MP3 audio before copying compatible PCM into attachment storage', async () => {
     (FileSystem.getInfoAsync as jest.Mock)
       .mockResolvedValueOnce({ exists: false })
-      .mockResolvedValueOnce({ exists: true, size: 4096 });
+      .mockResolvedValueOnce({ exists: true, size: 2044 });
+    const prepared = { uri: 'test-cache/audio-preparation/123.wav', sourceSha256: 'a'.repeat(64),
+      identity: 'bounded-audio-preparation', sampleRate: 16_000, channels: 1 as const, sampleCount: 1000,
+      durationMs: 62.5, sizeBytes: 2044 };
+    jest.mocked(prepareManagedAudio).mockResolvedValueOnce(prepared);
     const service = new ChatAttachmentStorageService({
       now: () => 123,
       random: () => 0.456,
@@ -319,16 +325,16 @@ describe('ChatAttachmentStorageService', () => {
     });
 
     expect(FileSystem.copyAsync).toHaveBeenCalledWith({
-      from: 'content://documents/voice',
-      to: 'test-dir/chat-attachments/draft-123-gez4w9.mp3',
+      from: prepared.uri,
+      to: 'test-dir/chat-attachments/draft-123-gez4w9.wav',
     });
     expect(draft).toEqual(expect.objectContaining({
       kind: 'audio',
-      localUri: 'test-dir/chat-attachments/draft-123-gez4w9.mp3',
-      mimeType: 'audio/mpeg',
-      sizeBytes: 4096,
+      localUri: 'test-dir/chat-attachments/draft-123-gez4w9.wav',
+      mimeType: 'audio/wav',
+      sizeBytes: 2044,
       copyStatus: 'copied',
-      audio: { format: 'mp3' },
+      audio: expect.objectContaining({ format: 'wav', sampleRate: 16_000, sampleCount: 1000, sourceSha256: prepared.sourceSha256 }),
     }));
 
     expect(materializeMediaDraftsForMessage({
@@ -342,12 +348,26 @@ describe('ChatAttachmentStorageService', () => {
         kind: 'audio',
         threadId: 'thread-1',
         messageId: 'message-1',
-        localUri: 'test-dir/chat-attachments/draft-123-gez4w9.mp3',
-        mimeType: 'audio/mpeg',
+        localUri: 'test-dir/chat-attachments/draft-123-gez4w9.wav',
+        mimeType: 'audio/wav',
         source: 'document_picker',
-        audio: { format: 'mp3' },
+        audio: expect.objectContaining({ format: 'wav', preparationIdentity: prepared.identity }),
       }),
     ]);
+    expect(prepareManagedAudio).toHaveBeenCalledWith({ sourceUri: 'content://documents/voice', purpose: 'chat', assertCurrent: undefined });
+    expect(discardPreparedAudio).toHaveBeenCalledWith(prepared);
+  });
+
+  it.each([
+    ['audio_limit', 'ChatMediaAttachmentTooLargeError'],
+    ['invalid_audio', 'ChatMediaAttachmentUnsupportedTypeError'],
+  ])('reports decoder %s using the existing actionable attachment error category', async (code, name) => {
+    jest.mocked(prepareManagedAudio).mockRejectedValueOnce(Object.assign(new Error('sanitized audio failure'), { code }));
+    const service = new ChatAttachmentStorageService();
+    await expect(service.copyAudioAssetToDraft({ uri: 'file:///cache/selected.wav', name: 'selected.wav',
+      mimeType: 'audio/wav', size: 1024 })).rejects.toMatchObject({ name });
+    expect(FileSystem.copyAsync).not.toHaveBeenCalled();
+    expect(discardPreparedAudio).not.toHaveBeenCalled();
   });
 
   it('materializes copied document drafts for processor input and failed metadata for previews', () => {

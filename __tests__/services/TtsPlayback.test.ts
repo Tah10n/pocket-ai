@@ -2,6 +2,7 @@ import type { AudioPlayer, AudioStatus } from 'expo-audio';
 import { TtsPlaybackController, cleanupColdTtsClips } from '../../src/services/TtsPlayback';
 import { encodeMonoPcmWav } from '../../src/utils/ttsWav';
 import { TTS_LIMITS } from '../../src/types/tts';
+import { acquireAudioSession } from '../../src/services/AudioSessionCoordinator';
 
 type Entry = { bytes: Uint8Array; isDirectory?: boolean };
 const mockFiles = new Map<string, Entry>();
@@ -341,6 +342,56 @@ describe('TtsPlaybackController', () => {
     await controller.clear();
     await expect(controller.setClip(wav(), { ...metadata, sampleRate: 24_000 }, () => true)).rejects.toMatchObject({ code: 'payload_invalid' });
     expect(mockWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it('drains playback before a recorder can change the shared mode and retains the WAV for Replay', async () => {
+    await controller.setClip(wav(), metadata, () => true);
+    await controller.play();
+    const disposal = deferred<void>(); player.disposeAsync.mockImplementationOnce(() => disposal.promise);
+    const recordingMode = jest.fn();
+    const capture = acquireAudioSession(Symbol('test-recorder'), async () => undefined).then(lease => {
+      recordingMode(); return lease;
+    });
+    await flush();
+    expect(player.disposeAsync).toHaveBeenCalledTimes(1);
+    expect(recordingMode).not.toHaveBeenCalled();
+    expect(player.release).not.toHaveBeenCalled();
+    disposal.resolve();
+    const lease = await capture;
+    expect(recordingMode).toHaveBeenCalledTimes(1);
+    expect(player.release).toHaveBeenCalledTimes(1);
+    expect(mockFiles.size).toBe(1);
+    lease.release();
+    const next = makePlayer(); mockCreateAudioPlayer.mockImplementationOnce(() => next as unknown as AudioPlayer);
+    await controller.replay();
+    expect(next.play).toHaveBeenCalledTimes(1);
+    expect(mockWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it('switches to sample preview after disposal without deleting either borrowed source or generated retry', async () => {
+    await controller.setClip(wav(), metadata, () => true); await controller.play();
+    const preview = new TtsPlaybackController();
+    const sampleUri = 'file:///private-cache/audio-preparation/authorized.wav';
+    mockFiles.set(sampleUri, { bytes: wav() });
+    const samplePlayer = makePlayer();
+    mockCreateAudioPlayer.mockImplementationOnce(() => samplePlayer as unknown as AudioPlayer);
+    const disposal = deferred<void>(); player.disposeAsync.mockImplementationOnce(() => disposal.promise);
+    try {
+      await preview.setBorrowedClip(sampleUri, metadata, () => true);
+      const playing = preview.play(); await flush();
+      expect(mockCreateAudioPlayer).toHaveBeenCalledTimes(1);
+      expect(samplePlayer.play).not.toHaveBeenCalled();
+      disposal.resolve(); await playing;
+      expect(player.release).toHaveBeenCalledTimes(1);
+      expect(samplePlayer.play).toHaveBeenCalledTimes(1);
+      await preview.clear();
+      expect(mockFiles.has(sampleUri)).toBe(true);
+      expect(mockFiles.has('file:///private-cache/tts-clips/clip.wav')).toBe(true);
+      expect(mockDelete).not.toHaveBeenCalled();
+      const retry = makePlayer(); mockCreateAudioPlayer.mockImplementationOnce(() => retry as unknown as AudioPlayer);
+      await controller.replay(); expect(retry.play).toHaveBeenCalledTimes(1);
+      expect(mockWrite).toHaveBeenCalledTimes(1);
+    } finally { disposal.resolve(); await preview.clear(); }
   });
 });
 

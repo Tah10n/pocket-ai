@@ -19,13 +19,13 @@
       "versionCode": 22,
       "permissions": [
         "INTERNET",
+        "RECORD_AUDIO",
         "POST_NOTIFICATIONS",
         "READ_EXTERNAL_STORAGE",
         "VIBRATE"
       ],
       "blockedPermissions": [
         "android.permission.CAMERA",
-        "android.permission.RECORD_AUDIO",
         "android.permission.WRITE_EXTERNAL_STORAGE"
       ],
       "softwareKeyboardLayoutMode": "resize",
@@ -60,8 +60,8 @@
       [
         "expo-audio",
         {
-          "microphonePermission": false,
-          "recordAudioAndroid": false,
+          "microphonePermission": "Allow Pocket AI to record audio only when you tap Record, for a chat attachment or a voice sample.",
+          "recordAudioAndroid": true,
           "enableBackgroundRecording": false,
           "enableBackgroundPlayback": false
         }
@@ -113,7 +113,7 @@
         {
           "photosPermission": "Pocket AI uses your photo library so you can attach images to local chats.",
           "cameraPermission": false,
-          "microphonePermission": false
+          "microphonePermission": "Allow Pocket AI to record audio only when you tap Record, for a chat attachment or a voice sample."
         }
       ],
       "expo-sharing",

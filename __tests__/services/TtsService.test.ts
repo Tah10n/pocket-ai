@@ -10,15 +10,18 @@ import { registry } from '../../src/services/LocalStorageRegistry';
 import { getSettings, resetSettings, updateSettings } from '../../src/services/SettingsStore';
 import * as settingsStore from '../../src/services/SettingsStore';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
-import { TTS_EXECUTION_PROFILES, getTtsInitParameters, estimateTtsPeakBytes,
+import { DEFAULT_TTS_PROFILE_ID, TTS_EXECUTION_PROFILES, getTtsInitParameters, estimateTtsPeakBytes,
   type TtsExecutionProfile } from '../../src/services/TtsExecutionProfiles';
 import { synthesizeTtsOnContext, type TtsPcmResult } from '../../src/services/TtsSynthesisRuntime';
 import { TtsPlaybackController } from '../../src/services/TtsPlayback';
 import { useChatStore } from '../../src/store/chatStore';
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { bindManagedCompanion } from '../../src/utils/modelArtifacts';
-import { TtsCleanupError, TtsError } from '../../src/types/tts';
+import { TtsCleanupError, TtsError, type TtsObservation } from '../../src/types/tts';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type EngineState, type ModelMetadata } from '../../src/types/models';
+import * as audioPreparation from '../../src/services/AudioPreparationService';
+import { referenceVoiceStore, type ReferenceVoiceLease } from '../../src/services/ReferenceVoiceStore';
+import * as androidQaEvidence from '../../src/services/AndroidQaGenerationEvidence';
 
 jest.mock('../../src/services/LLMEngineService', () => ({ llmEngineService: {
   getState: jest.fn(), hasAuxiliaryContextOperation: jest.fn(() => false),
@@ -83,6 +86,7 @@ const engine = jest.mocked(llmEngineService);
 const synthesize = jest.mocked(synthesizeTtsOnContext);
 const tokensProfile = TTS_EXECUTION_PROFILES.find(profile => profile.flow === 'tokens')!;
 const continuousProfile = TTS_EXECUTION_PROFILES.find(profile => profile.flow === 'continuous_embd')!;
+const qwenProfile = TTS_EXECUTION_PROFILES.find(profile => profile.family === 'qwen3_tts')!;
 const chatId = 'chat/a';
 let service: TtsService;
 let playback: jest.Mocked<TtsPlaybackController>;
@@ -224,7 +228,229 @@ afterEach(async () => {
   await cleanup.catch(() => undefined);
 });
 
-it('requires an explicit selection and never falls back to the active chat model', async () => {
+it('converts native float overshoot into a usable WAV and publishes only scalar normalization evidence', async () => {
+  choose();
+  const samples = [2, -1, 0.5, -4, 4];
+  Object.freeze(samples);
+  synthesize.mockResolvedValueOnce({ ...pcm(), samples });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(samples).toEqual([2, -1, 0.5, -4, 4]);
+  expect(playback.setClip).toHaveBeenCalledTimes(1);
+  const [wav, metadata] = playback.setClip.mock.calls[0];
+  const view = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
+  expect(String.fromCharCode(...wav.subarray(0, 4))).toBe('RIFF');
+  expect(String.fromCharCode(...wav.subarray(8, 12))).toBe('WAVE');
+  expect(wav.length).toBe(54); expect(view.getUint32(40, true)).toBe(10);
+  expect(view.getUint32(24, true)).toBe(tokensProfile.sampleRate);
+  expect(metadata).toEqual({ sampleRate: tokensProfile.sampleRate, sampleCount: 5 });
+  expect(Array.from({ length: 5 }, (_, index) => view.getInt16(44 + index * 2, true)))
+    .toEqual([16384, -8192, 4096, -32768, 32767]);
+  expect(service.getState()).toMatchObject({ phase: 'ready', clipAvailable: true, sampleCount: 5,
+    pcmNormalization: { sourcePeakAbs: 4, outOfRangeSamples: 3, gain: 0.25 } });
+  expect(service.getState()).not.toHaveProperty('samples');
+  expect(service.getState().pcmNormalization).toEqual({ sourcePeakAbs: 4, outOfRangeSamples: 3, gain: 0.25 });
+  expect(releaseContext).toHaveBeenCalledTimes(1); expect(restoreA).toHaveBeenCalledTimes(1);
+  expect(playback.play).not.toHaveBeenCalled();
+});
+
+it('resets normalization evidence before a fresh decode and after malformed PCM rejects', async () => {
+  choose();
+  synthesize.mockResolvedValueOnce({ ...pcm(), samples: [2, -4] });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().pcmNormalization?.sourcePeakAbs).toBe(4);
+  const gate = deferred<TtsPcmResult>(); synthesize.mockReturnValueOnce(gate.promise);
+  const next = service.start({ text: 'Hello again.', language: 'en', playAfterSynthesis: false });
+  await until(() => synthesize.mock.calls.length === 2);
+  expect(service.getState().pcmNormalization).toBeUndefined();
+  gate.resolve(pcm()); await next;
+  expect(service.getState().pcmNormalization).toEqual({ sourcePeakAbs: 0.25, outOfRangeSamples: 0, gain: 1 });
+  synthesize.mockResolvedValueOnce({ ...pcm(), samples: [NaN] });
+  await expect(service.start({ text: 'Hello again.', language: 'en', playAfterSynthesis: false }))
+    .rejects.toMatchObject({ code: 'decode_failed' });
+  expect(service.getState().pcmNormalization).toBeUndefined(); expect(playback.setClip).toHaveBeenCalledTimes(2);
+});
+
+it('records a distinct WAV encode failure after native decode and exact chat restoration', async () => {
+  choose();
+  synthesize.mockResolvedValueOnce({ ...pcm(), samples: [2, NaN] });
+  const observe = jest.fn();
+  await expect(service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false, observe }))
+    .rejects.toMatchObject({ code: 'decode_failed' });
+  expect(observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure'))
+    .toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: 'wav_encode' }]);
+  expect(releaseContext).toHaveBeenCalledTimes(1); expect(restoreA).toHaveBeenCalledTimes(1);
+  expect(playback.setClip).not.toHaveBeenCalled(); expect(playback.play).not.toHaveBeenCalled();
+  expect(service.getState().pcmNormalization).toBeUndefined();
+});
+
+it('retains bounded native counters and measures completion time without including chat restoration', async () => {
+  choose();
+  let clock = 10_000; jest.spyOn(Date, 'now').mockImplementation(() => clock);
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    options.observe?.({ operation: 'completion', phase: 'started' });
+    clock = 11_200;
+    options.observe?.({ operation: 'completion', phase: 'settled', tokensPredicted: 42, tokensEvaluated: 875, elapsedMs: 99_999 });
+    return pcm();
+  });
+  restoreA.mockImplementationOnce(async () => { clock += 9_000; });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().nativeCompletion).toEqual({ tokensPredicted: 42, tokensEvaluated: 875, elapsedMs: 1_200 });
+  const gate = deferred<TtsPcmResult>(); synthesize.mockReturnValueOnce(gate.promise);
+  const next = service.start({ text: 'Hello again.', language: 'en', playAfterSynthesis: false });
+  await until(() => synthesize.mock.calls.length === 2);
+  expect(service.getState().nativeCompletion).toBeUndefined();
+  gate.resolve(pcm()); await next;
+  expect(service.getState().nativeCompletion).toBeUndefined();
+});
+
+it('drops invalid counters and unbounded elapsed time instead of fabricating native completion evidence', async () => {
+  choose();
+  let clock = 10_000; jest.spyOn(Date, 'now').mockImplementation(() => clock);
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    options.observe?.({ operation: 'completion', phase: 'started' });
+    clock += 300_001;
+    options.observe?.({ operation: 'completion', phase: 'settled', tokensPredicted: NaN, tokensEvaluated: 1_000_001 });
+    return pcm();
+  });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().nativeCompletion).toBeUndefined();
+});
+
+it('ignores stale native completion callbacks after cancellation and a fresh generation', async () => {
+  choose();
+  let clock = 1_000; jest.spyOn(Date, 'now').mockImplementation(() => clock);
+  const oldCompletion: { observe?: (event: TtsObservation) => void } = {};
+  const gate = deferred<TtsPcmResult>();
+  synthesize.mockImplementationOnce((_context, _profile, options) => {
+    oldCompletion.observe = options.observe;
+    options.observe?.({ operation: 'completion', phase: 'started' });
+    return gate.promise;
+  });
+  const old = service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  const rejected = expect(old).rejects.toMatchObject({ code: 'cancelled' });
+  await until(() => Boolean(oldCompletion.observe));
+  const cleanup = service.cancelAndClear();
+  oldCompletion.observe?.({ operation: 'completion', phase: 'settled', tokensPredicted: 99, tokensEvaluated: 99 });
+  gate.resolve(pcm()); await rejected; await cleanup;
+  expect(service.getState().nativeCompletion).toBeUndefined();
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    clock = 2_000; options.observe?.({ operation: 'completion', phase: 'started' });
+    clock = 2_010; options.observe?.({ operation: 'completion', phase: 'settled', tokensPredicted: 12, tokensEvaluated: 200 });
+    return pcm();
+  });
+  await service.start({ text: 'Hello again.', language: 'en', playAfterSynthesis: false });
+  const current = { tokensPredicted: 12, tokensEvaluated: 200, elapsedMs: 10 };
+  expect(service.getState().nativeCompletion).toEqual(current);
+  oldCompletion.observe?.({ operation: 'completion', phase: 'settled', tokensPredicted: 999, tokensEvaluated: 999 });
+  expect(service.getState().nativeCompletion).toEqual(current);
+});
+
+function chooseReference() {
+  registry.saveModels([chatModel(), ttsModel(qwenProfile)]);
+  choose(qwenProfile);
+  jest.mocked(FileSystem.getInfoAsync).mockImplementation(async uri => ({ exists: true, isDirectory: false,
+    uri: String(uri), size: qwenProfile.codec.bytes, modificationTime: 1 }));
+  jest.mocked(RNFS.hash).mockResolvedValue(qwenProfile.codec.sha256);
+  const prepared = { uri: 'file:///test-cache/audio-preparation/reference.wav', sourceSha256: 'c'.repeat(64),
+    identity: 'bounded reference', sampleRate: 24000, channels: 1 as const, sampleCount: 4800, durationMs: 200, sizeBytes: 9644 };
+  const prepare = jest.spyOn(audioPreparation, 'prepareManagedAudio').mockResolvedValue(prepared);
+  const read = jest.spyOn(audioPreparation, 'readPreparedReferencePcm').mockResolvedValue(Array(4800).fill(0.25));
+  const discard = jest.spyOn(audioPreparation, 'discardPreparedAudio').mockResolvedValue(undefined);
+  const voice = { kind: 'reference' as const, bake: 'lazy' as const, source: { kind: 'temporary' as const,
+    sourceUri: 'file:///reference-source.wav', sourceSha256: 'c'.repeat(64), durationMs: 200, consent: true as const } };
+  return { voice, prepare, prepared, read, discard };
+}
+
+it('prepares and checks the immutable reference at profile rate before createSpeaker and drops derivative/PCM', async () => {
+  const { voice, prepare, read, discard } = chooseReference();
+  await service.start({ text: 'Hello.', language: 'en', voice, playAfterSynthesis: false });
+  expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ sourceUri: voice.source.sourceUri,
+    sampleRate: 24000, purpose: 'reference', assertCurrent: expect.any(Function) }));
+  expect(discard.mock.invocationCallOrder[0]).toBeLessThan(synthesize.mock.invocationCallOrder[0]);
+  expect(synthesize).toHaveBeenCalledWith(context, qwenProfile, expect.objectContaining({ voice,
+    referenceAudio: { sampleRate: 24000, samples: [] } })); // Same private array emptied after actual context drain.
+  expect((await read.mock.results[0].value).length).toBe(0);
+  expect(service.getExecutionIdentity()).toContain('lazy');
+  expect(engine.getState().activeModelId).toBe(chatId);
+});
+
+it('rejects missing permission and mutated original hash before allocating a speaker or native TTS context', async () => {
+  const { voice, prepare, prepared, read, discard } = chooseReference();
+  await expect(service.start({ text: 'Hello.', language: 'en', voice: { ...voice,
+    source: { ...voice.source, consent: false } as unknown as typeof voice.source } })).rejects.toMatchObject({ code: 'consent_required' });
+  expect(prepare).not.toHaveBeenCalled();
+  prepare.mockResolvedValue({ ...prepared, sourceSha256: 'd'.repeat(64) });
+  await expect(service.start({ text: 'Hello.', language: 'en', voice })).rejects.toMatchObject({ code: 'reference_invalid' });
+  expect(read).not.toHaveBeenCalled(); expect(discard).toHaveBeenCalledTimes(1);
+  expect(initContext).not.toHaveBeenCalled(); expect(synthesize).not.toHaveBeenCalled();
+});
+
+it('waits for late native preparation and deletes its derivative before stop resolves', async () => {
+  const { voice, prepare, prepared, discard } = chooseReference();
+  const gate = deferred<typeof prepared>(); prepare.mockReturnValue(gate.promise);
+  const work = service.start({ text: 'Hello.', language: 'en', voice });
+  const rejected = expect(work).rejects.toMatchObject({ code: 'cancelled' });
+  await until(() => prepare.mock.calls.length > 0);
+  let stopped = false; const stop = service.stop().then(() => { stopped = true; });
+  await Promise.resolve(); expect(stopped).toBe(false); expect(discard).not.toHaveBeenCalled();
+  gate.resolve(prepared); await rejected; await stop;
+  expect(discard).toHaveBeenCalledWith(prepared); expect(synthesize).not.toHaveBeenCalled();
+});
+
+it('keeps the free-memory cap before decrypting a saved reference while A is loaded', async () => {
+  const { prepare } = chooseReference();
+  const voice = { id: 'saved-voice', name: 'Saved', sourceSha256: 'c'.repeat(64), durationMs: 200,
+    sourceBytes: 9644, sourceMimeType: 'audio/wav' as const, createdAt: 1, consentRecordedAt: 1 };
+  jest.spyOn(referenceVoiceStore, 'getState').mockReturnValue({ voices: [voice], selectedVoiceId: voice.id });
+  const lease: ReferenceVoiceLease = { voice, isCurrent: () => true,
+    materialize: jest.fn(async () => ({ uri: 'file:///saved-materialized.wav', release: jest.fn(async () => undefined) })),
+    release: jest.fn(async () => undefined) };
+  jest.spyOn(referenceVoiceStore, 'acquire').mockReturnValue(lease);
+  jest.mocked(getSystemMemorySnapshot).mockResolvedValue({ availableBytes: 32 * 2 ** 30, freeBytes: 1024,
+    thresholdBytes: 0, lowMemory: false } as never);
+  await expect(service.start({ text: 'Hello.', language: 'en', voice: { kind: 'reference',
+    source: { kind: 'saved', voiceId: voice.id, sourceSha256: voice.sourceSha256 } } }))
+    .rejects.toMatchObject({ code: 'memory_insufficient' });
+  expect(lease.materialize).not.toHaveBeenCalled();
+  expect(lease.release).toHaveBeenCalledTimes(1);
+  expect(prepare).not.toHaveBeenCalled(); expect(initContext).not.toHaveBeenCalled();
+  expect(engine.getState().activeModelId).toBe(chatId);
+});
+
+it.each(['deletion', 'reselection'] as const)('releases a saved source lease after native drain on %s and restores unchanged A', async change => {
+  const { prepare, discard } = chooseReference();
+  updateSettings({ modelLoadParamsByModelId: { [chatId]: { ...getSettings().modelLoadParamsByModelId?.[chatId],
+    loraAdapters: [{ artifactId: 'chat-adapter', artifactIdentity: 'adapter-bytes', baseModelIdentity: 'chat-bytes', scale: 0.5, sizeBytes: 1024 }] } } });
+  const unchangedChatProfile = getSettings().modelLoadParamsByModelId?.[chatId];
+  const voice = { id: 'saved-voice', name: 'Saved', sourceSha256: 'c'.repeat(64), durationMs: 200,
+    sourceBytes: 9644, sourceMimeType: 'audio/wav' as const, createdAt: 1, consentRecordedAt: 1 };
+  let voiceState = { voices: [voice], selectedVoiceId: voice.id as string | null };
+  let changed: () => void = () => undefined;
+  jest.spyOn(referenceVoiceStore, 'getState').mockImplementation(() => voiceState);
+  jest.spyOn(referenceVoiceStore, 'subscribe').mockImplementation(listener => { changed = listener; return () => undefined; });
+  const lease: ReferenceVoiceLease = { voice, isCurrent: () => voiceState.voices.length > 0,
+    materialize: jest.fn(async () => ({ uri: 'file:///saved-materialized.wav', release: jest.fn(async () => undefined) })),
+    release: jest.fn(async () => { events.push('reference-source-released'); }) };
+  jest.spyOn(referenceVoiceStore, 'acquire').mockReturnValue(lease);
+  const gate = deferred<TtsPcmResult>(); synthesize.mockReturnValue(gate.promise);
+  const work = service.start({ text: 'Hello.', language: 'en', voice: { kind: 'reference', bake: 'eager',
+    source: { kind: 'saved', voiceId: voice.id, sourceSha256: voice.sourceSha256 } } });
+  const rejected = expect(work).rejects.toMatchObject({ code: 'selection_changed' });
+  await until(() => synthesize.mock.calls.length > 0);
+  voiceState = change === 'deletion' ? { voices: [], selectedVoiceId: null }
+    : { voices: [voice], selectedVoiceId: 'replacement-voice' };
+  changed();
+  expect(lease.release).not.toHaveBeenCalled();
+  gate.resolve(pcm(qwenProfile)); await rejected;
+  expect(prepare).toHaveBeenCalled(); expect(discard).toHaveBeenCalled();
+  expect(events.indexOf('context-released')).toBeLessThan(events.indexOf('reference-source-released'));
+  expect(playback.setClip).not.toHaveBeenCalled(); expect(restoreA).toHaveBeenCalledTimes(1);
+  expect(engine.getState().activeModelId).toBe(chatId);
+  expect(getSettings().modelLoadParamsByModelId?.[chatId]).toEqual(unchangedChatProfile);
+});
+
+it('honors an explicitly cleared TTS selection and never falls back to the active chat model', async () => {
+  updateSettings({ auxiliaryModels: {}, autoSelectTtsModel: false });
   expect(getTtsSelectionStatus()).toEqual({ errorCode: 'selection_missing' });
   await expect(service.start({ text: 'Hello.', language: 'en' })).rejects.toMatchObject({ code: 'selection_missing' });
   expect(engine.runWithAuxiliarySequence).not.toHaveBeenCalled();
@@ -248,7 +474,7 @@ it('checks the original bound files without claiming synthesis or changing chat 
   const settings = getSettings();
   const threads = useChatStore.getState().threads;
   choose();
-  expect(getSettings()).toEqual({ ...settings, auxiliaryModels: { tts: expect.any(Object) } });
+  expect(getSettings()).toEqual({ ...settings, auxiliaryModels: { tts: expect.any(Object) }, autoSelectTtsModel: false });
   expect(useChatStore.getState().threads).toBe(threads);
   expect(useChatStore.getState().activeThreadId).toBe(source.threadId);
   await service.checkFiles();
@@ -288,7 +514,7 @@ it('rejects a selection changed while the file digest is still pending', async (
   expect(resolveTtsBinding().profile.id).toBe(continuousProfile.id);
 });
 
-it.each(TTS_EXECUTION_PROFILES)('uses a fresh isolated native profile for $flow without writing history or running chat tools', async profile => {
+it.each(TTS_EXECUTION_PROFILES.filter(profile => !profile.voiceModes))('uses a fresh isolated native profile for $flow without writing history or running chat tools', async profile => {
   const source = createAssistantSource();
   choose(profile);
   const settings = getSettings();
@@ -315,11 +541,120 @@ it.each(TTS_EXECUTION_PROFILES)('uses a fresh isolated native profile for $flow 
   expect(playback.play).not.toHaveBeenCalled();
 });
 
+it('admits sufficient OS allocatable memory after detaching A even when free pages are scarce', async () => {
+  choose();
+  const requiredBytes = estimateTtsPeakBytes(tokensProfile);
+  const thresholdBytes = 256 * 2 ** 20;
+  jest.mocked(getSystemMemorySnapshot).mockImplementationOnce(async () => {
+    expect(state.status).toBe(EngineStatus.IDLE);
+    expect(events).toEqual(['detach-a']);
+    return { availableBytes: requiredBytes + thresholdBytes, freeBytes: 1,
+      thresholdBytes, lowMemory: false, pressureLevel: 'normal' } as never;
+  });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(initContext).toHaveBeenCalledTimes(1);
+  expect(synthesize).toHaveBeenCalledTimes(1);
+  expect(playback.setClip).toHaveBeenCalledTimes(1);
+  expect(state.activeModelId).toBe(chatId);
+  expect(getSystemMemorySnapshot).toHaveBeenCalledTimes(1);
+  expect(service.getState().memoryAdmission).toEqual({
+    availableBytes: requiredBytes + thresholdBytes, freeBytes: 1, processAvailableBytes: undefined,
+    thresholdBytes, budgetBytes: requiredBytes, requiredBytes, lowMemory: false, pressureLevel: 'normal',
+  });
+});
+
+it('admits the automatically selected speakerless default within the observed phone budget', async () => {
+  const preferred = TTS_EXECUTION_PROFILES.find(profile => profile.id === DEFAULT_TTS_PROFILE_ID)!;
+  registry.saveModels([chatModel(), ttsModel(preferred)]);
+  updateSettings({ auxiliaryModels: {}, autoSelectTtsModel: true });
+  expect(getTtsSelectionStatus()).toMatchObject({ profileId: DEFAULT_TTS_PROFILE_ID });
+  jest.mocked(FileSystem.getInfoAsync).mockImplementation(async uri => ({ exists: true, isDirectory: false,
+    uri: String(uri), size: preferred.codec.bytes, modificationTime: 1 }));
+  jest.mocked(RNFS.hash).mockResolvedValue(preferred.codec.sha256);
+  const requiredBytes = estimateTtsPeakBytes(preferred);
+  const availableBytes = 2_814_287_872;
+  const freeBytes = 161_202_176;
+  const thresholdBytes = 452_984_832;
+  const budgetBytes = 2_361_303_040;
+  jest.mocked(getSystemMemorySnapshot).mockImplementationOnce(async () => {
+    expect(state.status).toBe(EngineStatus.IDLE);
+    expect(events).toEqual(['detach-a']);
+    return { availableBytes, freeBytes, thresholdBytes, lowMemory: false, pressureLevel: 'normal' } as never;
+  });
+  await service.start({ text: 'Hello.', language: 'en', voice: { kind: 'speakerless' },
+    playAfterSynthesis: false });
+  expect(requiredBytes).toBe(2_275_477_600);
+  expect(contextRequests[0].initParams).toMatchObject({ n_ctx: 2816, n_batch: 128,
+    embedding: false, cache_type_k: 'f16', cache_type_v: 'f16', n_gpu_layers: 0,
+    use_mmap: true, use_mlock: false, no_extra_bufts: true });
+  expect(synthesize).toHaveBeenCalledWith(context, preferred, expect.objectContaining({
+    voice: { kind: 'speakerless' } }));
+  expect(service.getState().memoryAdmission).toMatchObject({ requiredBytes, availableBytes, freeBytes,
+    thresholdBytes, budgetBytes, lowMemory: false, pressureLevel: 'normal' });
+  expect(budgetBytes).toBeGreaterThan(requiredBytes);
+  expect(getSystemMemorySnapshot).toHaveBeenCalledTimes(1);
+  expect(state.activeModelId).toBe(chatId);
+});
+
+it('retains the exact failed admission snapshot before loading or inference can start', async () => {
+  choose();
+  const availableBytes = 2_440_790_016;
+  const thresholdBytes = 256 * 2 ** 20;
+  const freeBytes = 206_880 * 1024;
+  const phases: (string | null)[] = [];
+  const remove = service.subscribe(() => { phases.push(service.getState().phase); });
+  jest.mocked(getSystemMemorySnapshot).mockResolvedValueOnce({ availableBytes, freeBytes,
+    thresholdBytes, lowMemory: false, pressureLevel: 'normal' } as never);
+  try {
+    await expect(service.start({ text: 'Hello.', language: 'en' }))
+      .rejects.toMatchObject({ code: 'memory_insufficient' });
+    expect(service.getState().memoryAdmission).toEqual({ availableBytes, freeBytes,
+      processAvailableBytes: undefined, thresholdBytes, budgetBytes: availableBytes - thresholdBytes,
+      requiredBytes: estimateTtsPeakBytes(tokensProfile), lowMemory: false, pressureLevel: 'normal' });
+    expect(phases).not.toContain('loading');
+    expect(getSystemMemorySnapshot).toHaveBeenCalledTimes(1);
+    expect(initContext).not.toHaveBeenCalled();
+    expect(synthesize).not.toHaveBeenCalled();
+  } finally { remove(); }
+});
+
+it('does not retain admission evidence when QA evidence is disabled', async () => {
+  choose();
+  const enabled = jest.spyOn(androidQaEvidence, 'isAndroidQaGenerationEvidenceEnabled').mockReturnValue(false);
+  try {
+    await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+    expect(service.getState().memoryAdmission).toBeUndefined();
+    expect(getSystemMemorySnapshot).toHaveBeenCalledTimes(1);
+  } finally { enabled.mockRestore(); }
+});
+
+it('keeps out-of-range snapshot bytes out of admission evidence without changing the gate', async () => {
+  choose();
+  jest.mocked(getSystemMemorySnapshot).mockResolvedValueOnce({ availableBytes: 65 * 2 ** 30,
+    freeBytes: Number.NaN, thresholdBytes: -1, lowMemory: false, pressureLevel: 'normal' } as never);
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().memoryAdmission).toEqual({ availableBytes: undefined, freeBytes: undefined,
+    processAvailableBytes: undefined, thresholdBytes: undefined, budgetBytes: undefined,
+    requiredBytes: estimateTtsPeakBytes(tokensProfile), lowMemory: false, pressureLevel: 'normal' });
+  expect(initContext).toHaveBeenCalledTimes(1);
+});
+
 it.each([
-  { memory: null, code: 'memory_unknown' },
-  { memory: { availableBytes: 32 * 2 ** 30, freeBytes: 1, thresholdBytes: 0, lowMemory: false }, code: 'memory_insufficient' },
-  { memory: { availableBytes: 32 * 2 ** 30, freeBytes: 32 * 2 ** 30, thresholdBytes: 0, lowMemory: true }, code: 'memory_insufficient' },
-])('refuses $code before context initialization even if chat estimates would fit', async ({ memory, code }) => {
+  { reason: 'missing snapshot', memory: null, code: 'memory_unknown' },
+  { reason: 'zero available memory', memory: { availableBytes: 0, freeBytes: 0,
+    thresholdBytes: 0, lowMemory: false }, code: 'memory_unknown' },
+  { reason: 'insufficient allocatable memory', memory: { availableBytes: estimateTtsPeakBytes(tokensProfile) - 1,
+    freeBytes: 32 * 2 ** 30, thresholdBytes: 0, lowMemory: false, pressureLevel: 'normal' }, code: 'memory_insufficient' },
+  { reason: 'reserved OS threshold', memory: { availableBytes: estimateTtsPeakBytes(tokensProfile) + 1024,
+    freeBytes: 32 * 2 ** 30, thresholdBytes: 1025, lowMemory: false, pressureLevel: 'normal' }, code: 'memory_insufficient' },
+  { reason: 'insufficient process headroom', memory: { availableBytes: 32 * 2 ** 30,
+    freeBytes: 32 * 2 ** 30, processAvailableBytes: estimateTtsPeakBytes(tokensProfile) - 1,
+    thresholdBytes: 0, lowMemory: false, pressureLevel: 'normal' }, code: 'memory_insufficient' },
+  { reason: 'low-memory state', memory: { availableBytes: 32 * 2 ** 30,
+    freeBytes: 32 * 2 ** 30, thresholdBytes: 0, lowMemory: true }, code: 'memory_insufficient' },
+  { reason: 'critical pressure free-page cap', memory: { availableBytes: 32 * 2 ** 30,
+    freeBytes: 1, thresholdBytes: 0, lowMemory: false, pressureLevel: 'critical' }, code: 'memory_insufficient' },
+])('refuses $reason before context initialization', async ({ memory, code }) => {
   choose();
   jest.mocked(getSystemMemorySnapshot).mockResolvedValueOnce(memory as never);
   await expect(service.start({ text: 'Hello.', language: 'en' })).rejects.toMatchObject({ code });
@@ -488,6 +823,47 @@ it('preserves a sanitized primary runtime code when codec cleanup also failed', 
   expect(service.getState()).toMatchObject({ phase: 'error', errorCode: 'payload_invalid' });
   expect(restoreA).toHaveBeenCalledTimes(1);
   expect(playback.setClip).not.toHaveBeenCalled();
+});
+
+it.each([false, true])('preserves phonemizer diagnostics through actual service catch (codec cleanup wrapper=%s)', async wrapped => {
+  choose();
+  const primary = new TtsError('phonemizer_failed', { reason: 'module_init', elapsedMs: 123, moduleInitMs: 123 });
+  const failure = wrapped ? new TtsCleanupError(primary) : primary;
+  Object.assign(failure, { native: 'private payload', cause: 'private cause', message: 'private message',
+    phonemizerFailure: { ...primary.phonemizerFailure, phones: 'private IPA' } });
+  synthesize.mockRejectedValueOnce(failure);
+  const error = await service.start({ text: 'Hello.', language: 'en' }).catch(value => value);
+  expect(error).toBeInstanceOf(TtsError); expect(error).not.toBeInstanceOf(TtsCleanupError);
+  expect(error).not.toBe(failure);
+  expect(error).toMatchObject({ name: 'TtsError', code: 'phonemizer_failed', message: 'phonemizer_failed',
+    phonemizerFailure: { reason: 'module_init', elapsedMs: 123, moduleInitMs: 123 } });
+  for (const field of ['native', 'cause', 'operationError', 'cleanupError']) expect(error).not.toHaveProperty(field);
+  expect(JSON.stringify(error)).not.toContain('private');
+  expect(service.getState()).toMatchObject({ phase: 'error', errorCode: 'phonemizer_failed' });
+  expect(restoreA).toHaveBeenCalledTimes(1); expect(playback.setClip).not.toHaveBeenCalled();
+});
+it('reconstructs the generic cancellation error at the service boundary', async () => {
+  choose(); const cancelled = Object.freeze(new TtsError('cancelled'));
+  synthesize.mockRejectedValueOnce(cancelled);
+  const error = await service.start({ text: 'Hello.', language: 'en' }).catch(value => value);
+  expect(error).toBeInstanceOf(TtsError); expect(error).not.toBe(cancelled);
+  expect(error).toMatchObject({ code: 'cancelled', message: 'cancelled' });
+  expect(service.getState()).toMatchObject({ phase: 'stopped', errorCode: 'cancelled' });
+});
+it.each(['storage', 'recovery', 'restore'] as const)('keeps %s failure above phonemizer diagnostics', async override => {
+  choose(); const primary = new TtsError('phonemizer_failed', { reason: 'deadline', elapsedMs: 1001, moduleInitMs: 8 });
+  if (override === 'storage') {
+    synthesize.mockRejectedValueOnce(primary);
+    playback.clear.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('private cleanup'));
+  } else if (override === 'recovery') {
+    engine.runWithAuxiliarySequence.mockRejectedValueOnce(Object.assign(new Error('private context'),
+      { code: 'engine_recovery_required', operationError: primary }));
+  } else engine.runWithAuxiliarySequence.mockImplementationOnce(async () => {
+    state = { ...state, auxiliaryRestoreError: 'private restore' }; throw primary;
+  });
+  const error = await service.start({ text: 'Hello.', language: 'en' }).catch(value => value);
+  expect(error).toMatchObject({ code: override === 'storage' ? 'storage_failed' : override === 'recovery' ? 'release_failed' : 'restore_failed' });
+  expect(error.phonemizerFailure).toBeUndefined(); expect(JSON.stringify(error)).not.toContain('private');
 });
 
 it('classifies frozen primary plus unconfirmed native release as recovery required without leaking either error', async () => {
@@ -781,4 +1157,56 @@ describe('service + real playback controller initial admission', () => {
     expect(service.getState()).toMatchObject({ phase: 'error', errorCode: 'playback_start_timeout', clipAvailable: true });
     expect(mockClipFiles.size).toBe(1);
   });
+});
+
+it('maps the real auxiliary failure hook to one backbone stage without exposing the native error', async () => {
+  choose();
+  engine.runWithAuxiliarySequence.mockImplementationOnce(async request => {
+    request.observeFailure?.('backbone_init');
+    request.observeFailure?.('restore');
+    throw new Error('synthetic private init detail');
+  });
+  const observe = jest.fn();
+  await expect(service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false, observe }))
+    .rejects.toMatchObject({ code: 'native_failed' });
+  expect(observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure'))
+    .toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: 'tts_backbone_init' }]);
+  expect(synthesize).not.toHaveBeenCalled();
+  expect(JSON.stringify(observe.mock.calls)).not.toContain('private');
+});
+
+it('keeps the runtime first failure when later restoration changes the existing terminal error code', async () => {
+  choose();
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    options.observe?.({ operation: 'first_failure', phase: 'failed', failureStage: 'formatter' });
+    throw new TtsError('native_failed');
+  });
+  engine.runWithAuxiliarySequence.mockImplementationOnce(async (request, operation) => {
+    try { return await normalSequence(request, operation); }
+    finally {
+      request.observeFailure?.('restore');
+      state = { ...state, auxiliaryRestoreError: 'synthetic fixed restore failure' };
+      throw new Error('synthetic restore detail');
+    }
+  });
+  const observe = jest.fn();
+  await expect(service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false, observe }))
+    .rejects.toMatchObject({ code: 'restore_failed' });
+  expect(observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure'))
+    .toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: 'formatter' }]);
+  expect(releaseContext).toHaveBeenCalledTimes(1);
+  expect(restoreA).toHaveBeenCalledTimes(1);
+});
+
+it('contains request observer exceptions while preserving normal synthesis and A restoration', async () => {
+  choose();
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    options.observe?.({ operation: 'formatter', phase: 'settled' });
+    return pcm();
+  });
+  const observe = jest.fn((_event: TtsObservation) => { throw new Error('ignored diagnostic observer'); });
+  await expect(service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false, observe })).resolves.toBeUndefined();
+  expect(observe).toHaveBeenCalled();
+  expect(releaseContext).toHaveBeenCalledTimes(1);
+  expect(restoreA).toHaveBeenCalledTimes(1);
 });

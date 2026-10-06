@@ -12,6 +12,7 @@ import { getModelFileIdentity } from '../utils/modelRoles';
 import { getAppCacheRootDir } from './FileSystemSetup';
 import { isAndroidQaDocumentModelBootstrapEnabled, ANDROID_QA_DOCUMENT_MODEL_ID } from './AndroidQaDocumentModelBootstrap';
 import { getAndroidQaEffectiveProfileIdentity, prepareAndroidQaStage3Adapter } from './AndroidQaStage3';
+import { prepareAndroidQaStage7Seed } from './AndroidQaStage7Seed';
 import { selectAuxiliaryModel } from './AuxiliaryModelService';
 import { llmEngineService } from './LLMEngineService';
 import { getModelDownloadManager, ModelFileLeaseBusyError } from './ModelDownloadManager';
@@ -66,8 +67,10 @@ function claimNewFixtureDownload(model: ModelMetadata, owned: OwnedFixtureDownlo
 }
 
 /** Uses the same registry, identity and download queue as the public resource UI. */
-async function prepare(profile: TtsExecutionProfile): Promise<ModelMetadata> {
-  const desired: ModelMetadata = { id: `pocket-ai/android-qa-tts-${profile.flow}`, name: `Android QA ${profile.family}`,
+export async function prepareAndroidQaTtsProfile(profile: TtsExecutionProfile): Promise<ModelMetadata> {
+  const fixtureId = ['outetts-1.0-0.6b-q4_k_m-dac-speech-f16', 'bluemagpie-barbet-1b-q4_k_m-audiovae-q8_0'].includes(profile.id)
+    ? profile.flow : profile.id;
+  const desired: ModelMetadata = { id: `pocket-ai/android-qa-tts-${fixtureId}`, name: `Android QA ${profile.family}`,
     author: profile.backbone.repository.split('/')[0], size: profile.backbone.bytes, sha256: profile.backbone.sha256,
     downloadUrl: sourceUrl(profile.backbone), resolvedFileName: profile.backbone.filename, hfRevision: profile.backbone.revision,
     lifecycleStatus: LifecycleStatus.AVAILABLE, fitsInRam: null, downloadProgress: 0, metadataTrust: 'trusted_remote',
@@ -82,6 +85,12 @@ async function prepare(profile: TtsExecutionProfile): Promise<ModelMetadata> {
         && model.downloadIntegrity?.kind === 'sha256' && model.downloadIntegrity.sha256 === profile.backbone.sha256
         && model.downloadIntegrity.sizeBytes === profile.backbone.bytes ? model : undefined;
     };
+    const seedKind = profile.id === 'neutts-nano-q4_k_m-neucodec-q8_0' ? 'neutts'
+      : profile.id === 'qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0' ? 'qwen3' : null;
+    if (seedKind) {
+      const seeded = await prepareAndroidQaStage7Seed(seedKind, desired);
+      if (seeded) return seeded;
+    }
     if (!ready()) {
       check(!registry.getModel(desired.id)?.localPath, 'fixture_identity_conflict');
       if (claimNewFixtureDownload(desired, owned)) {
@@ -199,7 +208,7 @@ async function execute(flow: TtsFlow, playbackOnly = false): Promise<void> {
     const profile = TTS_EXECUTION_PROFILES.find(item => item.flow === flow)!;
     const fixture = fixtures.fixtures.find(item => item.id === profile.id)!;
     if (playbackOnly) await prepareAndroidQaStage3Adapter(180_000);
-    const model = await prepare(profile);
+    const model = await prepareAndroidQaTtsProfile(profile);
     selectAuxiliaryModel('tts', model);
     check(getSettings().activeModelId === ANDROID_QA_DOCUMENT_MODEL_ID, 'chat_selection_changed');
     // Reuse the verified Stage 3 adapter, with the same original companion identity/order/scale.

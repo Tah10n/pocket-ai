@@ -1,7 +1,7 @@
-import type { LlamaContext, NativeCompletionResult, TTSCapabilities } from 'llama.rn';
+import type { LlamaContext, LlamaSpeaker, NativeCompletionResult, TTSCapabilities } from 'llama.rn';
 import { synthesizeTtsOnContext, validateTtsAudioPayload, validateTtsCompletion } from '../../src/services/TtsSynthesisRuntime';
 import { TTS_EXECUTION_PROFILES, type TtsExecutionProfile } from '../../src/services/TtsExecutionProfiles';
-import { TTS_LIMITS, TtsError, type TtsPhase } from '../../src/types/tts';
+import { TTS_LIMITS, TtsError, type TtsObservation, type TtsPhase } from '../../src/types/tts';
 import { requireLlamaModule } from '../../src/services/llamaRnModule';
 import type { LlamaCompletionResult } from '../../src/services/LlamaRuntimeAdapter';
 
@@ -10,6 +10,8 @@ jest.mock('../../src/services/llamaRnModule', () => ({ requireLlamaModule: jest.
 type FormattedAudio = Awaited<ReturnType<LlamaContext['getFormattedAudioCompletion']>>;
 const tokensProfile = TTS_EXECUTION_PROFILES.find(profile => profile.flow === 'tokens')!;
 const continuousProfile = TTS_EXECUTION_PROFILES.find(profile => profile.flow === 'continuous_embd')!;
+const neuProfile = TTS_EXECUTION_PROFILES.find(profile => profile.family === 'neutts')!;
+const qwenProfile = TTS_EXECUTION_PROFILES.find(profile => profile.family === 'qwen3_tts')!;
 
 function completed(overrides: Partial<NativeCompletionResult> = {}): NativeCompletionResult {
   return {
@@ -35,7 +37,7 @@ function nativeContext(profile: TtsExecutionProfile = tokensProfile) {
     isVocoderEnabled: jest.fn(async () => true),
     getTTSCapabilities: jest.fn(async () => capabilities(profile)),
     getFormattedAudioCompletion: jest.fn(async (_options: Parameters<LlamaContext['getFormattedAudioCompletion']>[0]): Promise<FormattedAudio> => ({
-      prompt: 'native speech prompt', grammar: 'native audio grammar', embedding: profile.flow === 'continuous_embd', flow: profile.flow,
+      prompt: 'native speech prompt', grammar: 'native audio grammar', embedding: profile.flow === 'continuous_embd', flow: profile.flow as FormattedAudio['flow'],
     })),
     tokenize: jest.fn(async (_text: string) => ({ tokens: [5, 6, 7], has_media: false })),
     getAudioSampleRate: jest.fn(async () => profile.sampleRate),
@@ -44,6 +46,7 @@ function nativeContext(profile: TtsExecutionProfile = tokensProfile) {
     decodeAudioTokens: jest.fn(async (_codes: number[]) => [0.25, -0.5, 0.75]),
     decodeAudioEmbeddings: jest.fn(async (_values: number[], _dimension: number) => [0.25, -0.5, 0.75]),
     releaseVocoder: jest.fn(async () => undefined),
+    createSpeaker: jest.fn(async (_config: Parameters<LlamaContext['createSpeaker']>[0]) => undefined as unknown as LlamaSpeaker),
   };
   // The sole cast is the native mock boundary; method inputs/results use installed llama.rn types.
   const context = native as unknown as LlamaContext;
@@ -75,6 +78,138 @@ beforeEach(() => {
   jest.mocked(requireLlamaModule).mockReturnValue({
     listTTSVoices: jest.fn(() => []), getTTSVoice: jest.fn(() => undefined), listTTSLanguages: jest.fn(() => []),
   } as unknown as ReturnType<typeof requireLlamaModule>);
+});
+
+function referenceOptions(bake: 'eager' | 'lazy' = 'eager') {
+  return { ...options(qwenProfile), referenceAudio: { samples: Array(4800).fill(0.25), sampleRate: 24000 },
+    voice: { kind: 'reference' as const, bake, source: { kind: 'temporary' as const, sourceUri: 'file:///reference.wav',
+      sourceSha256: 'c'.repeat(64), durationMs: 200, consent: true as const } } };
+}
+function qwenContext() {
+  const { native, context } = nativeContext(qwenProfile);
+  const speaker = { id: 7, family: 'qwen3_tts', rows: 0, baked: false,
+    bake: jest.fn(async () => { speaker.rows = 1; speaker.baked = true; }), release: jest.fn(async () => undefined) };
+  native.createSpeaker.mockResolvedValue(speaker as unknown as LlamaSpeaker);
+  const receipt = { prompt: '', embedding: true, flow: 'talker_embd', speakerId: 7, speakerRows: 1, speakerBaked: true };
+  native.getFormattedAudioCompletion.mockResolvedValue(receipt as unknown as FormattedAudio);
+  native.completion.mockResolvedValue(completed({ audio_tokens: Array(16).fill(2) }));
+  return { native, context, speaker, receipt };
+}
+
+it.each(['eager', 'lazy'] as const)('uses an actual Qwen speaker handle and native %s bake receipt, then releases before the codec', async bake => {
+  const { native, context, speaker } = qwenContext();
+  const observation = jest.fn();
+  await synthesizeTtsOnContext(context, qwenProfile, { ...referenceOptions(bake), observe: observation });
+  expect(native.createSpeaker).toHaveBeenCalledWith(expect.objectContaining({ bake: false, refAudioSampleRate: 24000 }));
+  expect(speaker.bake).toHaveBeenCalledTimes(bake === 'eager' ? 1 : 0);
+  expect(native.getFormattedAudioCompletion).toHaveBeenCalledWith(expect.objectContaining({ speaker }));
+  expect(native.tokenize).toHaveBeenCalledWith(referenceOptions().text);
+  expect(native.completion).toHaveBeenCalledWith(expect.objectContaining({ prompt: '', embedding: true, n_predict: 201 }), undefined);
+  expect(native.decodeAudioTokens).toHaveBeenCalledWith(Array(16).fill(2));
+  expect(speaker.release.mock.invocationCallOrder[0]).toBeLessThan(native.releaseVocoder.mock.invocationCallOrder[0]);
+  expect(observation).toHaveBeenCalledWith({ operation: 'formatter', phase: 'settled', speakerRows: 1, speakerBaked: true });
+  expect(observation.mock.calls.filter(([event]) => event.operation === 'speaker_bake'))
+    .toHaveLength(bake === 'eager' ? 2 : 0);
+});
+
+it('retains an uncertain speaker for confirmed context destruction and never explicitly frees its codec first', async () => {
+  const { native, context, speaker } = qwenContext();
+  speaker.release.mockRejectedValue(new Error('native release uncertainty'));
+  await expect(synthesizeTtsOnContext(context, qwenProfile, referenceOptions())).rejects.toMatchObject({ code: 'release_failed' });
+  expect(speaker.release).toHaveBeenCalledTimes(1);
+  expect(native.releaseVocoder).not.toHaveBeenCalled();
+});
+
+it('preserves the controlled cause when both reference processing and speaker release fail', async () => {
+  const { native, context, speaker } = qwenContext();
+  speaker.bake.mockRejectedValue(new TtsError('reference_invalid'));
+  speaker.release.mockRejectedValue(new Error('native release uncertainty'));
+  await expect(synthesizeTtsOnContext(context, qwenProfile, referenceOptions()))
+    .rejects.toMatchObject({ code: 'reference_invalid', cleanupError: { code: 'release_failed' } });
+  expect(native.releaseVocoder).not.toHaveBeenCalled();
+});
+
+it.each([
+  { speakerId: 8, speakerRows: 1, speakerBaked: true },
+  { speakerId: 7, speakerRows: 0, speakerBaked: false },
+  { speakerId: 7, speakerRows: 2, speakerBaked: true },
+  {},
+])('rejects missing or incompatible lazy native speaker receipt %j before completion', async bad => {
+  const { native, context, speaker, receipt } = qwenContext();
+  native.getFormattedAudioCompletion.mockResolvedValue({ prompt: receipt.prompt, flow: receipt.flow, embedding: true, ...bad } as unknown as FormattedAudio);
+  await expect(synthesizeTtsOnContext(context, qwenProfile, referenceOptions('lazy'))).rejects.toMatchObject({ code: 'reference_invalid' });
+  expect(native.completion).not.toHaveBeenCalled();
+  expect(speaker.release).toHaveBeenCalledTimes(1);
+  expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
+});
+
+it('rejects a fulfilled but unsuccessful eager bake without formatting or completion', async () => {
+  const { native, context, speaker } = qwenContext();
+  speaker.bake.mockImplementation(async () => undefined);
+  await expect(synthesizeTtsOnContext(context, qwenProfile, referenceOptions())).rejects.toMatchObject({ code: 'reference_invalid' });
+  expect(native.getFormattedAudioCompletion).not.toHaveBeenCalled();
+  expect(native.completion).not.toHaveBeenCalled();
+  expect(speaker.release).toHaveBeenCalledTimes(1);
+});
+
+it.each(['create', 'eager-bake', 'lazy-formatter'] as const)('drains late %s on cancellation and releases its real speaker before vocoder', async stage => {
+  const { native, context, speaker, receipt } = qwenContext();
+  const gate = deferred<void>();
+  if (stage === 'create') native.createSpeaker.mockImplementation(async () => { await gate.promise; return speaker as unknown as LlamaSpeaker; });
+  if (stage === 'eager-bake') speaker.bake.mockImplementation(async () => { await gate.promise; speaker.rows = 1; speaker.baked = true; });
+  if (stage === 'lazy-formatter') native.getFormattedAudioCompletion.mockImplementation(async () => { await gate.promise; return receipt as unknown as FormattedAudio; });
+  const controller = new AbortController();
+  const work = synthesizeTtsOnContext(context, qwenProfile, { ...referenceOptions(stage === 'lazy-formatter' ? 'lazy' : 'eager'), signal: controller.signal });
+  const rejected = expect(work).rejects.toMatchObject({ code: 'cancelled' });
+  await until(() => stage === 'create' ? native.createSpeaker.mock.calls.length > 0
+    : stage === 'eager-bake' ? speaker.bake.mock.calls.length > 0 : native.getFormattedAudioCompletion.mock.calls.length > 0);
+  controller.abort(); await flush();
+  expect(native.releaseVocoder).not.toHaveBeenCalled();
+  gate.resolve(); await rejected;
+  expect(native.completion).not.toHaveBeenCalled();
+  expect(speaker.release.mock.invocationCallOrder[0]).toBeLessThan(native.releaseVocoder.mock.invocationCallOrder[0]);
+});
+
+it('bounds Qwen16 codebook frames to 16 seconds before native decoding', () => {
+  expect(validateTtsAudioPayload({ audio_tokens: Array(3200).fill(2) }, 'talker_embd', qwenProfile, 24000).frames).toBe(200);
+  expect(() => validateTtsAudioPayload({ audio_tokens: Array(3216).fill(2) }, 'talker_embd', qwenProfile, 24000)).toThrow('payload_invalid');
+  expect(() => validateTtsAudioPayload({ audio_tokens: [2048, ...Array(15).fill(2)] }, 'talker_embd', qwenProfile, 24000)).toThrow('payload_invalid');
+});
+
+it('intersects builtin voice and language helpers with English admission and phonemizes ref_text independently', async () => {
+  const { native, context } = nativeContext(neuProfile);
+  native.getTTSCapabilities.mockResolvedValue({ ...capabilities(neuProfile), requiresPhonemes: true });
+  const original = { ref_text: 'Hello world.', ref_codes: [1, 2] };
+  jest.mocked(requireLlamaModule).mockReturnValue({
+    listTTSVoices: jest.fn(() => ['default', 'jo', 'dave']), getTTSVoice: jest.fn(() => original),
+    listTTSLanguages: jest.fn(() => ['en-us', 'de', 'fr-fr']),
+  } as unknown as ReturnType<typeof requireLlamaModule>);
+  native.getFormattedAudioCompletion.mockImplementation(async config => {
+    expect(config.language).toBe('en-us');
+    expect(config.speaker).toMatchObject({ ref_codes: [1, 2], ref_phones: expect.any(String) });
+    expect(await config.phonemizer?.(config.prompt, config.language!)).toContain('spik');
+    return { prompt: 'bounded real formatter output', embedding: false, flow: 'tokens' };
+  });
+  await synthesizeTtsOnContext(context, neuProfile, { ...options(neuProfile), voice: { kind: 'builtin', voice: 'jo' } });
+  expect(original).not.toHaveProperty('ref_phones');
+  await expect(synthesizeTtsOnContext(context, neuProfile, { ...options(neuProfile), language: 'de', voice: { kind: 'builtin', voice: 'jo' } }))
+    .rejects.toMatchObject({ code: 'language_unsupported' });
+  expect(native.createSpeaker).not.toHaveBeenCalled();
+});
+
+it('passes the explicit Oute0.3 builtin sampling policy through the native completion adapter', async () => {
+  const profile = TTS_EXECUTION_PROFILES.find(value => value.promptKind === 'outetts_v0_3')!;
+  const { native, context } = nativeContext(profile);
+  const payload = { words: [{ word: 'hello', duration: 0.5, codes: [1, 2] }] };
+  jest.mocked(requireLlamaModule).mockReturnValue({
+    listTTSVoices: jest.fn(() => ['default']), getTTSVoice: jest.fn(() => payload),
+    listTTSLanguages: jest.fn(() => ['en-us']),
+  } as unknown as ReturnType<typeof requireLlamaModule>);
+  await synthesizeTtsOnContext(context, profile, { ...options(profile), voice: { kind: 'builtin', voice: 'default' } });
+  expect(native.getFormattedAudioCompletion).toHaveBeenCalledWith(expect.objectContaining({ speaker: payload, language: 'en-us' }));
+  expect(native.completion).toHaveBeenCalledTimes(1);
+  expect(native.completion.mock.calls[0][0]).toMatchObject({ temperature: 0.1, penalty_repeat: 1.1,
+    top_k: 4, top_p: 0.9, min_p: 0.05, seed: 42, n_threads: 4 });
 });
 
 it('maps the formatter prompt/grammar/embedding to one completion and decodes only its actual audio_tokens', async () => {
@@ -352,4 +487,71 @@ it('sanitizes an unexpected native failure and reports release failure when synt
   await expect(synthesizeTtsOnContext(context, tokensProfile, options())).rejects.toMatchObject({ code: 'native_failed', message: 'native_failed' });
   native.releaseVocoder.mockRejectedValueOnce(new Error('private native cleanup detail'));
   await expect(synthesizeTtsOnContext(context, tokensProfile, options())).rejects.toMatchObject({ code: 'release_failed', message: 'release_failed' });
+});
+
+it.each([
+  ['initVocoder', 'vocoder_init'], ['getTTSCapabilities', 'getTTSCapabilities'],
+  ['getFormattedAudioCompletion', 'formatter'], ['tokenize', 'prompt_prepare'],
+  ['completion', 'completion'], ['decodeAudioTokens', 'decode'],
+] as const)('preserves first failure from %s before failed codec cleanup without treating settled as success', async (method, stage) => {
+  const { native, context } = nativeContext();
+  native[method].mockRejectedValueOnce(new Error('synthetic private native detail'));
+  native.releaseVocoder.mockRejectedValueOnce(new Error('synthetic cleanup detail'));
+  let releaseCallsAtFailure: number | undefined;
+  const observe = jest.fn((event: TtsObservation) => {
+    if (event.operation === 'first_failure') releaseCallsAtFailure = native.releaseVocoder.mock.calls.length;
+  });
+  await expect(synthesizeTtsOnContext(context, tokensProfile, { ...options(), observe }))
+    .rejects.toMatchObject({ code: 'native_failed', cleanupError: { code: 'release_failed' } });
+  const failures = observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure');
+  expect(failures).toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: stage }]);
+  expect(releaseCallsAtFailure).toBe(0);
+  expect(JSON.stringify(failures)).not.toContain('detail');
+  expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
+});
+
+it('keeps the nested phonemizer failure ahead of its formatter and release catches', async () => {
+  const { native, context } = nativeContext(neuProfile);
+  native.getTTSCapabilities.mockResolvedValue({ ...capabilities(neuProfile), requiresPhonemes: true });
+  jest.mocked(requireLlamaModule).mockReturnValue({
+    listTTSLanguages: jest.fn(() => ['en-us']), listTTSVoices: jest.fn(() => ['jo']),
+    getTTSVoice: jest.fn(() => ({ ref_codes: [1, 2], ref_phones: 'hɛloʊ' })),
+  } as unknown as ReturnType<typeof requireLlamaModule>);
+  native.getFormattedAudioCompletion.mockImplementation(async config => {
+    await config.phonemizer?.(config.prompt, 'de');
+    return { prompt: 'bounded formatter', embedding: false, flow: 'tokens' };
+  });
+  const observe = jest.fn();
+  await expect(synthesizeTtsOnContext(context, neuProfile, {
+    ...options(neuProfile), voice: { kind: 'builtin', voice: 'jo' }, observe,
+  })).rejects.toMatchObject({ code: 'language_unsupported' });
+  expect(observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure'))
+    .toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: 'phonemizer' }]);
+  expect(native.completion).not.toHaveBeenCalled();
+});
+
+it('reports a deferred formatter failure before release drains and does not replace it with a later cleanup failure', async () => {
+  const { native, context } = nativeContext();
+  const formatter = deferred<FormattedAudio>(); const release = deferred<undefined>();
+  native.getFormattedAudioCompletion.mockReturnValueOnce(formatter.promise);
+  native.releaseVocoder.mockReturnValueOnce(release.promise);
+  const observe = jest.fn();
+  const work = synthesizeTtsOnContext(context, tokensProfile, { ...options(), observe });
+  const rejected = expect(work).rejects.toMatchObject({ code: 'native_failed', cleanupError: { code: 'release_failed' } });
+  await until(() => native.getFormattedAudioCompletion.mock.calls.length === 1);
+  formatter.reject(new Error('synthetic formatter detail'));
+  await until(() => native.releaseVocoder.mock.calls.length === 1);
+  expect(observe.mock.calls.map(([event]) => event).filter(event => event.operation === 'first_failure'))
+    .toEqual([{ operation: 'first_failure', phase: 'failed', failureStage: 'formatter' }]);
+  release.reject(new Error('synthetic late cleanup detail'));
+  await rejected;
+  expect(observe.mock.calls.filter(([event]) => event.operation === 'first_failure')).toHaveLength(1);
+});
+
+it('allows a throwing diagnostic observer without changing successful synthesis or release', async () => {
+  const { native, context } = nativeContext();
+  await expect(synthesizeTtsOnContext(context, tokensProfile, {
+    ...options(), observe: () => { throw new Error('ignored observer'); },
+  })).resolves.toMatchObject({ samples: [0.25, -0.5, 0.75], sampleRate: tokensProfile.sampleRate });
+  expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
 });

@@ -4,6 +4,17 @@ export interface TtsWavLimits {
   readonly maxBytes: number;
 }
 
+/** Three scalar values only; decoded samples remain private to the encoder. */
+export interface TtsPcmNormalization {
+  readonly sourcePeakAbs: number;
+  readonly outOfRangeSamples: number;
+  readonly gain: number;
+}
+export interface DecodedMonoPcmWavResult {
+  readonly wav: Uint8Array;
+  readonly pcmNormalization: TtsPcmNormalization;
+}
+
 export class TtsWavError extends Error {
   constructor(readonly code: 'invalid_limits' | 'invalid_sample_rate' | 'invalid_pcm' | 'audio_limit') {
     super(code);
@@ -17,6 +28,22 @@ export function encodeMonoPcmWav(
   sampleRate: number,
   limits: TtsWavLimits,
 ): Uint8Array {
+  return encodePcmWav(samples, sampleRate, limits, false).wav;
+}
+
+/** Native vocoders may return finite float PCM above unity. Scale the whole clip
+ * down by its peak, preserving relative amplitude without clipping or gain boost. */
+export function encodeDecodedMonoPcmWav(
+  samples: readonly number[],
+  sampleRate: number,
+  limits: TtsWavLimits,
+): DecodedMonoPcmWavResult {
+  return encodePcmWav(samples, sampleRate, limits, true);
+}
+
+function encodePcmWav(
+  samples: readonly number[], sampleRate: number, limits: TtsWavLimits, normalizeNativeDecode: boolean,
+): DecodedMonoPcmWavResult {
   if (!Number.isSafeInteger(limits.maxSamples) || limits.maxSamples < 1
     || !Number.isFinite(limits.maxDurationSeconds) || limits.maxDurationSeconds <= 0
     || !Number.isSafeInteger(limits.maxBytes) || limits.maxBytes < 44) {
@@ -33,12 +60,21 @@ export function encodeMonoPcmWav(
     || dataBytes > 0xffff_ffff - 36) {
     throw new TtsWavError('audio_limit');
   }
+  let sourcePeakAbs = 0;
+  let outOfRangeSamples = 0;
   for (let index = 0; index < samples.length; index += 1) {
     const sample = samples[index];
-    if (typeof sample !== 'number' || !Number.isFinite(sample) || sample < -1 || sample > 1) {
+    if (typeof sample !== 'number' || !Number.isFinite(sample)) {
       throw new TtsWavError('invalid_pcm');
     }
+    const absolute = Math.abs(sample);
+    if (absolute > 1) {
+      if (!normalizeNativeDecode) throw new TtsWavError('invalid_pcm');
+      outOfRangeSamples += 1;
+    }
+    sourcePeakAbs = Math.max(sourcePeakAbs, absolute);
   }
+  const divisor = Math.max(1, sourcePeakAbs);
 
   const wav = new Uint8Array(fileBytes);
   const view = new DataView(wav.buffer);
@@ -59,8 +95,8 @@ export function encodeMonoPcmWav(
   writeTag(36, 'data');
   view.setUint32(40, dataBytes, true);
   for (let index = 0; index < samples.length; index += 1) {
-    const sample = samples[index];
+    const sample = samples[index] / divisor;
     view.setInt16(44 + index * 2, Math.round(sample * (sample < 0 ? 32_768 : 32_767)), true);
   }
-  return wav;
+  return { wav, pcmNormalization: { sourcePeakAbs, outOfRangeSamples, gain: 1 / divisor } };
 }

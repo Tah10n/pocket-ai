@@ -5,11 +5,11 @@ const { resolveExternalTtsDirectory, exportLocalTtsClip, assertTtsPrivateFileAcc
 
 describe('isolated speech private-file access', () => {
   const packageName = 'com.github.tah10n.pocketai.qa';
-  it('requires affirmative access to the exact QA data directory', () => {
-    for (const stdout of [`/data/user/0/${packageName}\n`, `/data/data/${packageName}\n`]) {
+  it.each([packageName, 'com.github.tah10n.pocketai.stage7.qa'])('requires affirmative access to the exact QA data directory for %s', target => {
+    for (const stdout of [`/data/user/0/${target}\n`, `/data/data/${target}\n`]) {
       const capture = jest.fn(() => ({ status: 0, stdout, stderr: '' }));
-      expect(() => assertTtsPrivateFileAccess('adb', 'owned-emulator', packageName, capture)).not.toThrow();
-      expect(capture.mock.calls[0][1]).toEqual(['-s', 'owned-emulator', 'exec-out', 'run-as', packageName, 'pwd']);
+      expect(() => assertTtsPrivateFileAccess('adb', 'owned-emulator', target, capture)).not.toThrow();
+      expect(capture.mock.calls[0][1]).toEqual(['-s', 'owned-emulator', 'exec-out', 'run-as', target, 'pwd']);
     }
   });
   it.each([
@@ -27,19 +27,36 @@ describe('isolated speech private-file access', () => {
     expect(() => assertTtsPrivateFileAccess('adb', 'owned-emulator', 'com.github.tah10n.pocketai', capture)).toThrow(/isolated/);
     expect(capture).not.toHaveBeenCalled();
   });
+  it.each(['com.other.app.qa', 'com.github.tah10n.pocketai.other.stage7.qa',
+    'com.github.tah10n.pocketai.Stage7.qa', 'com.github.tah10n.pocketai.stage-7.qa',
+    'com.github.tah10n.pocketai.stage7.qa\n'])(
+    'rejects unsupported QA identity %j before run-as', target => {
+      const capture = jest.fn();
+      expect(() => assertTtsPrivateFileAccess('adb', 'physical-device', target, capture)).toThrow(/isolated QA package/);
+      expect(capture).not.toHaveBeenCalled();
+    },
+  );
+  it('does not accept the old QA data directory for the selected named package', () => {
+    const capture = jest.fn(() => ({ status: 0, stdout: `/data/user/0/${packageName}`, stderr: '' }));
+    expect(() => assertTtsPrivateFileAccess('adb', 'physical-device', 'com.github.tah10n.pocketai.stage7.qa', capture))
+      .toThrow(/no verified/);
+    expect(capture).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('local speech export ownership', () => {
   let temporary;
   let publicRoot;
   const step = { sampleRate: 24000, sampleCount: 2, duration: 2 / 24000 };
-  const wav = () => {
-    const bytes = Buffer.alloc(48);
-    bytes.write('RIFF', 0); bytes.writeUInt32LE(40, 4); bytes.write('WAVEfmt ', 8);
+  const recording = sampleCount => ({ sampleRate: 16000, sampleCount, duration: sampleCount / 16000,
+    sizeBytes: 44 + sampleCount * 2, headerValidated: true });
+  const wav = (receipt = step) => {
+    const bytes = Buffer.alloc(44 + receipt.sampleCount * 2);
+    bytes.write('RIFF', 0); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
     bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
-    bytes.writeUInt32LE(24000, 24); bytes.writeUInt32LE(48000, 28);
+    bytes.writeUInt32LE(receipt.sampleRate, 24); bytes.writeUInt32LE(receipt.sampleRate * 2, 28);
     bytes.writeUInt16LE(2, 32); bytes.writeUInt16LE(16, 34);
-    bytes.write('data', 36); bytes.writeUInt32LE(4, 40); bytes.writeInt16LE(100, 44);
+    bytes.write('data', 36); bytes.writeUInt32LE(receipt.sampleCount * 2, 40); bytes.writeInt16LE(100, 44);
     return bytes;
   };
   beforeEach(() => {
@@ -53,6 +70,78 @@ describe('local speech export ownership', () => {
       fs.rmSync(actual, { recursive: true });
     }
     expect(fs.existsSync(temporary)).toBe(false);
+  });
+  it.each([320000, 480000])('exports a canonical recorded clip of %s samples and preserves it on repeated export', sampleCount => {
+    const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
+    const receipt = recording(sampleCount);
+    const bytes = wav(receipt);
+    const result = exportLocalTtsClip(directory, 'recorded', bytes, receipt);
+    expect(result).toMatchObject({ id: 'recorded', filename: 'recorded.wav', bytes: receipt.sizeBytes,
+      sampleRate: 16000, sampleCount, contentVerification: 'not_run' });
+    const saved = fs.readFileSync(path.join(directory, result.filename));
+    expect(saved).toEqual(bytes);
+    expect(() => exportLocalTtsClip(directory, 'recorded', bytes, receipt)).toThrow();
+    expect(fs.readFileSync(path.join(directory, result.filename))).toEqual(saved);
+  });
+  it.each(['tokens-1', 'continuous_embd-1', 'neu-jo', 'qwen-r1-eager', 'qwen-r2-lazy',
+    'qwen-no-reference', 'qwen-saved-cold'])('keeps the same twenty-second clip outside the TTS limit for %s', id => {
+    const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
+    const receipt = recording(320000);
+    expect(() => exportLocalTtsClip(directory, id, wav(receipt), receipt)).toThrow(/bounded mono PCM receipt/u);
+    expect(fs.readdirSync(directory)).toEqual([]);
+  });
+  it('rejects a valid canonical recording just beyond thirty seconds before creating a file', () => {
+    const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
+    const receipt = recording(480001);
+    expect(() => exportLocalTtsClip(directory, 'recorded', wav(receipt), receipt)).toThrow(/recording.*receipt/u);
+    expect(fs.readdirSync(directory)).toEqual([]);
+  });
+  it.each([
+    ['sampleRate', 24000], ['sampleCount', 0], ['sampleCount', 1.5], ['sampleCount', NaN],
+    ['sampleCount', Infinity], ['sampleCount', 480001], ['duration', 20.01], ['duration', NaN],
+    ['duration', Infinity], ['duration', undefined], ['headerValidated', false], ['sizeBytes', 640046],
+  ])('rejects a contradictory recording receipt %s=%j before writing', (field, value) => {
+    const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
+    const receipt = recording(320000);
+    expect(() => exportLocalTtsClip(directory, 'recorded', wav(receipt), { ...receipt, [field]: value })).toThrow(/recording.*receipt/u);
+    expect(fs.readdirSync(directory)).toEqual([]);
+  });
+  it.each([
+    ['RIFF', bytes => bytes.write('RIFX', 0)], ['RIFF size', bytes => bytes.writeUInt32LE(40, 4)],
+    ['WAVE', bytes => bytes.write('JUNK', 8)], ['format chunk', bytes => bytes.write('JUNK', 12)],
+    ['format size', bytes => bytes.writeUInt32LE(18, 16)], ['encoding', bytes => bytes.writeUInt16LE(3, 20)],
+    ['channels', bytes => bytes.writeUInt16LE(2, 22)], ['sample rate', bytes => bytes.writeUInt32LE(24000, 24)],
+    ['byte rate', bytes => bytes.writeUInt32LE(32001, 28)], ['alignment', bytes => bytes.writeUInt16LE(4, 32)],
+    ['sample depth', bytes => bytes.writeUInt16LE(32, 34)], ['data chunk', bytes => bytes.write('JUNK', 36)],
+    ['data size', bytes => bytes.writeUInt32LE(2, 40)],
+  ])('rejects a noncanonical recorded %s header before writing', (_label, mutate) => {
+    const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
+    const receipt = recording(320000); const bytes = wav(receipt); mutate(bytes);
+    expect(() => exportLocalTtsClip(directory, 'recorded', bytes, receipt)).toThrow(/recording.*receipt/u);
+    expect(fs.readdirSync(directory)).toEqual([]);
+  });
+  it('rejects truncated, trailing, oversized and absent recorded containers with a controlled error', () => {
+    const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
+    const receipt = recording(320000); const bytes = wav(receipt);
+    for (const value of [null, new Uint8Array(bytes), bytes.subarray(0, 43), bytes.subarray(0, bytes.length - 2),
+      Buffer.concat([bytes, Buffer.from([0, 0])]), Buffer.alloc(960045)]) {
+      expect(() => exportLocalTtsClip(directory, 'recorded', value, receipt)).toThrow(/recording.*receipt/u);
+    }
+    expect(() => exportLocalTtsClip(directory, 'recorded', bytes, null)).toThrow(/recording.*receipt/u);
+    expect(fs.readdirSync(directory)).toEqual([]);
+  });
+  it('revalidates the saved recording and removes the exact file on a corrupt readback', () => {
+    const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
+    const target = path.join(directory, 'recorded.wav');
+    const read = fs.readFileSync;
+    jest.spyOn(fs, 'readFileSync').mockImplementation((file, ...args) => {
+      const bytes = read(file, ...args);
+      if (file === target) bytes.writeUInt16LE(2, 22);
+      return bytes;
+    });
+    const receipt = recording(320000);
+    expect(() => exportLocalTtsClip(directory, 'recorded', wav(receipt), receipt)).toThrow(/recording.*receipt/u);
+    expect(fs.readdirSync(directory)).toEqual([]);
   });
   it('rejects public artifacts and a public ancestor before creating paths', () => {
     const nested = path.join(publicRoot, 'artifacts', 'speech');
@@ -78,14 +167,14 @@ describe('local speech export ownership', () => {
     expect(() => exportLocalTtsClip(directory, 'tokens-1', wav(), step)).toThrow();
     expect(fs.readFileSync(target, 'utf8')).toBe('user file');
   });
-  it('removes its partial file when the binary write fails', () => {
+  it.each(['tokens-1', 'recorded'])('removes its partial file when the binary write fails for %s', id => {
     const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
     const original = fs.writeFileSync;
     jest.spyOn(fs, 'writeFileSync').mockImplementation((target, bytes, options) => {
       if (typeof target === 'number') { original(target, bytes.subarray(0, 8)); throw new Error('disk full'); }
       return original(target, bytes, options);
     });
-    expect(() => exportLocalTtsClip(directory, 'tokens-1', wav(), step)).toThrow('disk full');
+    expect(() => exportLocalTtsClip(directory, id, wav(id === 'recorded' ? recording(320000) : step), id === 'recorded' ? recording(320000) : step)).toThrow('disk full');
     expect(fs.readdirSync(directory)).toEqual([]);
   });
   it('rejects identity traversal and mismatched native receipts before writing', () => {
@@ -94,7 +183,7 @@ describe('local speech export ownership', () => {
     expect(() => exportLocalTtsClip(directory, 'tokens-1', wav(), { ...step, sampleRate: 48000 })).toThrow(/receipt/);
     expect(fs.readdirSync(directory)).toEqual([]);
   });
-  it('still removes its exact new file if close reports an error', () => {
+  it.each(['tokens-1', 'recorded'])('still removes its exact new file if close reports an error for %s', id => {
     const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
     const close = fs.closeSync;
     const closed = new Set();
@@ -102,7 +191,7 @@ describe('local speech export ownership', () => {
       if (!closed.has(descriptor)) { close(descriptor); closed.add(descriptor); }
       throw new Error('close failed');
     });
-    expect(() => exportLocalTtsClip(directory, 'tokens-1', wav(), step)).toThrow('close failed');
+    expect(() => exportLocalTtsClip(directory, id, wav(id === 'recorded' ? recording(320000) : step), id === 'recorded' ? recording(320000) : step)).toThrow('close failed');
     expect(fs.readdirSync(directory)).toEqual([]);
   });
 });

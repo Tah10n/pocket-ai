@@ -4,6 +4,8 @@ import {
   getGenerationParametersForModel,
   getSettings,
   getSettingsStorage,
+  invalidateSettingsStorageForPrivateReset,
+  clearAuxiliaryBindingsForModel,
   resetSettingsRuntimeForPrivateStorageReset,
   resetSettings,
   resetGenerationParametersForModel,
@@ -21,6 +23,53 @@ describe('SettingsStore', () => {
 
   it('defaults allowCellularDownloads to false', () => {
     expect(getSettings().allowCellularDownloads).toBe(false);
+  });
+
+  it('enables automatic installed TTS selection for fresh and legacy settings without a TTS binding', () => {
+    expect(getSettings().autoSelectTtsModel).toBe(true);
+    getSettingsStorage().set('app_settings', JSON.stringify({ language: 'ru' }));
+    expect(getSettings().autoSelectTtsModel).toBe(true);
+    expect(JSON.parse(getSettingsStorage().getString('app_settings')!).autoSelectTtsModel).toBe(true);
+  });
+
+  it.each([true, false])('retains automatic TTS preference %s across a fresh storage handle', autoSelectTtsModel => {
+    updateSettings({ autoSelectTtsModel });
+    invalidateSettingsStorageForPrivateReset();
+    expect(getSettings().autoSelectTtsModel).toBe(autoSelectTtsModel);
+    expect(JSON.parse(getSettingsStorage().getString('app_settings')!).autoSelectTtsModel).toBe(autoSelectTtsModel);
+  });
+
+  it('migrates a legacy explicit TTS binding with automatic selection disabled', () => {
+    const tts = { modelId: 'tts/custom', fileIdentity: 'custom-file-identity' };
+    getSettingsStorage().set('app_settings', JSON.stringify({ auxiliaryModels: { tts } }));
+    expect(getSettings()).toMatchObject({ auxiliaryModels: { tts }, autoSelectTtsModel: false });
+    clearAuxiliaryBindingsForModel(tts.modelId);
+    expect(getSettings()).toMatchObject({ auxiliaryModels: {}, autoSelectTtsModel: false });
+  });
+
+  it('disables fallback when a malformed explicit TTS binding is sanitized away', () => {
+    getSettingsStorage().set('app_settings', JSON.stringify({ autoSelectTtsModel: true,
+      auxiliaryModels: { tts: { modelId: 'tts/custom', fileIdentity: '' } } }));
+    expect(getSettings()).toMatchObject({ auxiliaryModels: {}, autoSelectTtsModel: false });
+    invalidateSettingsStorageForPrivateReset();
+    expect(getSettings().autoSelectTtsModel).toBe(false);
+  });
+
+  it('keeps automatic TTS disabled when removing an explicit binding even if it was manually re-enabled', () => {
+    updateSettings({ autoSelectTtsModel: true, auxiliaryModels: {
+      tts: { modelId: 'tts/custom', fileIdentity: 'custom-file-identity' },
+      embedding: { modelId: 'embedding/custom', fileIdentity: 'embedding-file-identity' },
+    } });
+    clearAuxiliaryBindingsForModel('tts/custom');
+    expect(getSettings()).toMatchObject({ autoSelectTtsModel: false, auxiliaryModels: {
+      embedding: { modelId: 'embedding/custom', fileIdentity: 'embedding-file-identity' },
+    } });
+  });
+
+  it('restores the automatic TTS preference on an explicit settings reset', () => {
+    updateSettings({ autoSelectTtsModel: false });
+    resetSettings();
+    expect(getSettings().autoSelectTtsModel).toBe(true);
   });
 
   it.each([null, 'test/model'])('clears optional generation fields explicitly for %s without changing unrelated values', (modelId) => {

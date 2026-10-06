@@ -4175,6 +4175,140 @@ describe('ChatScreen', () => {
     }
   });
 
+  it.each([
+    { status: 'running', requiresForceStop: false, terminalStatus: 'native_passed' },
+    { status: 'failed', requiresForceStop: true, terminalStatus: 'failed' },
+  ] as const)('keeps the Stage 7 owner through $status and its deferred drain before ordinary loading or speech', async ({
+    status, requiresForceStop, terminalStatus,
+  }) => {
+    const qaBootstrap = jest.requireActual('../../src/services/AndroidQaDocumentModelBootstrap');
+    const qaGeneration = jest.requireActual('../../src/services/AndroidQaGenerationEvidence');
+    const qaStage7 = jest.requireActual<typeof import('../../src/services/AndroidQaAudioStage7')>('../../src/services/AndroidQaAudioStage7');
+    const qaTts = jest.requireActual('../../src/services/AndroidQaTts');
+    const qaSmoke = jest.requireActual('../../src/services/AndroidQaInferenceSmoke');
+    const qaRetrieval = jest.requireActual('../../src/services/AndroidQaDocumentRetrieval');
+    const qaIndex = jest.requireActual('../../src/services/AndroidQaDocumentIndexPublication');
+    const gate = jest.spyOn(qaBootstrap, 'isAndroidQaDocumentModelBootstrapEnabled').mockReturnValue(true);
+    // Stage 7 ownership is independent of the old generation/TTS QA flag.
+    const generationGate = jest.spyOn(qaGeneration, 'isAndroidQaGenerationEvidenceEnabled').mockReturnValue(false);
+    const stage7Gate = jest.spyOn(qaStage7, 'isAndroidQaAudioStage7Enabled').mockReturnValue(true);
+    const legacySpies = [
+      jest.spyOn(qaTts, 'getAndroidQaTtsEvidence').mockReturnValue({
+        ...qaTts.getAndroidQaTtsEvidence(), status: 'idle', requiresForceStop: false,
+      }),
+      jest.spyOn(qaSmoke, 'getAndroidQaInferenceSmokeEvidence').mockReturnValue({
+        ...qaSmoke.getAndroidQaInferenceSmokeEvidence(), status: 'idle', requiresForceStop: false,
+      }),
+      jest.spyOn(qaRetrieval, 'getAndroidQaDocumentRetrievalEvidence').mockReturnValue({
+        ...qaRetrieval.getAndroidQaDocumentRetrievalEvidence(), status: 'idle', requiresForceStop: false,
+      }),
+      jest.spyOn(qaIndex, 'getAndroidQaDocumentIndexPublicationEvidence').mockReturnValue({
+        ...qaIndex.getAndroidQaDocumentIndexPublicationEvidence(), status: 'idle', requiresForceStop: false,
+      }),
+    ];
+    let snapshot: ReturnType<typeof qaStage7.getAndroidQaAudioStage7Evidence> = {
+      ...qaStage7.getAndroidQaAudioStage7Evidence(), status: 'idle', phase: 'idle', requiresForceStop: false,
+    };
+    const listeners = new Set<() => void>();
+    const evidenceSpy = jest.spyOn(qaStage7, 'getAndroidQaAudioStage7Evidence').mockImplementation(() => snapshot);
+    const subscribeSpy = jest.spyOn(qaStage7, 'subscribeAndroidQaAudioStage7').mockImplementation((listener: () => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    });
+    registry.saveModels([{
+      id: 'author/model-q4', name: 'Model Q4', author: 'Test', size: 1024,
+      localPath: 'model-q4.gguf', lifecycleStatus: 'downloaded',
+    }]);
+    // Before the fix an ordinary saved-profile load races QA and raises the observed busy alert.
+    mockLoadModel.mockRejectedValue(new Error('busy'));
+    const originalThread = useChatStore.getState().getActiveThread()!;
+    const engineHook = jest.requireMock('../../src/hooks/useLLMEngine');
+    const hookBoundary = engineHook.useLLMEngine();
+    const stableHookSpy = jest.spyOn(engineHook, 'useLLMEngine').mockImplementation(() => ({
+      ...hookBoundary, state: mockEngineState,
+    }));
+    const qaDrain = createDeferred<void>();
+    const ordinaryLoad = createDeferred<void>();
+    const view = render(React.createElement(ChatScreen));
+    try {
+      let ownedThreadId = '';
+      await act(async () => {
+        snapshot = { ...snapshot, status: 'running', phase: 'prepare', mode: 'voices' };
+        for (const listener of [...listeners]) listener();
+        ownedThreadId = useChatStore.getState().createThread({ modelId: 'author/model-q4',
+          title: 'Android Stage 7 voices QA', presetId: null, presetSnapshot: originalThread.presetSnapshot,
+          paramsSnapshot: originalThread.paramsSnapshot, loraSnapshot: [] });
+        mockEngineState = { status: 'initializing', loadProgress: 0, activeModelId: 'author/model-q4' };
+        view.rerender(React.createElement(ChatScreen));
+      });
+      expect(mockLoadModel).not.toHaveBeenCalled();
+      // Native initialization can settle before the QA finally/drain has released ownership.
+      await act(async () => {
+        snapshot = { ...snapshot, status, requiresForceStop, phase: 'complete' };
+        for (const listener of [...listeners]) listener();
+        mockEngineState = { status: 'idle', loadProgress: 0, activeModelId: null };
+        view.rerender(React.createElement(ChatScreen));
+      });
+      const threadBeforeCleanup = JSON.stringify(useChatStore.getState().getActiveThread());
+      expect(mockLoadModel).not.toHaveBeenCalled();
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(useChatStore.getState().activeThreadId).toBe(ownedThreadId);
+      fireEvent.press(view.getByTestId('chat-speech-preview'));
+      expect(view.queryByTestId('tts-preview-sheet')).toBeNull();
+      mockLoadModel.mockImplementation(() => ordinaryLoad.promise);
+      const settledQa = qaDrain.promise.then(() => {
+        snapshot = { ...snapshot, status: terminalStatus, requiresForceStop: false, phase: 'complete' };
+        for (const listener of [...listeners]) listener();
+      });
+      // No engine or thread rerender: the actual Stage 7 subscription must wake the consumer.
+      await act(async () => { qaDrain.resolve(undefined); await settledQa; });
+      await waitFor(() => expect(mockLoadModel).toHaveBeenCalledTimes(1));
+      expect(mockLoadModel).toHaveBeenCalledWith('author/model-q4', expect.objectContaining({ preferLastWorkingProfile: true }));
+      expect(JSON.stringify(useChatStore.getState().getActiveThread())).toBe(threadBeforeCleanup);
+      await act(async () => { ordinaryLoad.resolve(undefined); await ordinaryLoad.promise; });
+      await waitFor(() => expect(lastChatInputBarProps.disabled).toBe(false));
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(mockLoadModel).toHaveBeenCalledTimes(1);
+    } finally {
+      qaDrain.resolve(undefined); ordinaryLoad.resolve(undefined);
+      view.unmount();
+      expect(listeners.size).toBe(0);
+      stableHookSpy.mockRestore(); subscribeSpy.mockRestore(); evidenceSpy.mockRestore(); stage7Gate.mockRestore();
+      generationGate.mockRestore(); gate.mockRestore();
+      for (const spy of legacySpies) spy.mockRestore();
+    }
+  });
+
+  it.each([
+    { enabled: true, status: 'idle', requiresForceStop: false },
+    { enabled: true, status: 'failed', requiresForceStop: false },
+    { enabled: false, status: 'running', requiresForceStop: false },
+    { enabled: false, status: 'failed', requiresForceStop: true },
+  ] as const)('preserves ordinary model auto-load for Stage 7 enabled=$enabled status=$status forceStop=$requiresForceStop', async ({
+    enabled, status, requiresForceStop,
+  }) => {
+    const qaBootstrap = jest.requireActual('../../src/services/AndroidQaDocumentModelBootstrap');
+    const qaStage7 = jest.requireActual<typeof import('../../src/services/AndroidQaAudioStage7')>('../../src/services/AndroidQaAudioStage7');
+    const gate = jest.spyOn(qaBootstrap, 'isAndroidQaDocumentModelBootstrapEnabled').mockReturnValue(enabled);
+    const stage7Gate = jest.spyOn(qaStage7, 'isAndroidQaAudioStage7Enabled').mockReturnValue(enabled);
+    const evidenceSpy = jest.spyOn(qaStage7, 'getAndroidQaAudioStage7Evidence').mockReturnValue({
+      ...qaStage7.getAndroidQaAudioStage7Evidence(), status, requiresForceStop, phase: 'complete',
+    });
+    registry.saveModels([{
+      id: 'author/model-q4', name: 'Model Q4', author: 'Test', size: 1024,
+      localPath: 'model-q4.gguf', lifecycleStatus: 'downloaded',
+    }]);
+    mockEngineState = { status: 'idle', loadProgress: 0, activeModelId: null };
+    const view = render(React.createElement(ChatScreen));
+    try {
+      await waitFor(() => expect(mockLoadModel).toHaveBeenCalledTimes(1));
+      expect(mockLoadModel).toHaveBeenCalledWith('author/model-q4', expect.objectContaining({ preferLastWorkingProfile: true }));
+      expect(alertSpy).not.toHaveBeenCalled();
+    } finally {
+      view.unmount(); evidenceSpy.mockRestore(); stage7Gate.mockRestore(); gate.mockRestore();
+    }
+  });
+
   it('blocks input and auto-loads the exact active-thread model without rewriting the thread', async () => {
     registry.saveModels([
       {
@@ -7083,5 +7217,24 @@ describe('ChatScreen', () => {
       expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(loweredCeiling);
       expect(getByTestId('context-size-value').props.children).toBe(String(loweredCeiling));
     });
+  });
+
+  it('shows the ordinary chat and bounded evidence without developer buttons in manual QA mode', () => {
+    const qaGeneration = jest.requireActual('../../src/services/AndroidQaGenerationEvidence');
+    const generationGate = jest.spyOn(qaGeneration, 'isAndroidQaGenerationEvidenceEnabled').mockReturnValue(true);
+    const previous = process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS;
+    process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS = '0';
+    const view = render(React.createElement(ChatScreen));
+    try {
+      expect(view.queryByTestId('chat-qa-arm-before-first-output')).toBeNull();
+      expect(view.queryByTestId('chat-qa-start-background-task')).toBeNull();
+      expect(view.getAllByTestId('chat-qa-tts-playback-state').length).toBeGreaterThan(0);
+      expect(lastChatInputBarProps).toBeTruthy();
+    } finally {
+      view.unmount();
+      generationGate.mockRestore();
+      if (previous === undefined) delete process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS;
+      else process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS = previous;
+    }
   });
 });

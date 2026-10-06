@@ -1,4 +1,5 @@
 const { applyBuildGradleReleaseConfig } = require('../../plugins/withAndroidReleaseConfig')._internal;
+const { resolveAndroidQaApplicationId } = require('../../scripts/android-qa-application-id');
 
 const defaults = {
   fallbackApplicationId: 'com.github.tah10n.pocketai', fallbackVersionCode: 20, fallbackVersionName: '1.6.3',
@@ -28,6 +29,27 @@ dependencies {
 }`;
 
 describe('isolated QA release private-file access plugin', () => {
+  it('regenerates the exact named-instance selector using the shared full-segment admission rule', () => {
+    const generated = applyBuildGradleReleaseConfig(source, defaults);
+    expect(applyBuildGradleReleaseConfig(generated, defaults)).toBe(generated);
+    const emittedPattern = generated.match(/pocketAiQaInstance\.matches\('([^']+)'\)/u)?.[1];
+    expect(emittedPattern).toBeDefined();
+    const fullMatch = new RegExp(`^(?:${emittedPattern})$`);
+    for (const instance of ['stage7', 'a', 'a'.repeat(32)]) {
+      expect(fullMatch.test(instance)).toBe(true);
+      expect(resolveAndroidQaApplicationId(defaults.fallbackApplicationId, true, instance))
+        .toBe(`${defaults.fallbackApplicationId}.${instance}.qa`);
+    }
+    for (const instance of ['', 'Stage7', 'stage.7', 'stage-7', ' stage7', 'stage7 ', '7stage', 'a'.repeat(33)]) {
+      expect(fullMatch.test(instance)).toBe(false);
+      expect(() => resolveAndroidQaApplicationId(defaults.fallbackApplicationId, true, instance)).toThrow();
+    }
+    expect(generated).toContain('pocketAiIsolatedQaApplicationId = pocketAiDefaultApplicationId + "." + pocketAiQaInstance + ".qa"');
+    expect(generated).toContain('pocketAiQaInstance != null && (appApplicationId != pocketAiIsolatedQaApplicationId');
+    expect(generated).toContain('Android QA instance requires its exact isolated package and nonshipping QA controls.');
+    expect(generated).toContain('!allowDebugReleaseSigning || hasReleaseSigning');
+  });
+
   it('generates one idempotent opt-in release gate while retaining the embedded-bundle variant contract', () => {
     const first = applyBuildGradleReleaseConfig(source, defaults);
     expect(applyBuildGradleReleaseConfig(first, defaults)).toBe(first);

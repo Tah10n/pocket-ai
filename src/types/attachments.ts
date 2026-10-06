@@ -11,6 +11,7 @@ export type ChatAttachmentPathCategory = 'chat_attachment';
 export type ChatAttachmentSource =
   | 'photo_library'
   | 'document_picker'
+  | 'microphone'
   | 'derived_processor';
 
 export type ChatAttachmentRuntimeInput =
@@ -88,6 +89,11 @@ export interface ChatImageAttachmentMetadata {
 export interface ChatAudioAttachmentMetadata {
   format: 'wav' | 'mp3';
   durationMs?: number;
+  sampleRate?: number;
+  channels?: 1;
+  sampleCount?: number;
+  sourceSha256?: string;
+  preparationIdentity?: string;
 }
 
 export interface ChatDocumentAttachmentMetadata {

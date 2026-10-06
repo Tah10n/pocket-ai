@@ -4,8 +4,10 @@ const { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, sanitizeLocalT
 const { sanitizeDocumentRetrievalEvidence, waitForDocumentRetrievalEvidence } = require("./lib/document-retrieval-evidence");
 const { sanitizeDocumentIndexPublicationEvidence, waitForDocumentIndexPublicationEvidence } = require("./lib/document-index-publication-evidence");
 const { sanitizeTtsEvidence, validateTtsEvidence, validateTtsPlaybackEvidence } = require("./lib/tts-evidence");
+const { sanitizeAudioStage7Evidence, validateAudioStage7Evidence, validateStage7MicInjectionReceipt } = require('./lib/audio-stage7-evidence');
 const { createTtsPublicSnapshotReader, getTtsControlTap, runTtsPublicControls } = require("./lib/tts-public-controls");
 const { resolveExternalTtsDirectory, exportLocalTtsClip, assertTtsPrivateFileAccess } = require("./lib/tts-local-export");
+const { normalizeAndroidQaInstance } = require("./android-qa-application-id");
 
 const fs = require("fs");
 const path = require("path");
@@ -118,6 +120,7 @@ const SCENARIO_PACK_SCENARIOS = {
   retrieval: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval"],
   "retrieval-publication": ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-index-publication"],
   tts: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-index-publication", "runtime-local-tts-tokens", "runtime-local-tts-continuous"],
+  "audio-voices": ['runtime-stage7-recording', 'runtime-stage7-audio-input', 'runtime-stage7-voices'],
   "document-benchmark": DOCUMENT_BENCHMARK_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
@@ -156,7 +159,8 @@ const dumpPathOnDevice = "/sdcard/window_dump.xml";
 const expoConfig = readExpoConfig();
 const appPackageName = resolveAndroidQaApplicationId(
   expoConfig.packageName,
-  cliOptions.isolatedQaInstall
+  cliOptions.isolatedQaInstall,
+  cliOptions.qaInstance ?? (require.main === module ? process.env.POCKET_AI_ANDROID_QA_INSTANCE : null)
 );
 const appSchemeName = expoConfig.scheme;
 const homeLauncherLabel = "Pocket AI";
@@ -3139,6 +3143,21 @@ function buildScenarios() {
       run: ctx => runTtsAcceptanceScenario(ctx, flow),
     })),
     {
+      id: 'runtime-stage7-recording', tier: 'critical', requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true,
+      description: 'Capture controlled emulator microphone audio, finalize/prepare/preview/discard, retry and prove native background no-resume.',
+      run: ctx => runAudioStage7AcceptanceScenario(ctx, 'recording'),
+    },
+    {
+      id: 'runtime-stage7-audio-input', tier: 'critical', requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true,
+      description: 'Use the real audio-input projector for imported and emulator-recorded controlled speech separately.',
+      run: ctx => runAudioStage7AcceptanceScenario(ctx, 'input'),
+    },
+    {
+      id: 'runtime-stage7-voices', tier: 'critical', requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true,
+      description: 'Run Neu builtin/phonemizer and Qwen eager/lazy/speakerless, restore A+LoRA, cold-open saved voice and delete.',
+      run: ctx => runAudioStage7AcceptanceScenario(ctx, 'voices'),
+    },
+    {
       id: "runtime-local-tts-playback",
       tier: "critical",
       requiresCurrentHeadProvenance: true,
@@ -5660,6 +5679,135 @@ const INFERENCE_SMOKE_FAILURE_CODES = new Set(["actual_backend", "backend_discov
   "operation_failed", "runtime_policy", "stop_not_during_generation", "timeout", "unload_incomplete",
   "verified_model_missing"]);
 
+async function runAudioStage7AcceptanceScenario(ctx, mode) {
+  const adbPath = resolveAdbPath();
+  assertTtsPrivateFileAccess(adbPath, ctx.serial, appPackageName);
+  const output = process.env.POCKET_AI_TTS_AUDIO_OUTPUT_DIR;
+  if (!output || !path.isAbsolute(output)) throw new Error('Stage7 requires an explicit external local clip export directory.');
+  const directory = resolveExternalTtsDirectory(output, projectRoot);
+  const injectionFile = process.env.POCKET_AI_STAGE7_MIC_INJECTION_RECEIPT;
+  if (mode === 'recording' && (!injectionFile || !path.isAbsolute(injectionFile))) {
+    throw new Error('Controlled recording requires an absolute host injection receipt path.');
+  }
+  const evidencePath = path.join(artifactsRoot, `stage7-${mode}-evidence.json`);
+  const exports = []; const copied = new Set(); const handled = new Set();
+  let injection;
+  const read = () => {
+    const snapshot = createUiSnapshot(adbPath, ctx.serial);
+    const node = findResourceIdInSnapshot(snapshot, 'chat-qa-stage7-evidence');
+    let value; try { value = node ? JSON.parse(node.contentDesc || node.text) : null; } catch { return null; }
+    return value ? sanitizeAudioStage7Evidence(value) : null;
+  };
+  const open = async () => {
+    await goToHome(ctx);
+    await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+    await tapVisibleResource(ctx, 'chat-qa-stage7-panel-toggle', { timeoutMs: 180000 });
+  };
+  try {
+    await open();
+    if (mode === 'recording') {
+      const userId = readAndroidCurrentUserId(adbPath, ctx.serial);
+      const packageState = runCapture(adbPath, ['-s', ctx.serial, 'shell', 'dumpsys', 'package', appPackageName]);
+      if (parseAndroidRuntimePermission(packageState, userId, 'android.permission.RECORD_AUDIO') !== false) {
+        throw new Error('First controlled recording requires microphone permission ungranted before Record.');
+      }
+      const initialSnapshot = createUiSnapshot(adbPath, ctx.serial);
+      if (findResourceIdInSnapshot(initialSnapshot, 'com.android.permissioncontroller:id/permission_allow_foreground_only_button', { visibleOnly: true })) {
+        throw new Error('Unexpected OS microphone prompt before explicit Record.');
+      }
+    }
+    const startedAt = Date.now();
+    await tapVisibleResource(ctx, `chat-qa-stage7-${mode === 'input' ? 'input' : mode}`, { timeoutMs: 30000 });
+    const deadline = Date.now() + 3600000;
+    while (Date.now() < deadline) {
+      // The OS active window hides our marker; process its prompt before looking for QA evidence.
+      if (mode === 'recording') grantStage7MicrophoneAfterExplicitRecord(adbPath, ctx.serial, { explicitRecordIssued: true });
+      const safe = read();
+      if (!safe) { await delay(1000); continue; }
+      fs.writeFileSync(evidencePath, `${JSON.stringify({ ...safe, localClipExports: exports, ...(injection ? { microphoneInjection: injection } : {}) }, null, 2)}\n`);
+      if (safe.status === 'failed') throw new Error(`Native Stage7 failed: phase=${safe.phase}, code=${safe.failureCode || 'unknown'}.`);
+      if (safe.phase === 'recording_awaiting_controlled_sound' && !handled.has(safe.phase)) {
+        if (!fs.existsSync(injectionFile)) { await delay(500); continue; }
+        const bytes = fs.readFileSync(injectionFile);
+        if (bytes.length > 4096) throw new Error('Host microphone injection receipt exceeds its bound.');
+        let value; try { value = JSON.parse(bytes.toString('utf8')); } catch { await delay(500); continue; }
+        injection = validateStage7MicInjectionReceipt(value, startedAt);
+        await delay(500); // Explicitly allow recorder encoder drain after streamed PCM EOF.
+        handled.add(safe.phase);
+        await tapVisibleResource(ctx, 'chat-qa-stage7-continue', { timeoutMs: 30000 });
+      }
+      if (safe.phase === 'awaiting_clip_copy' && safe.clipId && !copied.has(safe.clipId)) {
+        const step = safe.steps.find(item => item.id === (safe.clipId === 'recorded' ? 'recording_prepared' : safe.clipId));
+        if (!step?.sampleRate || !step.sampleCount) throw new Error('Stage7 clip has no bounded decode receipt.');
+        const privatePath = safe.clipId === 'recorded' ? 'cache/stage7-fixtures/recorded.wav' : 'cache/tts-clips/clip.wav';
+        const result = spawnSync(adbPath, ['-s', ctx.serial, 'exec-out', 'run-as', appPackageName, 'cat', privatePath], {
+          encoding: null, timeout: 30000, maxBuffer: 1600000, stdio: ['ignore', 'pipe', 'pipe'] });
+        if (result.error || result.status !== 0) throw new Error('Controlled Stage7 clip cannot be exported from isolated storage.');
+        exports.push({ ...exportLocalTtsClip(directory, safe.clipId, result.stdout,
+          { ...step, duration: step.sampleCount / step.sampleRate }), copyPid: result.pid });
+        copied.add(safe.clipId);
+        ctx.captureScreenshot(`stage7-${safe.clipId}.png`);
+        await tapVisibleResource(ctx, 'chat-qa-stage7-continue', { timeoutMs: 30000 });
+      }
+      if (safe.phase === 'recording_awaiting_background' && !handled.has(safe.phase)) {
+        // A second real capture exists; allow enough audio frames for its native stop.
+        await delay(800);
+        runChecked(adbPath, ['-s', ctx.serial, 'shell', 'input', 'keyevent', '3']);
+        await delay(1200);
+        await relaunchScenarioApp(ctx);
+        handled.add(safe.phase);
+        await tapVisibleResource(ctx, 'chat-qa-stage7-continue', { timeoutMs: 30000 });
+      }
+      if (safe.status === 'native_passed') {
+        validateAudioStage7Evidence(safe, mode);
+        if (mode === 'recording' && (!injection || copied.size !== 1)) throw new Error('Controlled capture provenance missing.');
+        if (mode === 'voices' && copied.size !== 4) throw new Error('Independent voice content clips incomplete.');
+        let cold;
+        if (mode === 'voices') {
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx); await open();
+          await tapVisibleResource(ctx, 'chat-qa-stage7-cold-voice', { timeoutMs: 30000 });
+          const coldDeadline = Date.now() + 600000;
+          while (Date.now() < coldDeadline) {
+            cold = read();
+            if (cold?.status === 'failed') throw new Error(`Saved voice cold proof failed: ${cold.failureCode || 'unknown'}.`);
+            if (cold?.phase === 'awaiting_clip_copy' && cold.clipId === 'qwen-saved-cold' && !copied.has(cold.clipId)) {
+              const step = cold.steps.find(item => item.id === cold.clipId);
+              if (!step?.sampleRate || !step.sampleCount) throw new Error('Saved voice clip lacks native decode proof.');
+              const result = spawnSync(adbPath, ['-s', ctx.serial, 'exec-out', 'run-as', appPackageName, 'cat', 'cache/tts-clips/clip.wav'], {
+                encoding: null, timeout: 30000, maxBuffer: 1600000, stdio: ['ignore', 'pipe', 'pipe'] });
+              if (result.error || result.status !== 0) throw new Error('Cold saved voice clip export failed.');
+              exports.push({ ...exportLocalTtsClip(directory, cold.clipId, result.stdout,
+                { ...step, duration: step.sampleCount / step.sampleRate }), copyPid: result.pid });
+              copied.add(cold.clipId);
+              await tapVisibleResource(ctx, 'chat-qa-stage7-continue', { timeoutMs: 30000 });
+            }
+            if (cold?.status === 'native_passed') break;
+            await delay(500);
+          }
+          validateAudioStage7Evidence(cold, 'cold_voice');
+          if (!copied.has('qwen-saved-cold')) throw new Error('Cold saved source content clip missing.');
+        }
+        await tapVisibleResource(ctx, 'chat-qa-stage7-close', { timeoutMs: 30000 });
+        const details = { ...safe, localClipExports: exports, ...(injection ? { microphoneInjection: injection } : {}), ...(cold ? { cold } : {}) };
+        fs.writeFileSync(evidencePath, `${JSON.stringify(details, null, 2)}\n`);
+        return { details };
+      }
+      await delay(1000);
+    }
+    throw new Error('Native Stage7 deadline expired; isolated teardown required.');
+  } catch (error) { forceStopScenarioApp(adbPath, ctx.serial); throw error; }
+}
+
+function grantStage7MicrophoneAfterExplicitRecord(adbPath, serial, options = {}) {
+  if (options.explicitRecordIssued !== true) return false;
+  const snapshot = (options.createSnapshot || createUiSnapshot)(adbPath, serial);
+  const allow = findResourceIdInSnapshot(snapshot, 'com.android.permissioncontroller:id/permission_allow_foreground_only_button', { visibleOnly: true });
+  if (!allow?.bounds) return false;
+  (options.tapBounds || tapBounds)(adbPath, serial, allow.bounds);
+  return true;
+}
+
 async function runTtsAcceptanceScenario(ctx, flow) {
   const audioOutput = process.env.POCKET_AI_TTS_AUDIO_OUTPUT_DIR;
   if (!audioOutput || !path.isAbsolute(audioOutput)) {
@@ -5992,6 +6140,11 @@ async function waitForInferenceSmokeEvidence(readEvidence, options = {}) {
 }
 
 function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenance, env = process.env) {
+  const qaInstance = normalizeAndroidQaInstance(options.qaInstance ?? env.POCKET_AI_ANDROID_QA_INSTANCE);
+  if (qaInstance !== null) {
+    if (!options.isolatedQaInstall) throw new ScenarioPreconditionFailureError("--qa-instance requires --isolated-qa-install.");
+    env.POCKET_AI_ANDROID_QA_INSTANCE = qaInstance;
+  }
   if (options.apkVariant) {
     env.ANDROID_SMOKE_APK_VARIANT = options.apkVariant;
   } else if (["documents", "native", "inference", "retrieval"].includes(options.pack) && !env.ANDROID_SMOKE_APK_VARIANT) {
@@ -6009,12 +6162,12 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
       );
     }
     env.EXPO_PUBLIC_ANDROID_QA = "1";
-    if (["documents", "inference", "retrieval", "retrieval-publication", "tts"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval", "runtime-document-index-publication", "runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback"].includes(options.scenario)) {
+    if (["documents", "inference", "retrieval", "retrieval-publication", "tts", "audio-voices"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval", "runtime-document-index-publication", "runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback", "runtime-stage7-recording", "runtime-stage7-audio-input", "runtime-stage7-voices"].includes(options.scenario)) {
       env.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS = "1";
     }
     env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
       env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING || "true";
-    if (options.pack === "tts" || ["runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback"].includes(options.scenario)) {
+    if (["tts", "audio-voices"].includes(options.pack) || ["runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback", "runtime-stage7-recording", "runtime-stage7-audio-input", "runtime-stage7-voices"].includes(options.scenario)) {
       if (!options.isolatedQaInstall) throw new ScenarioPreconditionFailureError("Private speech verification requires --isolated-qa-install.");
       env.POCKET_AI_QA_PRIVATE_FILE_ACCESS = "1";
     }
@@ -7306,6 +7459,9 @@ function selectScenarios(scenarios, options) {
       "runtime-local-tts-tokens",
       "runtime-local-tts-continuous",
       "runtime-local-tts-playback",
+      "runtime-stage7-recording",
+      "runtime-stage7-audio-input",
+      "runtime-stage7-voices",
       "native-glass-theme-matrix",
       "foreground-service-notification-states",
     ]);
@@ -8173,6 +8329,10 @@ function buildSmokeLaunchArgs(options, resolvedSerial) {
 
   if (options.isolatedQaInstall) {
     args.push("--isolated-qa-install");
+  }
+
+  if (options.qaInstance != null) {
+    args.push("--qa-instance", normalizeAndroidQaInstance(options.qaInstance));
   }
 
   if (options.apkVariant) {
@@ -10989,6 +11149,7 @@ function parseCliOptions(argv) {
     scenario: null,
     port: null,
     isolatedQaInstall: false,
+    qaInstance: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -11021,6 +11182,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--isolated-qa-install") {
       options.isolatedQaInstall = true;
+      continue;
+    }
+
+    if (arg === "--qa-instance") {
+      options.qaInstance = normalizeAndroidQaInstance(readCliValue(argv, ++index, "--qa-instance"));
       continue;
     }
 
@@ -11081,6 +11247,10 @@ function parseCliOptions(argv) {
     options.isolatedQaInstall = true;
   }
 
+  if (options.qaInstance !== null && !options.isolatedQaInstall) {
+    throw new Error("--qa-instance requires --isolated-qa-install.");
+  }
+
   return options;
 }
 
@@ -11108,6 +11278,7 @@ function printHelp() {
   console.log("  --preserve-running-app     Do not bootstrap or restart the app before scenarios");
   console.log("  --bootstrap-screenshot     Save a smoke bootstrap screenshot before scenarios");
   console.log("  --isolated-qa-install      Install and target the repository-owned side-by-side .qa package");
+  console.log("  --qa-instance <name>       Select a single lowercase named QA instance (requires isolated QA)");
   console.log("  --port <number>            Forward a specific Metro port to android-smoke");
   console.log("  --list                     Print available scenarios");
 }
@@ -11490,6 +11661,7 @@ function sleepSync(ms) {
 }
 
 module.exports = {
+  grantStage7MicrophoneAfterExplicitRecord,
   sanitizeInferenceSmokeEvidence,
   validateInferenceSmokeEvidence,
   waitForInferenceSmokeEvidence,

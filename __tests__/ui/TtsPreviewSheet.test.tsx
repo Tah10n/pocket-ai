@@ -1,9 +1,107 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { TtsPreviewSheet } from '../../src/components/ui/TtsPreviewSheet';
-import { ttsService } from '../../src/services/TtsService';
+import { TtsPreviewSheet, getTtsQaPlaybackMarker } from '../../src/components/ui/TtsPreviewSheet';
+import { ttsService, getTtsSelectionStatus, type TtsServiceState } from '../../src/services/TtsService';
+import * as DocumentPicker from 'expo-document-picker';
+import { referenceVoiceStore, type TemporaryReferenceSource } from '../../src/services/ReferenceVoiceStore';
+import { prepareManagedAudio, discardPreparedAudio, waitForAudioPreparationDrain, type PreparedAudio } from '../../src/services/AudioPreparationService';
+import { audioSamplePreviewService } from '../../src/services/AudioSamplePreviewService';
+import type { AudioRecordingSheet } from '../../src/components/ui/AudioRecordingSheet';
 import en from '../../src/i18n/locales/en.json';
 import ru from '../../src/i18n/locales/ru.json';
+import type { TtsModelSetupState } from '../../src/services/TtsModelSetupService';
+
+it('allowlists three valid PCM normalization scalars without exposing native samples or extra fields', () => {
+  const pcmNormalization = { sourcePeakAbs: 4, outOfRangeSamples: 3, gain: 0.25,
+    samples: [2, -4, 4], sourcePath: '/private/audio.wav', text: 'private speech' };
+  const marker = getTtsQaPlaybackMarker({ phase: 'ready', sampleRate: 24_000, sampleCount: 5, pcmNormalization });
+  expect(JSON.parse(marker)).toEqual({ phase: 'ready', sampleRate: 24_000, sampleCount: 5, errorCode: null,
+    pcmNormalization: { sourcePeakAbs: 4, outOfRangeSamples: 3, gain: 0.25 } });
+  expect(marker).not.toContain('samples'); expect(marker).not.toContain('private');
+});
+
+it.each([
+  { sourcePeakAbs: NaN, outOfRangeSamples: 1, gain: 0.25 },
+  { sourcePeakAbs: Infinity, outOfRangeSamples: 1, gain: 0.25 },
+  { sourcePeakAbs: -4, outOfRangeSamples: 1, gain: 0.25 },
+  { sourcePeakAbs: '4', outOfRangeSamples: 1, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: -1, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1.5, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: Infinity, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 768_001, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 6, gain: 0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 0, gain: 0.25 },
+  { sourcePeakAbs: 0.5, outOfRangeSamples: 1, gain: 1 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: NaN },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: Infinity },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: 0 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: -0.25 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: 1.1 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: 0.5 },
+  { sourcePeakAbs: 4, outOfRangeSamples: 1, gain: '0.25' },
+])('rejects malformed or inconsistent PCM normalization diagnostic %j', pcmNormalization => {
+  const marker = getTtsQaPlaybackMarker({ phase: 'ready', sampleCount: 5,
+    pcmNormalization: pcmNormalization as unknown as NonNullable<TtsServiceState['pcmNormalization']> });
+  expect(JSON.parse(marker)).not.toHaveProperty('pcmNormalization');
+});
+
+it('retains valid unity gain and finite extreme PCM normalization evidence', () => {
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: 'ready', sampleCount: 1,
+    pcmNormalization: { sourcePeakAbs: 0, outOfRangeSamples: 0, gain: 1 } })).pcmNormalization)
+    .toEqual({ sourcePeakAbs: 0, outOfRangeSamples: 0, gain: 1 });
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: 'ready', sampleCount: 1,
+    pcmNormalization: { sourcePeakAbs: Number.MAX_VALUE, outOfRangeSamples: 1, gain: 1 / Number.MAX_VALUE } })).pcmNormalization)
+    .toEqual({ sourcePeakAbs: Number.MAX_VALUE, outOfRangeSamples: 1, gain: 1 / Number.MAX_VALUE });
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: null }))).not.toHaveProperty('pcmNormalization');
+});
+
+it('allowlists bounded native completion scalars including zero and exact diagnostic limits', () => {
+  const nativeCompletion = { tokensPredicted: 0, tokensEvaluated: 1_000_000, elapsedMs: 300_000,
+    tokens: [1, 2], sourcePath: '/private/model.gguf', text: 'private speech' };
+  const marker = getTtsQaPlaybackMarker({ phase: 'ready', nativeCompletion });
+  expect(JSON.parse(marker)).toEqual({ phase: 'ready', errorCode: null,
+    nativeCompletion: { tokensPredicted: 0, tokensEvaluated: 1_000_000, elapsedMs: 300_000 } });
+  expect(marker).not.toContain('private'); expect(marker).not.toContain('tokens"');
+});
+
+it.each([NaN, Infinity, -1, 1.5, '12', false])('omits forged native completion numbers %s', invalid => {
+  const marker = getTtsQaPlaybackMarker({ phase: 'ready', nativeCompletion: {
+    tokensPredicted: invalid, tokensEvaluated: invalid, elapsedMs: invalid,
+  } as unknown as NonNullable<TtsServiceState['nativeCompletion']> });
+  expect(JSON.parse(marker)).not.toHaveProperty('nativeCompletion');
+});
+
+it('omits exceeded native completion bounds while retaining other valid scalars', () => {
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: 'ready', nativeCompletion: {
+    tokensPredicted: 1_000_001, tokensEvaluated: 1_000_001, elapsedMs: 300_001,
+  } }))).not.toHaveProperty('nativeCompletion');
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: 'ready', nativeCompletion: {
+    tokensPredicted: 1_000_001, tokensEvaluated: 0, elapsedMs: 0,
+  } })).nativeCompletion).toEqual({ tokensEvaluated: 0, elapsedMs: 0 });
+});
+
+it('serializes only bounded admission fields from the existing QA playback marker', () => {
+  const memoryAdmission = { availableBytes: 2_440_790_016, freeBytes: 211_845_120,
+    thresholdBytes: 268_435_456, budgetBytes: 2_172_354_560, requiredBytes: 2_378_644_640,
+    lowMemory: false, pressureLevel: 'normal' as const, modelPath: '/private/voice.gguf', text: 'private speech' };
+  const marker = getTtsQaPlaybackMarker({ phase: 'error', errorCode: 'memory_insufficient',
+    profileId: 'private-profile', memoryAdmission });
+  expect(JSON.parse(marker)).toEqual({ phase: 'error', errorCode: 'memory_insufficient', memoryAdmission: {
+    availableBytes: 2_440_790_016, freeBytes: 211_845_120, thresholdBytes: 268_435_456,
+    budgetBytes: 2_172_354_560, requiredBytes: 2_378_644_640, lowMemory: false, pressureLevel: 'normal',
+  } });
+  expect(marker).not.toContain('private');
+});
+
+it('omits invalid admission values while retaining valid zero and 64 GiB bounds', () => {
+  const marker = getTtsQaPlaybackMarker({ phase: 'error', memoryAdmission: {
+    availableBytes: 64 * 2 ** 30, freeBytes: 0, processAvailableBytes: 64 * 2 ** 30 + 1,
+    thresholdBytes: -1, budgetBytes: Number.NaN, requiredBytes: Number.POSITIVE_INFINITY,
+  } });
+  expect(JSON.parse(marker)).toEqual({ phase: 'error', errorCode: null,
+    memoryAdmission: { availableBytes: 64 * 2 ** 30, freeBytes: 0 } });
+  expect(JSON.parse(getTtsQaPlaybackMarker({ phase: null }))).not.toHaveProperty('memoryAdmission');
+});
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -12,15 +110,63 @@ jest.mock('react-native-css-interop', () => {
 jest.mock('../../src/components/ui/ScreenShell', () => {
   const mockReact = require('react'), { View } = require('react-native');
   const Container = ({ children, ...props }: any) => mockReact.createElement(View, props, children);
-  return { ScreenModalOverlay: Container, ScreenSheet: Container };
+  const { Pressable, Text } = require('react-native');
+  const Action = ({ children, iconName, ...props }: any) => mockReact.createElement(Pressable, props, children);
+  const Segmented = ({ options, activeKey, onChange, disabled, ...props }: any) => mockReact.createElement(View, props,
+    options.map((option: any) => mockReact.createElement(Pressable, { key: option.key, testID: option.testID,
+      disabled, accessibilityState: { selected: activeKey === option.key, disabled }, onPress: () => onChange(option.key) },
+    mockReact.createElement(Text, {}, option.label))));
+  return { ScreenModalOverlay: Container, ScreenSheet: Container, ScreenCard: Container,
+    ScreenPressableCard: Action, ScreenIconButton: Action, ScreenSegmentedControl: Segmented };
 });
+jest.mock('../../src/components/ui/MaterialSymbols', () => ({ MaterialSymbols: () => null }));
 const mockSettingsListeners = new Set<() => void>();
 jest.mock('../../src/services/SettingsStore', () => ({ subscribeSettings: (listener: () => void) => {
   mockSettingsListeners.add(listener); return () => mockSettingsListeners.delete(listener);
 } }));
 jest.mock('../../src/services/LocalStorageRegistry', () => ({ registry: { subscribeModels: () => () => undefined } }));
+let mockSetupState: TtsModelSetupState = { phase: 'idle', progress: 0 };
+let mockRecommendedInstalled = false;
+const mockSetupListeners = new Set<() => void>();
+const mockStartRecommended = jest.fn();
+const mockCancelModelSetup = jest.fn();
+jest.mock('../../src/services/TtsModelSetupService', () => ({
+  RECOMMENDED_TTS_DOWNLOAD_MIB: 524,
+  getRecommendedTtsModelMetadata: () => ({ name: 'OuteTTS 1.0 (0.6B)' }),
+  getInstalledRecommendedTtsModel: () => mockRecommendedInstalled ? { id: 'installed-oute' } : undefined,
+  TtsModelSetupService: class {
+    getState = () => mockSetupState;
+    subscribe = (listener: () => void) => { mockSetupListeners.add(listener); return () => mockSetupListeners.delete(listener); };
+    startRecommended = (...args: unknown[]) => mockStartRecommended(...args);
+    cancel = () => mockCancelModelSetup();
+  },
+}));
 
-let mockSelection = { profileId: 'outetts-1.0', modelName: 'Oute', languages: ['en'], requiredBytes: 1 };
+let mockSavedState = { voices: [] as any[], selectedVoiceId: null as string | null };
+const mockSavedListeners = new Set<() => void>();
+jest.mock('../../src/services/ReferenceVoiceStore', () => ({ referenceVoiceStore: {
+  getState: () => mockSavedState,
+  subscribe: (listener: () => void) => { mockSavedListeners.add(listener); return () => mockSavedListeners.delete(listener); },
+  hydrate: jest.fn(), retainTemporarySource: jest.fn(), save: jest.fn(), delete: jest.fn(), select: jest.fn(),
+} }));
+jest.mock('../../src/services/AudioPreparationService', () => ({
+  prepareManagedAudio: jest.fn(), discardPreparedAudio: jest.fn(), waitForAudioPreparationDrain: jest.fn(),
+}));
+let mockSampleState = { phase: 'idle' };
+const mockSampleListeners = new Set<() => void>();
+jest.mock('../../src/services/AudioSamplePreviewService', () => ({ audioSamplePreviewService: {
+  getState: () => mockSampleState,
+  subscribe: (listener: () => void) => { mockSampleListeners.add(listener); return () => mockSampleListeners.delete(listener); },
+  play: jest.fn(), stop: jest.fn(),
+} }));
+let mockRecordingProps: React.ComponentProps<typeof AudioRecordingSheet> | undefined;
+jest.mock('../../src/components/ui/AudioRecordingSheet', () => {
+  const mockReact = require('react'), { View } = require('react-native');
+  return { AudioRecordingSheet: (props: any) => { mockRecordingProps = props;
+    return mockReact.createElement(View, { testID: 'reference-recording-sheet' }); } };
+});
+
+let mockSelection: ReturnType<typeof getTtsSelectionStatus> = { profileId: 'outetts-1.0', modelName: 'Oute', languages: ['en'], requiredBytes: 1 };
 let mockState: Record<string, unknown> = { phase: null };
 const mockListeners = new Set<() => void>();
 jest.mock('../../src/services/TtsService', () => ({
@@ -33,30 +179,73 @@ jest.mock('../../src/services/TtsService', () => ({
   },
 }));
 const service = ttsService as jest.Mocked<typeof ttsService>;
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>(done => { resolve = done; });
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
   return { promise, resolve };
 }
 function props(overrides: Partial<React.ComponentProps<typeof TtsPreviewSheet>> = {}) {
   return { initialText: 'The blue door is open.', isPreviewCurrent: () => true,
     onClose: jest.fn(), onOpenModels: jest.fn(), onCleanupFailure: jest.fn(), ...overrides };
 }
+function renderSheet(options: React.ComponentProps<typeof TtsPreviewSheet>) {
+  const view = render(<TtsPreviewSheet {...options} />);
+  fireEvent.press(view.getByTestId('tts-voice-options'));
+  return view;
+}
 beforeEach(() => {
   mockSelection = { profileId: 'outetts-1.0', modelName: 'Oute', languages: ['en'], requiredBytes: 1 };
   mockState = { phase: null };
   mockListeners.clear();
   mockSettingsListeners.clear();
+  mockSetupState = { phase: 'idle', progress: 0 };
+  mockRecommendedInstalled = false;
+  mockSetupListeners.clear();
+  mockSavedState = { voices: [], selectedVoiceId: null };
+  mockSavedListeners.clear();
+  mockSampleState = { phase: 'idle' };
+  mockSampleListeners.clear();
+  mockRecordingProps = undefined;
   jest.clearAllMocks();
+  mockStartRecommended.mockReset().mockResolvedValue(undefined);
+  mockCancelModelSetup.mockReset().mockResolvedValue(undefined);
   for (const method of ['start', 'checkFiles', 'cancelAndClear', 'play', 'pause', 'replay', 'stop'] as const) {
     service[method].mockResolvedValue(undefined);
   }
+  jest.mocked(discardPreparedAudio).mockReset().mockResolvedValue(undefined);
+  jest.mocked(waitForAudioPreparationDrain).mockReset().mockResolvedValue(undefined);
+  jest.mocked(prepareManagedAudio).mockReset().mockResolvedValue(preparedReference);
+  jest.mocked(audioSamplePreviewService.stop).mockReset().mockResolvedValue(undefined);
+  jest.mocked(audioSamplePreviewService.play).mockReset().mockResolvedValue(undefined);
+  jest.mocked(referenceVoiceStore.retainTemporarySource).mockReset().mockResolvedValue(temporaryReference());
+  jest.mocked(referenceVoiceStore.save).mockReset();
+  jest.mocked(referenceVoiceStore.select).mockReset();
+  jest.mocked(referenceVoiceStore.delete).mockReset().mockResolvedValue(undefined);
+  jest.mocked(DocumentPicker.getDocumentAsync).mockReset().mockResolvedValue({ canceled: true, assets: null });
 });
+
+const preparedReference: PreparedAudio = { uri: 'file:///test-cache/audio-preparation/preview.wav',
+  sourceSha256: 'a'.repeat(64), identity: 'private-reference-profile', sampleRate: 24000,
+  sampleCount: 24000, durationMs: 1000, channels: 1, sizeBytes: 48044 };
+function temporaryReference(): TemporaryReferenceSource {
+  return { uri: 'file:///test-cache/audio-reference/immutable.wav', sourceSha256: 'a'.repeat(64),
+    durationMs: 1000, sourceMimeType: 'audio/wav', isCurrent: jest.fn(() => true), release: jest.fn(async () => undefined) };
+}
+async function useRecordedReference(view: ReturnType<typeof render>) {
+  fireEvent.press(view.getByTestId('tts-reference-record'));
+  await waitFor(() => expect(view.getByTestId('reference-recording-sheet')).toBeTruthy());
+  await act(async () => { await mockRecordingProps!.onAttach(preparedReference, {
+    uri: 'file:///test-cache/recorder/source.m4a', container: 'm4a', byteSize: 4096, durationMillis: 1000,
+    recorderId: 'recording-owner', requestId: 1,
+  }, { assertCurrent: () => undefined }); mockRecordingProps!.onClose(); });
+  await waitFor(() => expect(view.getByTestId('tts-reference-preview')).toBeTruthy());
+}
 
 it('keeps file checking separate from speech and submits only the exact visible preview', async () => {
   const source = { threadId: 'thread', messageId: 'answer' };
-  const view = render(<TtsPreviewSheet {...props({ source })} />);
+  const view = renderSheet(props({ source }));
   expect(service.start).not.toHaveBeenCalled();
+  fireEvent.press(view.getByTestId('tts-advanced-toggle'));
   fireEvent.press(view.getByTestId('tts-check-files'));
   await waitFor(() => expect(view.getByTestId('tts-files-checked')).toBeTruthy());
   expect(service.start).not.toHaveBeenCalled();
@@ -70,7 +259,7 @@ it('keeps file checking separate from speech and submits only the exact visible 
 });
 
 it('preserves pasted over-limit input and disables synthesis without silent truncation', async () => {
-  const view = render(<TtsPreviewSheet {...props()} />);
+  const view = renderSheet(props());
   const input = view.getByTestId('tts-text-input');
   expect(input.props.maxLength).toBeUndefined();
   const pasted = 'x'.repeat(241);
@@ -85,7 +274,7 @@ it('preserves pasted over-limit input and disables synthesis without silent trun
 it('invalidates an in-flight request on edits and blocks new starts until cleanup settles', async () => {
   const synthesis = deferred(), cleanup = deferred();
   service.start.mockReturnValueOnce(synthesis.promise);
-  const view = render(<TtsPreviewSheet {...props()} />);
+  const view = renderSheet(props());
   fireEvent.press(view.getByTestId('tts-synthesize'));
   await waitFor(() => expect(service.start).toHaveBeenCalledTimes(1));
   const request = service.start.mock.calls[0][0];
@@ -102,7 +291,7 @@ it('invalidates an in-flight request on edits and blocks new starts until cleanu
 
 it('preserves structured input and requires explicit review', async () => {
   const text = '{\n  "value": 42\n}';
-  const view = render(<TtsPreviewSheet {...props({ initialText: text, reviewReason: 'structured' })} />);
+  const view = renderSheet(props({ initialText: text, reviewReason: 'structured' }));
   expect(view.getByTestId('tts-exact-preview').props.children).toBe(text);
   expect(view.getByTestId('tts-synthesize')).toBeDisabled();
   fireEvent.press(view.getByTestId('tts-confirm-review'));
@@ -112,7 +301,7 @@ it('preserves structured input and requires explicit review', async () => {
 });
 
 it('rejects protocol and private paths without exposing them as a speech request', () => {
-  const view = render(<TtsPreviewSheet {...props({ initialText: 'file:///data/user/0/private.wav' })} />);
+  const view = renderSheet(props({ initialText: 'file:///data/user/0/private.wav' }));
   expect(view.getByTestId('tts-error').props.children).toBe('tts.errors.unsafe_content');
   expect(view.getByTestId('tts-synthesize')).toBeDisabled();
   expect(service.start).not.toHaveBeenCalled();
@@ -120,7 +309,7 @@ it('rejects protocol and private paths without exposing them as a speech request
 
 it('replays a ready clip without invoking synthesis', async () => {
   mockState = { phase: 'ready', sampleCount: 24000, duration: 1, position: 0 };
-  const view = render(<TtsPreviewSheet {...props()} />);
+  const view = renderSheet(props());
   fireEvent.press(view.getByTestId('tts-replay'));
   await waitFor(() => expect(service.replay).toHaveBeenCalledTimes(1));
   expect(service.start).not.toHaveBeenCalled();
@@ -130,7 +319,7 @@ it('closes only after clearing and draining the player/native owner', async () =
   const cleanup = deferred();
   service.cancelAndClear.mockReturnValueOnce(cleanup.promise);
   const onClose = jest.fn();
-  const view = render(<TtsPreviewSheet {...props({ onClose })} />);
+  const view = renderSheet(props({ onClose }));
   fireEvent.press(view.getByTestId('tts-close'));
   expect(onClose).not.toHaveBeenCalled();
   await act(async () => { cleanup.resolve(); await cleanup.promise; });
@@ -141,7 +330,7 @@ it('keeps stable restoration current after close/unmount while deferred cleanup 
   const synthesis = deferred(), cleanup = deferred();
   service.start.mockReturnValueOnce(synthesis.promise);
   let visible = true;
-  const view = render(<TtsPreviewSheet {...props({ isPreviewCurrent: () => visible })} />);
+  const view = renderSheet(props({ isPreviewCurrent: () => visible }));
   fireEvent.press(view.getByTestId('tts-synthesize'));
   await waitFor(() => expect(service.start).toHaveBeenCalledTimes(1));
   const request = service.start.mock.calls[0][0];
@@ -163,7 +352,7 @@ it.each(['language', 'selection'] as const)('invalidates stable restoration on a
   mockSelection = { ...mockSelection, languages: ['en', 'zh-tw'] };
   const synthesis = deferred(), cleanup = deferred();
   service.start.mockReturnValueOnce(synthesis.promise);
-  const view = render(<TtsPreviewSheet {...props()} />);
+  const view = renderSheet(props());
   fireEvent.press(view.getByTestId('tts-synthesize'));
   await waitFor(() => expect(service.start).toHaveBeenCalledTimes(1));
   const request = service.start.mock.calls[0][0];
@@ -183,7 +372,7 @@ it.each(['language', 'selection'] as const)('invalidates stable restoration on a
 
 it('records cleanup failure and keeps synthesis blocked', async () => {
   const onCleanupFailure = jest.fn();
-  const view = render(<TtsPreviewSheet {...props({ onCleanupFailure })} />);
+  const view = renderSheet(props({ onCleanupFailure }));
   service.cancelAndClear.mockRejectedValueOnce(new Error('private native details'));
   fireEvent.changeText(view.getByTestId('tts-text-input'), 'Changed.');
   await waitFor(() => expect(onCleanupFailure).toHaveBeenCalled());
@@ -202,7 +391,7 @@ it('defines every speech phase and sanitized error in both UI languages', () => 
 
 it.each(['audio_focus_failed', 'audio_focus_delayed', 'playback_start_timeout'])('shows %s with explicit Play retry on the retained WAV', async errorCode => {
   mockState = { phase: 'error', errorCode, sampleCount: 24000, duration: 1, position: 0, clipAvailable: true };
-  const view = render(<TtsPreviewSheet {...props()} />);
+  const view = renderSheet(props());
   expect(view.getByTestId('tts-error').props.children).toBe('tts.errors.' + errorCode);
   expect(view.getByTestId('tts-phase').props.children).toBe('tts.phases.error');
   expect(view.getByTestId('tts-play')).toBeEnabled();
@@ -213,8 +402,409 @@ it.each(['audio_focus_failed', 'audio_focus_delayed', 'playback_start_timeout'])
 
 it('keeps pending native startup separate from Playing and Stop available', () => {
   mockState = { phase: 'starting', sampleCount: 24000, clipAvailable: true };
-  const view = render(<TtsPreviewSheet {...props()} />);
+  const view = renderSheet(props());
   expect(view.getByTestId('tts-phase').props.children).toBe('tts.phases.starting');
   expect(view.queryByTestId('tts-pause')).toBeNull();
   expect(view.getByTestId('tts-stop')).toBeTruthy();
+});
+
+it('submits the selected builtin with speech language admission and shows only that profile voice list', async () => {
+  mockSelection = { profileId: 'neutts-nano', modelName: 'NeuTTS', languages: ['en'], voiceModes: ['builtin'],
+    builtinVoices: ['default', 'dave', 'jo'] };
+  const view = renderSheet(props());
+  expect(view.queryByTestId('tts-mode-reference')).toBeNull();
+  expect(view.queryByTestId('tts-language-de')).toBeNull();
+  fireEvent.press(view.getByTestId('tts-builtin-jo'));
+  await waitFor(() => expect(view.getByTestId('tts-synthesize')).toBeEnabled());
+  fireEvent.press(view.getByTestId('tts-synthesize'));
+  await waitFor(() => expect(service.start).toHaveBeenCalledWith(expect.objectContaining({
+    language: 'en', voice: { kind: 'builtin', voice: 'jo' },
+  })));
+});
+
+it('invalidates voice synthesis while preserving unchanged chat restoration when voice mode changes', async () => {
+  mockSelection = { profileId: 'qwen3-tts', modelName: 'Qwen', languages: ['en'], voiceModes: ['speakerless', 'reference'] };
+  const synthesis = deferred(), cleanup = deferred(); service.start.mockReturnValueOnce(synthesis.promise);
+  const view = renderSheet(props());
+  fireEvent.press(view.getByTestId('tts-synthesize'));
+  await waitFor(() => expect(service.start).toHaveBeenCalledTimes(1));
+  const request = service.start.mock.calls[0][0];
+  service.cancelAndClear.mockReturnValueOnce(cleanup.promise);
+  fireEvent.press(view.getByTestId('tts-mode-reference'));
+  expect(request.isTextCurrent?.()).toBe(false); expect(request.isRestoreCurrent?.()).toBe(true);
+  expect(view.getByTestId('tts-synthesize')).toBeDisabled();
+  await act(async () => { synthesis.resolve(); cleanup.resolve(); await Promise.all([synthesis.promise, cleanup.promise]); });
+  expect(view.getByTestId('tts-synthesize')).toBeDisabled(); // No sample/permission means no reference request.
+});
+
+it('offers real eager/lazy preparation but no transcript or emotion controls for Qwen', () => {
+  mockSelection = { profileId: 'qwen3-tts', modelName: 'Qwen', languages: ['en'], voiceModes: ['reference'] };
+  const view = renderSheet(props());
+  fireEvent.press(view.getByTestId('tts-advanced-toggle'));
+  expect(view.getByTestId('tts-bake-eager')).toBeTruthy(); expect(view.getByTestId('tts-bake-lazy')).toBeTruthy();
+  expect(view.getByTestId('tts-reference-record')).toBeTruthy(); expect(view.getByTestId('tts-reference-import')).toBeTruthy();
+  expect(view.queryByTestId('tts-ref-text')).toBeNull(); expect(view.queryByTestId('tts-emotion')).toBeNull();
+  expect(service.start).not.toHaveBeenCalled(); expect(view.getByTestId('tts-synthesize')).toBeDisabled();
+});
+
+it('opens reference recording only after an explicit action and audio drain, with a temporary consent-gated sample', async () => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const cleanup = deferred();
+  service.cancelAndClear.mockReturnValueOnce(cleanup.promise);
+  const view = renderSheet(props());
+  expect(mockRecordingProps).toBeUndefined();
+  expect(prepareManagedAudio).not.toHaveBeenCalled();
+  expect(referenceVoiceStore.retainTemporarySource).not.toHaveBeenCalled();
+  fireEvent.press(view.getByTestId('tts-reference-record'));
+  expect(mockRecordingProps).toBeUndefined();
+  await act(async () => { cleanup.resolve(); });
+  await waitFor(() => expect(mockRecordingProps?.purpose).toBe('reference'));
+  await act(async () => { await mockRecordingProps!.onAttach(preparedReference, {
+    uri: 'file:///test-cache/recording.m4a', container: 'm4a', byteSize: 4096,
+    durationMillis: 1000, recorderId: 'owner', requestId: 1,
+  }, { assertCurrent: () => undefined }); mockRecordingProps!.onClose(); });
+  expect(view.getByTestId('tts-synthesize')).toBeDisabled();
+  expect(referenceVoiceStore.save).not.toHaveBeenCalled();
+  fireEvent.press(view.getByTestId('tts-reference-consent'));
+  await waitFor(() => expect(view.getByTestId('tts-synthesize')).toBeEnabled());
+  fireEvent.press(view.getByTestId('tts-synthesize'));
+  await waitFor(() => expect(service.start).toHaveBeenCalledWith(expect.objectContaining({
+    voice: { kind: 'reference', bake: 'eager', source: { kind: 'temporary',
+      sourceUri: 'file:///test-cache/audio-reference/immutable.wav', sourceSha256: 'a'.repeat(64), durationMs: 1000, consent: true } },
+  })));
+  expect(referenceVoiceStore.save).not.toHaveBeenCalled();
+});
+
+it('does not open an audio picker after close invalidates a deferred initial cleanup', async () => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const cleanup = deferred();
+  service.cancelAndClear.mockReturnValueOnce(cleanup.promise);
+  const options = props();
+  const view = renderSheet(options);
+  fireEvent.press(view.getByTestId('tts-reference-import'));
+  fireEvent.press(view.getByTestId('tts-close'));
+  await act(async () => { cleanup.resolve(); });
+  await waitFor(() => expect(options.onClose).toHaveBeenCalled());
+  expect(DocumentPicker.getDocumentAsync).not.toHaveBeenCalled();
+  expect(prepareManagedAudio).not.toHaveBeenCalled();
+});
+
+it.each(['record', 'import'] as const)('does not open stale reference %s after selection changes during initial audio drain', async action => {
+  mockSelection = { profileId: 'qwen3-tts', modelName: 'Original', languages: ['en'], voiceModes: ['reference'] };
+  const cleanup = deferred();
+  service.cancelAndClear.mockReturnValueOnce(cleanup.promise);
+  const view = renderSheet(props());
+  fireEvent.press(view.getByTestId('tts-reference-' + action));
+  await act(async () => {
+    mockSelection = { profileId: 'outetts-1.0', modelName: 'Changed', languages: ['en'], voiceModes: ['speakerless'] };
+    mockSettingsListeners.forEach(listener => listener());
+  });
+  await act(async () => { cleanup.resolve(); });
+  expect(view.queryByTestId('reference-recording-sheet')).toBeNull();
+  expect(DocumentPicker.getDocumentAsync).not.toHaveBeenCalled();
+});
+
+it('drains a late reference preparation on unmount and disposes its derivative without starting playback', async () => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const temporary = temporaryReference();
+  jest.mocked(referenceVoiceStore.retainTemporarySource).mockResolvedValueOnce(temporary);
+  const view = renderSheet(props());
+  await useRecordedReference(view);
+  const preparation = deferred<PreparedAudio>();
+  jest.mocked(prepareManagedAudio).mockReturnValueOnce(preparation.promise);
+  fireEvent.press(view.getByTestId('tts-reference-preview'));
+  await waitFor(() => expect(prepareManagedAudio).toHaveBeenCalled());
+  jest.mocked(waitForAudioPreparationDrain).mockReturnValueOnce(preparation.promise.then(() => undefined));
+  view.unmount();
+  expect(temporary.release).not.toHaveBeenCalled();
+  await act(async () => { preparation.resolve(preparedReference); });
+  await waitFor(() => expect(temporary.release).toHaveBeenCalled());
+  expect(discardPreparedAudio).toHaveBeenCalledWith(preparedReference);
+  expect(audioSamplePreviewService.play).not.toHaveBeenCalled();
+});
+
+it('stops a reference preview and confirms player disposal before deleting its derivative', async () => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const view = renderSheet(props());
+  await useRecordedReference(view);
+  fireEvent.press(view.getByTestId('tts-reference-preview'));
+  await waitFor(() => expect(audioSamplePreviewService.play).toHaveBeenCalled());
+  await act(async () => { mockSampleState = { phase: 'playing' }; mockSampleListeners.forEach(listener => listener()); });
+  const disposal = deferred();
+  jest.mocked(audioSamplePreviewService.stop).mockReturnValueOnce(disposal.promise);
+  fireEvent.press(view.getByTestId('tts-reference-preview-stop'));
+  expect(discardPreparedAudio).not.toHaveBeenCalled();
+  await act(async () => { disposal.resolve(); });
+  await waitFor(() => expect(discardPreparedAudio).toHaveBeenCalledWith(preparedReference));
+});
+
+it('keeps reference Stop usable during deferred native Starting and drains before derivative deletion', async () => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const view = renderSheet(props());
+  await useRecordedReference(view);
+  const starting = deferred(), disposal = deferred();
+  jest.mocked(audioSamplePreviewService.play).mockReturnValueOnce(starting.promise);
+  fireEvent.press(view.getByTestId('tts-reference-preview'));
+  await waitFor(() => expect(audioSamplePreviewService.play).toHaveBeenCalled());
+  await act(async () => { mockSampleState = { phase: 'starting' }; mockSampleListeners.forEach(listener => listener()); });
+  const owner = jest.mocked(audioSamplePreviewService.play).mock.calls[0][0].ownerKey;
+  const stop = view.getByTestId('tts-reference-preview-stop');
+  expect(stop).toBeEnabled();
+  jest.mocked(audioSamplePreviewService.stop).mockReturnValueOnce(disposal.promise);
+  fireEvent.press(stop);
+  expect(audioSamplePreviewService.stop).toHaveBeenLastCalledWith(owner);
+  expect(discardPreparedAudio).not.toHaveBeenCalled();
+  expect(view.getByTestId('tts-reference-preview')).toBeDisabled();
+  await act(async () => { starting.resolve(); disposal.resolve(); });
+  await waitFor(() => expect(discardPreparedAudio).toHaveBeenCalledWith(preparedReference));
+});
+
+it('invalidates reference preview preparation on model selection change and discards the late result', async () => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const view = renderSheet(props());
+  await useRecordedReference(view);
+  const preparation = deferred<PreparedAudio>();
+  jest.mocked(prepareManagedAudio).mockReturnValueOnce(preparation.promise);
+  fireEvent.press(view.getByTestId('tts-reference-preview'));
+  await waitFor(() => expect(prepareManagedAudio).toHaveBeenCalled());
+  const operation = jest.mocked(prepareManagedAudio).mock.calls[0][0];
+  jest.mocked(waitForAudioPreparationDrain).mockReturnValueOnce(preparation.promise.then(() => undefined));
+  await act(async () => { mockSelection = { ...mockSelection, modelName: 'Changed model' }; mockSettingsListeners.forEach(listener => listener()); });
+  expect(() => operation.assertCurrent?.()).toThrow();
+  await act(async () => { preparation.resolve(preparedReference); });
+  await waitFor(() => expect(discardPreparedAudio).toHaveBeenCalledWith(preparedReference));
+  expect(audioSamplePreviewService.play).not.toHaveBeenCalled();
+});
+
+it('releases the prior immutable temporary source before retaining a replacement', async () => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const previous = temporaryReference();
+  jest.mocked(referenceVoiceStore.retainTemporarySource).mockResolvedValueOnce(previous);
+  const view = renderSheet(props());
+  await useRecordedReference(view);
+  const release = deferred();
+  jest.mocked(previous.release).mockReturnValueOnce(release.promise);
+  fireEvent.press(view.getByTestId('tts-reference-record'));
+  await waitFor(() => expect(view.getByTestId('reference-recording-sheet')).toBeTruthy());
+  let attach!: Promise<void>;
+  act(() => { attach = mockRecordingProps!.onAttach(preparedReference, {
+    uri: 'file:///test-cache/recording-second.m4a', container: 'm4a', byteSize: 4096,
+    durationMillis: 1000, recorderId: 'second-owner', requestId: 2,
+  }, { assertCurrent: () => undefined }); });
+  await waitFor(() => expect(previous.release).toHaveBeenCalled());
+  expect(referenceVoiceStore.retainTemporarySource).toHaveBeenCalledTimes(1);
+  await act(async () => { release.resolve(); await attach; });
+  expect(referenceVoiceStore.retainTemporarySource).toHaveBeenCalledTimes(2);
+});
+
+it('requires explicit Save and drains synthesis before deleting a saved voice', async () => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const view = renderSheet(props());
+  await useRecordedReference(view);
+  fireEvent.press(view.getByTestId('tts-save-options'));
+  fireEvent.changeText(view.getByTestId('tts-reference-name'), 'Allowed sample');
+  expect(view.getByTestId('tts-reference-save')).toBeDisabled();
+  fireEvent.press(view.getByTestId('tts-reference-consent'));
+  await waitFor(() => expect(view.getByTestId('tts-reference-save')).toBeEnabled());
+  const savedVoice = { id: 'saved-voice', name: 'Allowed sample', sourceSha256: 'a'.repeat(64),
+    sourceBytes: 4096, durationMs: 1000, sourceMimeType: 'audio/wav' as const, createdAt: 1, consentRecordedAt: 1 };
+  jest.mocked(referenceVoiceStore.save).mockResolvedValueOnce(savedVoice);
+  fireEvent.press(view.getByTestId('tts-reference-save'));
+  await waitFor(() => expect(referenceVoiceStore.save).toHaveBeenCalledWith(expect.objectContaining({
+    name: 'Allowed sample', consent: true, sourceUri: 'file:///test-cache/audio-reference/immutable.wav',
+  }), { assertCurrent: expect.any(Function) }));
+  await act(async () => { mockSavedState = { voices: [savedVoice], selectedVoiceId: savedVoice.id }; mockSavedListeners.forEach(listener => listener()); });
+  const cleanup = deferred();
+  service.cancelAndClear.mockReturnValueOnce(cleanup.promise);
+  fireEvent.press(view.getByTestId('tts-delete-saved-voice'));
+  expect(referenceVoiceStore.delete).not.toHaveBeenCalled();
+  await act(async () => { cleanup.resolve(); });
+  await waitFor(() => expect(referenceVoiceStore.delete).toHaveBeenCalledWith(savedVoice.id));
+});
+
+it('scopes a closed reference sheet delayed preview cleanup to its owner after another sheet previews', async () => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const previous = renderSheet(props());
+  await useRecordedReference(previous);
+  fireEvent.press(previous.getByTestId('tts-reference-preview'));
+  await waitFor(() => expect(audioSamplePreviewService.play).toHaveBeenCalledTimes(1));
+  const previousOwner = jest.mocked(audioSamplePreviewService.play).mock.calls[0][0].ownerKey;
+  expect(previousOwner).toBeTruthy();
+  const cleanup = deferred();
+  service.cancelAndClear.mockReturnValueOnce(cleanup.promise);
+  previous.unmount();
+  const next = renderSheet(props());
+  await useRecordedReference(next);
+  fireEvent.press(next.getByTestId('tts-reference-preview'));
+  await waitFor(() => expect(audioSamplePreviewService.play).toHaveBeenCalledTimes(2));
+  const nextOwner = jest.mocked(audioSamplePreviewService.play).mock.calls[1][0].ownerKey;
+  expect(nextOwner).not.toBe(previousOwner);
+  await act(async () => { cleanup.resolve(); });
+  await waitFor(() => expect(audioSamplePreviewService.stop).toHaveBeenLastCalledWith(previousOwner));
+});
+
+it('fails closed on uncertain reference preparation cleanup instead of offering a preview retry', async () => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const options = props();
+  const view = renderSheet(options);
+  await useRecordedReference(view);
+  jest.mocked(prepareManagedAudio).mockRejectedValueOnce(Object.assign(new Error('private preparation cleanup'), { code: 'cleanup_failed' }));
+  fireEvent.press(view.getByTestId('tts-reference-preview'));
+  await waitFor(() => expect(options.onCleanupFailure).toHaveBeenCalled());
+  expect(view.getByTestId('tts-reference-preview')).toBeDisabled();
+  expect(view.getByTestId('tts-reference-import')).toBeDisabled();
+  expect(view.getByTestId('tts-error').props.children).toBe('tts.errors.storage_failed');
+  expect(audioSamplePreviewService.play).not.toHaveBeenCalled();
+});
+
+it('keeps voice management and advanced settings collapsed until explicitly opened', () => {
+  mockSelection = { ...mockSelection, voiceModes: ['speakerless', 'reference'] };
+  const view = render(<TtsPreviewSheet {...props()} />);
+  expect(view.getByTestId('tts-text-input')).toBeTruthy();
+  expect(view.getByTestId('tts-synthesize')).toBeEnabled();
+  expect(view.queryByTestId('tts-reference-record')).toBeNull();
+  expect(view.queryByTestId('tts-check-files')).toBeNull();
+  expect(service.start).not.toHaveBeenCalled();
+  fireEvent.press(view.getByTestId('tts-voice-options'));
+  fireEvent.press(view.getByTestId('tts-mode-reference'));
+  expect(view.getByTestId('tts-reference-record')).toBeTruthy();
+  expect(view.getByTestId('tts-synthesize')).toBeDisabled();
+  fireEvent.press(view.getByTestId('tts-advanced-toggle'));
+  expect(view.getByTestId('tts-bake-eager')).toBeTruthy();
+});
+
+it('shows unknown language keys without relabeling or normalizing their payload', async () => {
+  mockSelection = { ...mockSelection, languages: ['en-us'] };
+  const view = renderSheet(props());
+  expect(view.getByTestId('tts-language-en-us')).toHaveTextContent('en-us');
+  fireEvent.press(view.getByTestId('tts-synthesize'));
+  await waitFor(() => expect(service.start).toHaveBeenCalled());
+  expect(service.start.mock.calls[0][0].language).toBe('en-us');
+});
+
+it('opens Models directly from a missing-model summary without revealing empty voice settings', async () => {
+  mockSelection = { languages: [], errorCode: 'selection_missing' };
+  const onOpenModels = jest.fn();
+  const view = render(<TtsPreviewSheet {...props({ onOpenModels })} />);
+  expect(view.getByTestId('tts-synthesize')).toBeDisabled();
+  fireEvent.press(view.getByTestId('tts-voice-options'));
+  await waitFor(() => expect(onOpenModels).toHaveBeenCalledTimes(1));
+  expect(view.queryByTestId('tts-voice-options-content')).toBeNull();
+  expect(view.getByTestId('tts-use-recommended-voice')).toBeTruthy();
+  expect(mockStartRecommended).not.toHaveBeenCalled();
+  expect(service.start).not.toHaveBeenCalled();
+});
+
+it('starts recommended setup only from its explicit button without starting speech', async () => {
+  const view = renderSheet(props());
+  expect(view.getByTestId('tts-use-recommended-voice')).toHaveTextContent('tts.setup.download');
+  expect(mockStartRecommended).not.toHaveBeenCalled();
+  fireEvent.press(view.getByTestId('tts-use-recommended-voice'));
+  await waitFor(() => expect(mockStartRecommended).toHaveBeenCalledTimes(1));
+  expect(mockStartRecommended.mock.calls[0][0]()).toBe(true);
+  expect(service.cancelAndClear).toHaveBeenCalled();
+  expect(service.start).not.toHaveBeenCalled();
+});
+
+it('offers Use for an already installed recommended voice', () => {
+  mockRecommendedInstalled = true;
+  const view = renderSheet(props());
+  expect(view.getByTestId('tts-use-recommended-voice')).toHaveTextContent('tts.setup.use');
+  expect(mockStartRecommended).not.toHaveBeenCalled();
+});
+
+it('offers the explicit download from missing-model recovery while retaining Models', async () => {
+  mockSelection = { languages: [], errorCode: 'selection_missing' };
+  const options = props();
+  const view = render(<TtsPreviewSheet {...options} />);
+  expect(view.getByTestId('tts-use-recommended-voice')).toBeEnabled();
+  expect(view.getByTestId('tts-error-models')).toBeTruthy();
+  fireEvent.press(view.getByTestId('tts-use-recommended-voice'));
+  await waitFor(() => expect(mockStartRecommended).toHaveBeenCalledTimes(1));
+  expect(options.onOpenModels).not.toHaveBeenCalled();
+  expect(service.start).not.toHaveBeenCalled();
+});
+
+it('offers recommended setup when a runtime file check reports missing files', () => {
+  mockState = { phase: 'error', errorCode: 'files_missing' };
+  const view = render(<TtsPreviewSheet {...props()} />);
+  expect(view.getByTestId('tts-use-recommended-voice')).toBeEnabled();
+  expect(view.getByTestId('tts-error-models')).toBeTruthy();
+  expect(mockStartRecommended).not.toHaveBeenCalled();
+});
+
+it('shows setup progress and cancellation and blocks synthesis until setup completes', async () => {
+  mockSetupState = { phase: 'downloading_codec', progress: 0.85 };
+  const view = render(<TtsPreviewSheet {...props()} />);
+  expect(view.getByTestId('tts-setup-phase')).toHaveTextContent('tts.setup.phases.downloading_codec · tts.setup.progress');
+  expect(view.getByTestId('tts-synthesize')).toBeDisabled();
+  expect(view.queryByTestId('tts-use-recommended-voice')).toBeNull();
+  fireEvent.press(view.getByTestId('tts-cancel-model-setup'));
+  await waitFor(() => expect(mockCancelModelSetup).toHaveBeenCalledTimes(1));
+});
+
+it('invalidates its setup guard immediately and waits for setup drain before closing', async () => {
+  const options = props();
+  const view = renderSheet(options);
+  fireEvent.press(view.getByTestId('tts-use-recommended-voice'));
+  await waitFor(() => expect(mockStartRecommended).toHaveBeenCalledTimes(1));
+  const guard = mockStartRecommended.mock.calls[0][0];
+  const drain = deferred(); mockCancelModelSetup.mockReturnValueOnce(drain.promise);
+  fireEvent.press(view.getByTestId('tts-close'));
+  expect(guard()).toBe(false); expect(options.onClose).not.toHaveBeenCalled();
+  await act(async () => { drain.resolve(); });
+  await waitFor(() => expect(options.onClose).toHaveBeenCalledTimes(1));
+});
+
+it('waits for setup cancellation before closing even when audio cleanup rejects first', async () => {
+  const options = props();
+  const view = render(<TtsPreviewSheet {...options} />);
+  const drain = deferred();
+  mockCancelModelSetup.mockReturnValueOnce(drain.promise);
+  service.cancelAndClear.mockRejectedValueOnce(new Error('audio cleanup failed'));
+  fireEvent.press(view.getByTestId('tts-close'));
+  await act(async () => { await Promise.resolve(); });
+  expect(mockCancelModelSetup).toHaveBeenCalledTimes(1);
+  expect(options.onClose).not.toHaveBeenCalled();
+  await act(async () => { drain.resolve(); });
+  await waitFor(() => expect(options.onClose).toHaveBeenCalledTimes(1));
+  expect(options.onCleanupFailure).toHaveBeenCalled();
+});
+
+it('cancels its setup owner when the sheet unmounts', async () => {
+  const view = render(<TtsPreviewSheet {...props()} />);
+  view.unmount();
+  await waitFor(() => expect(mockCancelModelSetup).toHaveBeenCalledTimes(1));
+});
+
+it('reports uncertain setup cleanup and disables further speech actions', async () => {
+  mockSetupState = { phase: 'downloading_model', progress: 0.1 };
+  mockCancelModelSetup.mockRejectedValueOnce({ code: 'cleanup_failed' });
+  const options = props(); const view = render(<TtsPreviewSheet {...options} />);
+  fireEvent.press(view.getByTestId('tts-cancel-model-setup'));
+  await waitFor(() => expect(options.onCleanupFailure).toHaveBeenCalled());
+  expect(view.getByTestId('tts-synthesize')).toBeDisabled();
+  expect(view.getByTestId('tts-error')).toHaveTextContent('tts.errors.storage_failed');
+});
+
+it('localizes setup stages and failures in English and Russian', () => {
+  expect(Object.keys(en.tts.setup.phases)).toEqual(Object.keys(ru.tts.setup.phases));
+  expect(Object.keys(en.tts.setup.errors)).toEqual(Object.keys(ru.tts.setup.errors));
+  for (const messages of [en.tts.setup, ru.tts.setup]) {
+    expect(messages.description).toContain('{{model}}');
+    expect(messages.download).toContain('{{mib}}');
+    expect(messages.progress).toContain('{{percent}}');
+    expect(Object.values(messages.phases).every(value => value.length > 0)).toBe(true);
+    expect(Object.values(messages.errors).every(value => value.length > 0)).toBe(true);
+  }
+});
+
+it('exposes the checked builtin radio state to assistive technology', async () => {
+  mockSelection = { ...mockSelection, voiceModes: ['builtin'], builtinVoices: ['dave', 'jo'] };
+  const view = renderSheet(props());
+  expect(view.getByTestId('tts-builtin-dave').props.accessibilityState.checked).toBe(true);
+  expect(view.getByTestId('tts-builtin-jo').props.accessibilityState.checked).toBe(false);
+  fireEvent.press(view.getByTestId('tts-builtin-jo'));
+  await waitFor(() => expect(view.getByTestId('tts-builtin-jo').props.accessibilityState.checked).toBe(true));
+  expect(view.getByTestId('tts-builtin-dave').props.accessibilityState.checked).toBe(false);
 });

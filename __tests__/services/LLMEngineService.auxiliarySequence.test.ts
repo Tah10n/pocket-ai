@@ -1,6 +1,6 @@
 import type { LlamaContext } from 'llama.rn';
 import { initLlama, releaseAllLlama } from 'llama.rn';
-import { AuxiliaryContextCleanupError, llmEngineService, type AuxiliaryContextRequest } from '../../src/services/LLMEngineService';
+import { AuxiliaryContextCleanupError, llmEngineService, type AuxiliaryContextRequest, type AuxiliaryFailureStage } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { EngineStatus, LifecycleStatus, type EngineState, type ModelMetadata } from '../../src/types/models';
 import type { ModelLoadParameters } from '../../src/services/SettingsStore';
@@ -49,8 +49,9 @@ let lease: ReturnType<typeof llmEngineService.beginLocalToolRun> | undefined;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(next => { resolve = next; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((next, fail) => { resolve = next; reject = fail; });
+  return { promise, resolve, reject };
 }
 async function until(predicate: () => boolean) {
   for (let index = 0; index < 100 && !predicate(); index++) await Promise.resolve();
@@ -324,16 +325,22 @@ it('retains the initial native failure and cleanup cause while failed release qu
   const operationError = Object.freeze(new Error('native operation failed'));
   const releaseError = new Error('native release failed');
   const b = context('b');
+  let releaseCallsAtFailure: number | undefined;
+  const observeFailure = jest.fn((_stage: AuxiliaryFailureStage) => {
+    releaseCallsAtFailure = jest.mocked(b.release).mock.calls.length;
+  });
   jest.mocked(b.release).mockRejectedValue(releaseError);
   jest.mocked(initLlama).mockResolvedValueOnce(b);
 
-  const error = await llmEngineService.runWithAuxiliarySequence({ isCurrent: () => true },
+  const error = await llmEngineService.runWithAuxiliarySequence({ isCurrent: () => true, observeFailure },
     sequence => sequence.withContext(phase('b'), async () => { throw operationError; }))
     .catch(failure => failure as AuxiliaryContextCleanupError);
 
   expect(error).toBeInstanceOf(AuxiliaryContextCleanupError);
   expect(error).toMatchObject({ code: 'engine_recovery_required', cause: operationError, operationError });
   expect(error.operationError).toBe(operationError);
+  expect(observeFailure.mock.calls).toEqual([['native_callback']]);
+  expect(releaseCallsAtFailure).toBe(0);
   expect(error.cleanupError).toBe(service.orphanedContextReleaseError);
   expect(error.cleanupError).toMatchObject({ code: 'engine_recovery_required', cause: releaseError });
   expect(restore).not.toHaveBeenCalled();
@@ -448,4 +455,46 @@ it.each([0, 999, 600001, Number.NaN])('rejects invalid explicit native drain bud
     sequence.withContext({ ...phase('b'), nativeDrainTimeoutMs }, async () => 1))).rejects.toMatchObject({ code: 'action_failed' });
   expect(initLlama).not.toHaveBeenCalled();
   expect(restore).toHaveBeenCalledTimes(1);
+});
+
+it('reports a deferred backbone init rejection before native cleanup and ignores observer exceptions', async () => {
+  const init = deferred<LlamaContext>();
+  const failure = new Error('synthetic init detail');
+  jest.mocked(initLlama).mockReturnValueOnce(init.promise);
+  const callback = jest.fn(async () => 1);
+  let cleanupCallsAtFailure: number | undefined; let restoresAtFailure: number | undefined;
+  const observeFailure = jest.fn((_stage: AuxiliaryFailureStage) => {
+    cleanupCallsAtFailure = jest.mocked(releaseAllLlama).mock.calls.length;
+    restoresAtFailure = restore.mock.calls.length;
+    throw new Error('ignored diagnostic observer');
+  });
+  const transaction = llmEngineService.runWithAuxiliarySequence({ isCurrent: () => true, observeFailure },
+    sequence => sequence.withContext(phase('b'), callback));
+  const settled = transaction.catch(error => error);
+  try {
+    await until(() => jest.mocked(initLlama).mock.calls.length === 1);
+    const cleanupCallsBeforeFailure = jest.mocked(releaseAllLlama).mock.calls.length;
+    init.reject(failure);
+    expect(await settled).toBe(failure);
+    expect(callback).not.toHaveBeenCalled();
+    expect(observeFailure.mock.calls).toEqual([['backbone_init']]);
+    expect(cleanupCallsAtFailure).toBe(cleanupCallsBeforeFailure);
+    expect(jest.mocked(releaseAllLlama).mock.calls.length).toBeGreaterThan(cleanupCallsBeforeFailure);
+    expect(restoresAtFailure).toBe(0);
+    expect(restore).toHaveBeenCalledTimes(1);
+    expect(events.at(-1)).toBe('restore:a');
+  } finally {
+    init.reject(failure);
+    await settled;
+  }
+});
+
+it('reports restore as the first failure only when the native operation and context release succeeded', async () => {
+  const observeFailure = jest.fn();
+  restore.mockRejectedValueOnce(new Error('synthetic restore detail'));
+  await expect(llmEngineService.runWithAuxiliarySequence({ isCurrent: () => true, observeFailure },
+    sequence => sequence.withContext(phase('b'), async () => 1)))
+    .rejects.toMatchObject({ code: 'model_load_failed' });
+  expect(events).toContain('release:b');
+  expect(observeFailure.mock.calls).toEqual([['restore']]);
 });

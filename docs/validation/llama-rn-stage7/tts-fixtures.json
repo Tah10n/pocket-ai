@@ -1,0 +1,57 @@
+{
+  "runtime": "llama.rn/0.13.0-rc.3",
+  "evidenceKind": "source-researched execution contracts with a scoped admission outcome; not speech/reference acceptance",
+  "sourcePatchSha256": "ac6071d8d49228d6f1473cffe1c0ccdbfe5a0733d32f33924225447d9eb57d28",
+  "testedSourceHead": "6457bb2b970d1b1c7c62d98c745394ec4308c956",
+  "testedApkSha256": "587bf83581ef548dc6f50995c929c6bd46150a04a1d62f8dcb29db10a5c88f95",
+  "nativeSpeakerReceiptSourceSha256": "37086c38c42f9f91e2947bd486d845da421d7b848318d9287f52950373065017",
+  "nativeTtsBoundsAndDestructorSourceSha256": "dc55dac2ee2da8d49f4a04c2a82f647b4d0ee9e37e3da271dbf9d90ae8129fdb",
+  "profiles": [
+    {
+      "id": "neutts-nano-q4_k_m-neucodec-q8_0",
+      "repository": "BricksDisplay/NeuTTS-Nano-GGUF",
+      "revision": "857e272b903daf826606567c9ceaef574bfa793b",
+      "backbone": { "filename": "neutts-nano-q4_k_m.gguf", "bytes": 209571776, "sha256": "14049f27cd9fac6bc703d06bbfd2580ec6fdc2b23780533bb416ddaf236d993f" },
+      "codec": { "filename": "codec-q8_0.gguf", "bytes": 341719168, "sha256": "9972d7cabd38582f0425ba898abffc6f92166154ce046a4f392654dbdad5fafa" },
+      "uniqueArtifactBytes": 551290944,
+      "artifactsWithSecondCodecLoadBytes": 893010112,
+      "estimatedPeakBytes": 3346420096, "memoryConfidence": "low; policy estimate, not measured",
+      "modelGeometry": { "hiddenDimension": 576, "layers": 24, "contextTokens": 4096 },
+      "family": "neutts", "promptKind": "neutts", "flow": "tokens",
+      "speechLanguages": ["en"], "builtinLanguage": "en-us", "phonemizerLanguage": "en-us",
+      "builtinVoices": ["default", "dave", "jo"], "referenceVoice": false,
+      "sampleRate": 24000, "decoderHop": 480, "codebooks": 1, "codebookSize": 65536,
+      "maxFrames": 800, "generationSteps": 801, "maxPromptTokens": 1536,
+      "modelLicense": "NeuTTS Open License v1.0 (conditional commercial use)",
+      "codecLicense": "Apache-2.0",
+      "nativeValidation": "memory_insufficient at tts_admission before Neu/jo synthesis on physical Android API 34 ARM64 CPU; zero steps and clip exports"
+    },
+    {
+      "id": "qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0",
+      "repository": "BricksDisplay/Qwen3-TTS-12Hz-0.6B-GGUF",
+      "revision": "f585ae3ca470e59ef9405d6317a6f11bc6c7ca1f",
+      "backbone": { "filename": "qwen3-tts-0.6b-q4_k_m.gguf", "bytes": 396700064, "sha256": "e3ba7aed5d7147dea8745da98218f2a57d5ca5b4ee408ac2146bead0b4c62f30" },
+      "codec": { "filename": "codec-q8_0.gguf", "bytes": 1278191520, "sha256": "c10e65ef981e8452c841b008892f35e1dca9cf18abd47843acad4316d5bb9b8c" },
+      "uniqueArtifactBytes": 1674891584,
+      "artifactsWithSecondCodecLoadBytes": 2953083104,
+      "estimatedPeakBytes": 8837808576, "memoryConfidence": "low; policy estimate, not measured",
+      "family": "qwen3_tts", "promptKind": "qwen3_tts", "flow": "talker_embd",
+      "speechLanguages": ["en"], "builtinVoices": [], "referenceVoice": true,
+      "sampleRate": 24000, "decoderHop": 1920, "codebooks": 16, "codebookSize": 2048,
+      "maxFrames": 200, "generationSteps": 201,
+      "reference": { "sampleRate": 24000, "minSamples": 4800, "maxSamples": 192000, "maxSeconds": 8, "speakerRows": 1, "speakerHiddenDimension": 1024, "transcriptUsed": false, "emotionUsed": false },
+      "modelAndCodecLicense": "Apache-2.0",
+      "nativeValidation": "not_reached; the tested voice flow stopped at Neu/jo admission before the Qwen case"
+    }
+  ],
+  "phonemizer": {
+    "package": "phonemize", "version": "2.0.1", "entry": "phonemize (English only)",
+    "tarballBytes": 875883, "unpackedBytes": 2879204,
+    "tarballSha256": "36387585c3bdae3dc1ce4ea2595450ee8fda365730f4daf30da7fb1efe8c5400",
+    "integrity": "sha512-BTucYeBh/7YnWv08HXS2bB+6hG49fMJRb7HJYz3dGruAng8OajV9CNPG48IpJhFSn4RnFRL+HVb4bEUgSumxiQ==",
+    "format": "Unicode IPA, stress preserved, space-separated words, punctuation preserved, separate dʒ/tʃ affricates",
+    "language": "en-us", "inputCharacters": 240, "outputCharacters": 4096, "deadlineMs": 1000,
+    "notices": "src/thirdParty/phonemize-notices.json",
+    "hermesValidation": "not_run in this source record"
+  }
+}

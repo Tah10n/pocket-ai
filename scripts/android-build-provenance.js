@@ -5,11 +5,14 @@ const path = require("path");
 const zlib = require("zlib");
 const { spawnSync } = require("child_process");
 const { getEnvFiles, parseEnvFiles } = require("@expo/env");
+const { applyPhonemizePatch } = require("../patches/phonemize-2.0.1");
+const { normalizeAndroidQaInstance, resolveAndroidQaApplicationId } = require("./android-qa-application-id");
 
 const BUILD_PROVENANCE_SCHEMA_VERSION = 3;
 const POCKET_ANYDOC_UPSTREAM_COMMIT =
   "4a45addbd607e8b59f0c263bca26aab228e10370";
 const BASE_BUILD_INPUTS = [
+  "scripts/android-qa-application-id.js",
   "app.json",
   "app.config.js",
   "app.config.ts",
@@ -25,6 +28,7 @@ const BASE_BUILD_INPUTS = [
   "android",
 ];
 const PREBUILD_INPUTS = [
+  "scripts/android-qa-application-id.js",
   "app.json",
   "app.config.js",
   "app.config.ts",
@@ -47,6 +51,10 @@ const EMBEDDED_BUNDLE_INPUTS = [
   // Imported by AndroidQaDocumentRetrieval.ts; fixed corpus/profile changes invalidate the tested bundle.
   "docs/validation/llama-rn-stage5/retrieval-fixtures.json",
   "docs/validation/llama-rn-stage6/tts-fixtures.json",
+  // Stage 7 controlled audio identity and voice profiles are imported by its QA surface.
+  "docs/validation/llama-rn-stage7/audio-input-fixtures.json",
+  "docs/validation/llama-rn-stage7/tts-fixtures.json",
+  "docs/validation/llama-rn-stage7/synthetic-inputs.json",
   "app",
   "src",
   "components",
@@ -288,6 +296,9 @@ function createAndroidShippingBuildEnvironment(projectRoot, env = {}, options = 
     ...resolveExpoEnvironment(projectRoot, shippingEnvironment),
     ...shippingEnvironment,
   };
+  if (effectiveExpoEnvironment.POCKET_AI_ANDROID_QA_INSTANCE != null) {
+    throw new Error("Android shipping builds reject POCKET_AI_ANDROID_QA_INSTANCE; named instances are local isolated QA only.");
+  }
   if (effectiveExpoEnvironment.POCKET_AI_QA_PRIVATE_FILE_ACCESS != null
     && effectiveExpoEnvironment.POCKET_AI_QA_PRIVATE_FILE_ACCESS !== "0") {
     throw new Error("Android shipping builds reject POCKET_AI_QA_PRIVATE_FILE_ACCESS; release private-file access is local isolated QA only.");
@@ -1398,13 +1409,19 @@ function collectAndroidEffectiveBuildContext(projectRoot, options = {}) {
   const hasReleaseSigning = variant === "release"
     && storeFileExists
     && Object.values(signingValues).every((entry) => Boolean(entry.value));
+  const qaInstance = normalizeAndroidQaInstance(env.POCKET_AI_ANDROID_QA_INSTANCE);
+  const isolatedQaApplicationId = resolveAndroidQaApplicationId(defaults.applicationId, true, qaInstance);
+  if (qaInstance !== null && (applicationId.value !== isolatedQaApplicationId
+    || env.EXPO_PUBLIC_ANDROID_QA !== "1" || parseBooleanBuildValue(env.POCKET_AI_SHIPPING_BUILD))) {
+    throw new Error("Android QA instance requires its exact isolated package and nonshipping QA controls.");
+  }
   const qaPrivateFileAccessValue = env.POCKET_AI_QA_PRIVATE_FILE_ACCESS;
   if (qaPrivateFileAccessValue != null && !["0", "1"].includes(qaPrivateFileAccessValue)) {
     throw new Error("POCKET_AI_QA_PRIVATE_FILE_ACCESS must be exactly 0 or 1.");
   }
   const qaPrivateFileAccess = qaPrivateFileAccessValue === "1";
   if (qaPrivateFileAccess && (variant !== "release"
-    || applicationId.value !== `${defaults.applicationId}.qa` || env.EXPO_PUBLIC_ANDROID_QA !== "1"
+    || applicationId.value !== isolatedQaApplicationId || env.EXPO_PUBLIC_ANDROID_QA !== "1"
     || !allowDebugReleaseSigning || hasReleaseSigning || parseBooleanBuildValue(env.POCKET_AI_SHIPPING_BUILD))) {
     throw new Error("QA private-file access requires the isolated .qa package, EXPO_PUBLIC_ANDROID_QA=1 and local debug-fallback release signing; shipping builds are forbidden.");
   }
@@ -1418,7 +1435,8 @@ function collectAndroidEffectiveBuildContext(projectRoot, options = {}) {
     applicationId: {
       value: applicationId.value,
       source: applicationId.source,
-      isolatedQa: applicationId.value === `${defaults.applicationId}.qa`,
+      isolatedQa: applicationId.value === isolatedQaApplicationId,
+      ...(qaInstance !== null ? { qaInstance } : {}),
     },
     pluginVersions: {
       agp: env.POCKET_AI_ANDROID_AGP_VERSION || DEFAULT_ANDROID_BUILD_PLUGIN_VERSIONS.agp,
@@ -2022,11 +2040,13 @@ function collectBuildProvenance(projectRoot, options = {}) {
   const llamaHexagon = hexagonManifestExists
     ? require("./llama-hexagon-sdk").verifyLlamaHexagonSdk(projectRoot, { abi, env: options.env || process.env }).identity
     : null;
+  const phonemize = applyPhonemizePatch(projectRoot, { check: true });
   const manifest = {
     schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
     variant,
     abi,
     ...(hexagonManifestExists ? { llamaHexagon } : {}),
+    ...(phonemize ? { phonemize } : {}),
     embeddedBundle: includeBundleInputs,
     buildContext,
     toolchains: options.toolchains || collectToolchainVersions(projectRoot, options),

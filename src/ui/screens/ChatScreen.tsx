@@ -42,7 +42,10 @@ import { ChatHeader } from '@/components/ui/ChatHeader';
 import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
 import { TtsPreviewSheet, getTtsQaPlaybackMarker } from '@/components/ui/TtsPreviewSheet';
+import { AudioRecordingSheet } from '@/components/ui/AudioRecordingSheet';
+import { AndroidQaAudioStage7Panel } from '@/components/ui/AndroidQaAudioStage7Panel';
 import { ttsService } from '@/services/TtsService';
+import { getAndroidQaAudioStage7Evidence, isAndroidQaAudioStage7Enabled, subscribeAndroidQaAudioStage7 } from '@/services/AndroidQaAudioStage7';
 import { getAndroidQaTtsEvidence, subscribeAndroidQaTts, runAndroidQaTts, runAndroidQaTtsPlayback, continueAndroidQaTts } from '@/services/AndroidQaTts';
 import { prepareSpeechText, type PreparedSpeechText } from '@/utils/ttsText';
 import type { TtsErrorCode, TtsFlow } from '@/types/tts';
@@ -117,6 +120,7 @@ import {
     armAndroidQaGenerationGate,
     getAndroidQaGenerationEvidenceSnapshot,
     isAndroidQaGenerationEvidenceEnabled,
+    isAndroidQaUiControlsVisible,
     subscribeAndroidQaGenerationEvidence,
 } from '../../services/AndroidQaGenerationEvidence';
 import {
@@ -880,7 +884,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
             />
             {!isTtsPreviewOpen ? <View accessible collapsable={false} testID="chat-qa-tts-playback-state"
                 accessibilityLabel={getTtsQaPlaybackMarker(ttsPlaybackState)} style={styles.androidQaEvidenceMarker} /> : null}
-            <View style={styles.androidQaEvidenceActions}>
+            {isAndroidQaUiControlsVisible() ? <View style={styles.androidQaEvidenceActions}>
                 {isAndroidQaDocumentModelBootstrapEnabled() ? (
                     <>
                         <Button
@@ -909,6 +913,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                         <Button size="xs" action="secondary" testID="chat-qa-run-stage3"
                             disabled={isAnyNativeQaBusy || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaStage3()}><ButtonText>QA Stage 3</ButtonText></Button>
+                        <AndroidQaAudioStage7Panel />
                         <Button size="xs" action="secondary" testID="chat-qa-run-local-tools"
                             disabled={isAnyNativeQaBusy || localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaLocalTools()}><ButtonText>QA Local Tools</ButtonText></Button>
@@ -1023,7 +1028,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                         </Button>
                     </>
                 ) : null}
-            </View>
+            </View> : null}
             {Platform.OS === 'android' ? (
                 <>
                     <View
@@ -1097,7 +1102,15 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     );
 }
 
+function subscribeAndroidQaSpeechOwnership(listener: () => void): () => void {
+    const releaseTts = subscribeAndroidQaTts(listener);
+    const releaseStage7 = subscribeAndroidQaAudioStage7(listener);
+    return () => { releaseTts(); releaseStage7(); };
+}
+
 function isAndroidQaTtsBlockingPublicSpeech(): boolean {
+    const stage7 = getAndroidQaAudioStage7Evidence();
+    if (isAndroidQaAudioStage7Enabled() && (stage7.status === 'running' || stage7.requiresForceStop)) return true;
     if (!isAndroidQaGenerationEvidenceEnabled()) return false;
     const evidence = getAndroidQaTtsEvidence();
     return evidence.status === 'running' || evidence.phase === 'awaiting_clip_copy' || evidence.requiresForceStop;
@@ -1144,7 +1157,7 @@ const ChatScreenContent = () => {
     const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
     const tabBarHeight = useBottomTabBarHeight();
     const isScreenFocused = useIsFocused();
-    const isTtsQaBusy = useSyncExternalStore(subscribeAndroidQaTts,
+    const isTtsQaBusy = useSyncExternalStore(subscribeAndroidQaSpeechOwnership,
         isAndroidQaTtsBlockingPublicSpeech, isAndroidQaTtsBlockingPublicSpeech);
     const [speechPreview, setSpeechPreview] = useState<{
         id: number; text: string; reason?: PreparedSpeechText['reason'];
@@ -1489,7 +1502,17 @@ const ChatScreenContent = () => {
         audioEnabled: audioAttachmentsEnabled,
         audioDisabledReason: audioAttachmentsDisabledReason,
         ownerKey: mediaAttachmentOwnerKey,
+        onAudioCleanupFailure: onSpeechCleanupFailure,
     });
+    const [recordingOwner, setRecordingOwner] = useState<string | null>(null);
+    useEffect(() => {
+        if (!isScreenFocused || (recordingOwner && recordingOwner !== mediaAttachmentOwnerKey)) setRecordingOwner(null);
+    }, [isScreenFocused, mediaAttachmentOwnerKey, recordingOwner]);
+    const openAudioRecording = useCallback(() => {
+        if (audioAttachmentsEnabled && !speechCleanupFailed.current && !speechCleanupPending) {
+            setRecordingOwner(mediaAttachmentOwnerKey);
+        }
+    }, [audioAttachmentsEnabled, mediaAttachmentOwnerKey, speechCleanupPending]);
     const retainedRegenerateAttachments = pendingRegenerateMessage?.attachments ?? [];
     const canSendRetainedRegenerateAttachments = retainedRegenerateAttachments.length > 0
         && !isInputDisabled
@@ -3783,6 +3806,7 @@ const ChatScreenContent = () => {
                                 onAttachImages={imageAttachmentDrafts.attachImages}
                                 onAttachDocuments={handleAttachDocuments}
                                 onAttachAudio={mediaAttachmentDrafts.attachAudio}
+                                onRecordAudio={openAudioRecording}
                                 onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
                                 onRemoveDocumentAttachmentDraft={documentAttachmentDrafts.removeDraft}
                                 onRemoveMediaAttachmentDraft={mediaAttachmentDrafts.removeDraft}
@@ -3830,6 +3854,7 @@ const ChatScreenContent = () => {
                                 onAttachImages={imageAttachmentDrafts.attachImages}
                                 onAttachDocuments={handleAttachDocuments}
                                 onAttachAudio={mediaAttachmentDrafts.attachAudio}
+                                onRecordAudio={openAudioRecording}
                                 onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
                                 onRemoveDocumentAttachmentDraft={documentAttachmentDrafts.removeDraft}
                                 onRemoveMediaAttachmentDraft={mediaAttachmentDrafts.removeDraft}
@@ -3932,6 +3957,10 @@ const ChatScreenContent = () => {
                     closeSpeechPreview();
                     router.navigate('/(tabs)/models');
                 }} /> : null}
+            {recordingOwner ? <AudioRecordingSheet key={recordingOwner} ownerKey={recordingOwner} purpose="chat"
+                isCurrent={() => isScreenFocused && recordingOwner === mediaAttachmentOwnerKey && audioAttachmentsEnabled}
+                onAttach={(prepared, _source, options) => mediaAttachmentDrafts.attachRecordedAudio(prepared, options)}
+                onClose={() => setRecordingOwner(null)} onCleanupFailure={onSpeechCleanupFailure} /> : null}
             <ErrorReportSheet
                 {...errorReportSheetProps}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}

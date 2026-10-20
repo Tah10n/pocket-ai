@@ -5,27 +5,57 @@ const { WINDOWS_NATIVE_STAGING, ensureWindowsNativeStaging } = withAndroidWindow
 const { ensureAndroidHexagonGuard, HEXAGON_GUARD } = require('../../plugins/withLlamaSourceBuild')._internal;
 const appConfig = require('../../app.json');
 
+// Expo's root plugins can evaluate :app and finalize its CMake DSL immediately.
+const mockRootGradle = `buildscript {
+  repositories { google(); mavenCentral() }
+  dependencies { classpath('com.android.tools.build:gradle') }
+}
+
+allprojects {
+  repositories { google(); mavenCentral() }
+}
+
+apply plugin: "expo-root-project"
+apply plugin: "com.facebook.react.rootproject"
+`;
 jest.mock('expo/config-plugins', () => ({
-  withProjectBuildGradle: (_config, action) => action({ modResults: { contents: 'buildscript { }\n' } }),
+  withProjectBuildGradle: (_config, action) => action({ modResults: { contents: mockRootGradle } }),
 }));
 
 describe('Windows scoped native staging', () => {
   it('registers the real project Gradle mod once without removing the source-build guard plugin', () => {
     expect(appConfig.expo.plugins.filter(plugin => plugin === './plugins/withAndroidWindowsNativeStaging')).toHaveLength(1);
     expect(appConfig.expo.plugins).toContain('./plugins/withLlamaSourceBuild');
-    expect(withAndroidWindowsNativeStaging({}).modResults.contents).toBe(ensureWindowsNativeStaging('buildscript { }\n'));
+    expect(withAndroidWindowsNativeStaging({}).modResults.contents).toBe(ensureWindowsNativeStaging(mockRootGradle));
   });
 
   it.each(['\n', '\r\n'])('preserves the existing native guard and unrelated Gradle configuration on repeated generation (%j)', newline => {
-    const original = ensureAndroidHexagonGuard(`buildscript { }${newline}// retained custom setting${newline}`);
+    const original = ensureAndroidHexagonGuard((mockRootGradle + '// retained custom setting\n').replace(/\n/gu, newline));
     const result = ensureWindowsNativeStaging(original);
-    expect(result.startsWith(original)).toBe(true);
+    expect(result.replace(WINDOWS_NATIVE_STAGING.replace(/\n/gu, newline) + newline + newline, '')).toBe(original);
     expect(result.replace(/\r\n/gu, '\n')).toContain(HEXAGON_GUARD);
     expect(ensureWindowsNativeStaging(result)).toBe(result);
     expect(ensureAndroidHexagonGuard(result)).toBe(result);
     if (newline === '\r\n') expect(result.replace(/\r\n/gu, '')).not.toContain('\n');
   });
 
+  it.each(['fresh', 'existing-current', 'existing-legacy'])('registers before root plugin application can finalize the app CMake DSL (%s)', placement => {
+    const legacy = WINDOWS_NATIVE_STAGING.replaceAll('Windows native staging', 'Windows MMKV staging');
+    const existing = placement === 'fresh' ? '' : (placement === 'existing-current' ? WINDOWS_NATIVE_STAGING : legacy) + '\n';
+    const original = ensureAndroidHexagonGuard(mockRootGradle + '\n' + existing);
+    const result = ensureWindowsNativeStaging(original);
+    const registration = result.indexOf('// @generated pocket-ai Windows native staging');
+    expect(registration).toBeGreaterThanOrEqual(0);
+    expect(registration).toBeLessThan(result.indexOf('apply plugin: "expo-root-project"'));
+    expect(registration).toBeLessThan(result.indexOf('apply plugin: "com.facebook.react.rootproject"'));
+    expect(result.split('// @generated pocket-ai Windows native staging')).toHaveLength(2);
+    expect(result).toContain(HEXAGON_GUARD);
+    expect(ensureWindowsNativeStaging(result)).toBe(result);
+  });
+
+  it('fails closed when the root-plugin lifecycle boundary is absent', () => {
+    expect(() => ensureWindowsNativeStaging('buildscript { }\n')).toThrow(/root plugin boundary/);
+  });
   it('limits Windows configuration to the app and MMKV using their respective Android plugin types', () => {
     const gate = 'if (System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).startsWith("windows"))';
     const registry = 'def pocketNativeModules = [":react-native-mmkv": ["com.android.library", "m"], ":app": ["com.android.application", "a"]]';
@@ -62,7 +92,7 @@ describe('Windows scoped native staging', () => {
   });
 
   it.each(['\n', '\r\n'])('upgrades an existing MMKV-only block without duplicating either block or changing native guards (%j)', newline => {
-    const guard = ensureAndroidHexagonGuard('buildscript { }\n');
+    const guard = ensureAndroidHexagonGuard(mockRootGradle);
     const legacy = '// @generated pocket-ai Windows MMKV staging\noldMmkvConfiguration()\n// @end pocket-ai Windows MMKV staging\n';
     const upgraded = ensureWindowsNativeStaging((guard + legacy).replace(/\n/gu, newline));
     expect(upgraded.replace(/\r\n/gu, '\n')).toContain(HEXAGON_GUARD);

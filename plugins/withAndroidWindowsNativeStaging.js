@@ -29,8 +29,13 @@ function ensureWindowsNativeStaging(contents) {
   if (starts !== ends || starts > 1 || start >= 0 && end < start) {
     throw new Error('Incomplete or duplicate Windows native staging block.');
   }
-  const next = start < 0 ? normalized.trimEnd() + '\n\n' + WINDOWS_NATIVE_STAGING + '\n'
-    : normalized.slice(0, start) + WINDOWS_NATIVE_STAGING + normalized.slice(end + END.length);
+  // Root plugins may evaluate :app immediately. Register before either application,
+  // including when upgrading an already generated block from the end of the file.
+  const body = start < 0 ? normalized
+    : normalized.slice(0, start) + normalized.slice(end + END.length).replace(/^\n{1,2}/u, '');
+  const boundary = /^apply[ \t]+plugin:[ \t]*['"](?:expo-root-project|com\.facebook\.react\.rootproject)['"][ \t]*;?[ \t]*$/mu.exec(body);
+  if (!boundary) throw new Error('Unsupported Android root plugin boundary for Windows native staging.');
+  const next = body.slice(0, boundary.index) + WINDOWS_NATIVE_STAGING + '\n\n' + body.slice(boundary.index);
   return contents.includes('\r\n') ? next.replace(/\n/gu, '\r\n') : next;
 }
 

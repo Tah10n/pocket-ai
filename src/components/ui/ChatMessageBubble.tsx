@@ -70,6 +70,7 @@ function areChatImageAttachmentPropsEqual(
       && attachment.localUri === nextAttachment.localUri
       && getAttachmentPreferredPreviewUri(attachment) === getAttachmentPreferredPreviewUri(nextAttachment)
       && attachment.fileName === nextAttachment.fileName
+      && ('kind' in attachment ? attachment.displayName : undefined) === ('kind' in nextAttachment ? nextAttachment.displayName : undefined)
     );
   });
 }
@@ -541,6 +542,7 @@ const ChatMessageBubbleComponent = ({
                       count: userAttachments.length,
                     };
                     if (!isImageMessageAttachment(attachment) && 'kind' in attachment) {
+                      const displayName = attachment.displayName ?? attachment.fileName;
                       return (
                         <Box
                           key={attachment.id}
@@ -550,14 +552,14 @@ const ChatMessageBubbleComponent = ({
                           accessibilityLabel={t('chat.attachments.messageFileIndexedAccessibilityLabel', {
                             ...attachmentLabelOptions,
                             kind: getAttachmentLabel(attachment),
-                            name: attachment.fileName,
+                            name: displayName,
                           })}
                           className="w-44 flex-row items-center gap-2 px-2.5 py-2"
                         >
                           <ScreenIconTile iconName={getAttachmentIconName(attachment)} tone="neutral" size="sm" iconSize="sm" className="h-8 w-8" />
                           <Box className="min-w-0 flex-1">
                             <Text colorRole="onAccent" numberOfLines={1} className="text-xs font-semibold  ">
-                              {attachment.fileName}
+                              {displayName}
                             </Text>
                             <Text colorRole="onAccent" numberOfLines={1} className="mt-0.5 text-xs leading-4  ">
                               {getAttachmentLabel(attachment)}

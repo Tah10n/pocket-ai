@@ -702,7 +702,76 @@ const NEU_DIAGNOSTIC_PATCHES = [
     ]
   }
 ];
+// DAC must honor each decode request without changing shared model defaults.
+// The existing serial context owner and graph release guard remain unchanged.
+const DAC_DECODE_THREAD_REPLACEMENTS = [
+  [
+    `    int32_t use_n_q,
+    struct codec_pcm_buffer * out_pcm,
+    int32_t hop_size,
+    int32_t sample_rate) {`,
+    `    int32_t use_n_q,
+    struct codec_pcm_buffer * out_pcm,
+    int32_t hop_size,
+    int32_t sample_rate,
+    int32_t requested_threads) {`,
+  ],
+  [
+    `    if (!codec_runtime_write_tensor(t_tok, tok_i32.data(), tok_i32.size() * sizeof(int32_t), &err)) {
+        codec_context_set_error(ctx, err);
+        return CODEC_STATUS_INTERNAL_ERROR;
+    }
+
+    const int32_t n_threads = ctx->model->n_threads > 0 ? ctx->model->n_threads : 1;`,
+    `    if (!codec_runtime_write_tensor(t_tok, tok_i32.data(), tok_i32.size() * sizeof(int32_t), &err)) {
+        codec_context_set_error(ctx, err);
+        return CODEC_STATUS_INTERNAL_ERROR;
+    }
+
+    const int32_t n_threads = requested_threads > 0 ? requested_threads
+        : (ctx->model->n_threads > 0 ? ctx->model->n_threads : 1);`,
+  ],
+  [
+    `    struct codec_decode_params params) {
+
+    (void) params;
+
+    codec_dac & dac = *static_cast<codec_dac *>(ctx->model->impl);`,
+    `    struct codec_decode_params params) {
+
+    codec_dac & dac = *static_cast<codec_dac *>(ctx->model->impl);`,
+  ],
+  [
+    `        !codec_runtime_write_tensor(t_kernel, kernel.data(), kernel.size() * sizeof(float), &err)) {
+        codec_context_set_error(ctx, err);
+        return CODEC_STATUS_INTERNAL_ERROR;
+    }
+
+    const int32_t n_threads = ctx->model->n_threads > 0 ? ctx->model->n_threads : 1;`,
+    `        !codec_runtime_write_tensor(t_kernel, kernel.data(), kernel.size() * sizeof(float), &err)) {
+        codec_context_set_error(ctx, err);
+        return CODEC_STATUS_INTERNAL_ERROR;
+    }
+
+    const int32_t n_threads = params.n_threads > 0 ? params.n_threads
+        : (ctx->model->n_threads > 0 ? ctx->model->n_threads : 1);`,
+  ],
+  [
+    `        use_n_q,
+        out_pcm,
+        std::max(1, dac.hop_size),
+        dac.sample_rate);`,
+    `        use_n_q,
+        out_pcm,
+        std::max(1, dac.hop_size),
+        dac.sample_rate,
+        params.n_threads);`,
+  ],
+];
 const SOURCE_PATCHES = [
+  { source: 'cpp/codec/src/models/dac.cpp',
+    beforeSha256: 'ce9268f76217400269cef5277591b25bd94e3e7fc66d52ca7cfe0f75ee8c528d',
+    afterSha256: 'f86e0f9835196146a78c0b52660f4ba80825c3fe9139e21914c6d86a58fd28f8', replacements: DAC_DECODE_THREAD_REPLACEMENTS },
   { source: 'cpp/tools/mtmd/mtmd-helper.cpp',
     beforeSha256: '323d595dfb719edb53c8720105f2da18abc76dade2dc3e7f38ecdf94200886d2',
     afterSha256: 'c9a29e969cbba13599e169f99b7c5a340008e11a963030f6004d67d4efac934d', replacements: AUDIO_INPUT_BOUNDS_REPLACEMENTS },

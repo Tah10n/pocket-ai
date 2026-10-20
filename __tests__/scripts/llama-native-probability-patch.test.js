@@ -37,6 +37,48 @@ describe('pinned serial sampling and template clock corrections', () => {
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it('adds the DAC decode thread repair to an earlier fully patched installation without changing other sources', () => {
+    const relative = 'cpp/codec/src/models/dac.cpp';
+    const file = path.join(root, 'node_modules/llama.rn', relative);
+    const original = fs.readFileSync(file, 'utf8');
+    patchLlamaBridge(root);
+    const patched = fs.readFileSync(file, 'utf8');
+    const others = SOURCE_PATCHES.filter(entry => entry.source !== relative).map(entry => {
+      const other = path.join(root, 'node_modules/llama.rn', entry.source);
+      return [other, fs.readFileSync(other)];
+    });
+    // A previous app install already has every existing guarded patch, but
+    // this newly registered source is still the exact upstream DAC file.
+    fs.writeFileSync(file, original);
+    expect(() => patchLlamaBridge(root, { check: true })).toThrow(/patch is missing/u);
+    expect(patchLlamaBridge(root).status).toBe('applied');
+    expect(fs.readFileSync(file, 'utf8')).toBe(patched);
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+    for (const [other, bytes] of others) expect(fs.readFileSync(other)).toEqual(bytes);
+    const patch = SOURCE_PATCHES.find(entry => entry.source === relative);
+    expect(hashSource(patched)).toBe(patch.afterSha256);
+    let reversed = patched;
+    for (const [before, after] of [...patch.replacements].reverse()) reversed = reversed.replace(after, before);
+    expect(reversed).toBe(original);
+    // No init, encoder, model default or other codec change is part of this fix.
+    expect(patched.slice(patched.indexOf('enum codec_status codec_dac_encode(')))
+      .toBe(original.slice(original.indexOf('enum codec_status codec_dac_encode(')));
+    expect(patched.slice(0, patched.indexOf('static enum codec_status codec_dac_decode_tokens_graph(')))
+      .toBe(original.slice(0, original.indexOf('static enum codec_status codec_dac_decode_tokens_graph(')));
+  });
+
+  it.each(['pristine', 'applied'])('rejects unknown %s DAC source without changing any guarded source', state => {
+    if (state === 'applied') patchLlamaBridge(root);
+    const file = path.join(root, 'node_modules/llama.rn/cpp/codec/src/models/dac.cpp');
+    fs.appendFileSync(file, '\n// unknown DAC source drift\n');
+    const before = SOURCE_PATCHES.map(entry => {
+      const guarded = path.join(root, 'node_modules/llama.rn', entry.source);
+      return [guarded, fs.readFileSync(guarded)];
+    });
+    expect(() => patchLlamaBridge(root)).toThrow(/source fingerprint mismatch: cpp\/codec\/src\/models\/dac\.cpp/u);
+    for (const [guarded, bytes] of before) expect(fs.readFileSync(guarded)).toEqual(bytes);
+  });
+
   it('bounds actual input decoder allocations and rejects truncated/nonfinite PCM before bitmap publication', () => {
     patchLlamaBridge(root);
     const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn/cpp/tools/mtmd/mtmd-helper.cpp'), 'utf8');

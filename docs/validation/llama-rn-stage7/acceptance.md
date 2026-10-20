@@ -1,5 +1,30 @@
 # Stage 7 audio and reference-voice acceptance
 
+## Current follow-up status
+
+The [follow-up record](acceptance-followup.json) separates each source/APK and verification
+scope. The local release gate on `88125ab` passed 303 Jest suites / 7,088 tests,
+Rust 68 unit plus 3 integration tests, TypeScript, lint and native configuration.
+Stage 7 remains incomplete; memory admission and runtime limits were not waived.
+Import remains bounded at 25 MiB; microphone preparation keeps 4 MiB/30 seconds,
+and reference preparation keeps 2 MiB/8 seconds with native admission retained.
+
+Managed WAV/MP3 import, cancellation rollback and cold byte/name preservation passed
+through the storage harness on `2a40118`; ordinary picker/Attach/Send and inference
+were not exercised by that harness. On `0663b5b`, four Qwen reference/no-reference/cold
+clips passed fixed-target ASR. Both paired outputs ranked closer to their own reference
+than to the other synthetic reference; this is limited conditioning evidence, not an
+identity or naturalness threshold. On `5e926cd`, ordinary reference import retained the
+editor, consent and Save worked, and Stop → drain → Delete followed by a cold launch
+confirmed that the deleted voice did not return. These remain distinct tested builds.
+
+The `3b0e67e` ARM64 build and hash-matched installation passed. Initial automated smoke
+failed after installation; subsequent manual home inspection and a verified cold launch
+passed. Ordinary setup downloaded recommended Oute assets and accepted the 44-character
+target, but USB disconnected before synthesis or microphone capture. New physical Oute
+latency/playback/content, microphone flows and imported-audio Send/cold checks are
+**not run**. Setup and build success do not establish those outcomes.
+
 ## Follow-up frontend diagnostic
 
 The [Neu comparison on source `3b0e67e`](neu-frontend-diagnostic-3b0e67e.json) records
@@ -13,6 +38,24 @@ This is diagnostic evidence, not production phonemizer acceptance. It does not i
 reference versus target phonemes or establish a specific upstream defect. Stage 7 remains
 incomplete. The record binds the exact tested source, APK, fixture and audio identities.
 The phone results below retain their original identities and scope.
+
+## Crossed frontend diagnostic
+
+The [crossed Neu comparison on source `88125ab`](neu-frontend-diagnostic-88125ab.json)
+separates reference and target inputs for the same fixed English case. Canonical reference
+phonemes with production target phonemes failed ASR (WER 0.875; 5.74 seconds).
+Recorded canonical target phonemes with the unchanged builtin Jo reference passed
+(WER 0; 2.28 seconds). Both runs ended on expected speech-end, decoded successfully,
+restored the original chat profile and were followed by a completed chat response.
+
+For this case, target phonemes were sufficient; changing reference data alone was not.
+The successful arm bypasses production target conversion, so this does not establish a
+production frontend fix, general voice quality or a specific upstream defect. The record
+keeps its exact source/APK identities separate from the preceding combined-input run.
+Stage 7 remains incomplete.
+The machine record includes reproduction through the existing isolated QA build and
+**QA Stage 7 → QA diagnostic frontend A/B (not acceptance)** controls, including
+the two clip-copy/continue gates and independent content checks.
 
 ## Historical phone acceptance
 

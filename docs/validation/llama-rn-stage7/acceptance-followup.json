@@ -1,0 +1,743 @@
+{
+  "schemaVersion": 1,
+  "status": "partial",
+  "stageComplete": false,
+  "limitsWaived": false,
+  "reportIdentity": "Resolve the report commit from Git history; it is distinct from all tested source and APK identities.",
+  "scope": "Source-bound follow-up results. Earlier results are not inherited by newer source or a different device.",
+  "latestLocalVerification": {
+    "status": "passed",
+    "publicSourceSha": "88125ab30b76cffa7bbe659669c63f5e0f18c93b",
+    "publicAppTree": "19ac782db57b4b43452a1616b913e5419d59e4fb",
+    "command": "npm run verify:release",
+    "jestSuites": 303,
+    "jestTests": 7088,
+    "jestSeconds": 263.424,
+    "rustUnitTests": 68,
+    "rustIntegrationTests": 3,
+    "otherChecks": [
+      "TypeScript",
+      "lint",
+      "native configuration"
+    ],
+    "scope": "Local release gate on this exact source; hosted CI and native acceptance are separate."
+  },
+  "focusedVerification": {
+    "publicSourceSha": "88125ab30b76cffa7bbe659669c63f5e0f18c93b",
+    "suites": 6,
+    "tests": 352,
+    "status": "passed"
+  },
+  "testedBuilds": [
+    {
+      "id": "x86-2a40118-import",
+      "publicSourceSha": "2a401183b79992896e70c81c368e6a7f12feef99",
+      "publicAppTree": "12ca56c7f9ea6ea5ff71b25a54105132b7d42056",
+      "abi": "x86_64",
+      "deviceClass": "emulator",
+      "apkSha256": "595dbf1a3e5aa18c03f4f8d884b1371002fd2f830993b7f9863854790509ff78",
+      "apkBytes": 92284902,
+      "installedApkSha256": "595dbf1a3e5aa18c03f4f8d884b1371002fd2f830993b7f9863854790509ff78",
+      "buildInputDigest": "dc2d32ae36a79652aea8da622e2478d91094e3e4ba726bc23244735c768d1894",
+      "normalizedSourcePatchSha256": "dcfdb868e06a5a9d9f144cccb3bfc5023726d7d8638bc9912cd952c941c46a5d",
+      "compile": "passed",
+      "install": "passed"
+    },
+    {
+      "id": "x86-0663b5b",
+      "publicSourceSha": "0663b5b259addab381d7d49930d978027b311260",
+      "publicAppTree": "1e8c06413eb638c21edfc750de3e9e544215f66e",
+      "abi": "x86_64",
+      "deviceClass": "emulator",
+      "apkSha256": "7d29c37eba4d632a965ef81b87e51c846f7600c591e840677c6f15c7b52cc84d",
+      "apkBytes": 92289758,
+      "installedApkSha256": "7d29c37eba4d632a965ef81b87e51c846f7600c591e840677c6f15c7b52cc84d",
+      "buildInputDigest": "db9d5fe396f9515e914ac2516f7a7e999f8038f2c05cc66508c11691fa2bb94b",
+      "normalizedSourcePatchSha256": "e0e5e2409b7444715ef04f6eba1d97346281fbad6e6a349a0e115fc9d12d048d",
+      "compile": "passed",
+      "install": "passed"
+    },
+    {
+      "id": "x86-5e926cd",
+      "publicSourceSha": "5e926cd315c5c5a98e7325a901987382f4bc8022",
+      "publicAppTree": "b8e4b2043376a14a5d33d9d2089ee9d27013caf8",
+      "abi": "x86_64",
+      "deviceClass": "emulator",
+      "apkSha256": "18d8d4394ec7054dfee1cea87fda77c9ca9e2ef51cbbdfcb5eef2e44c7bf68e2",
+      "apkBytes": 92293190,
+      "installedApkSha256": "18d8d4394ec7054dfee1cea87fda77c9ca9e2ef51cbbdfcb5eef2e44c7bf68e2",
+      "buildInputDigest": "2b3027da9494013db2346a969177445298f5a8d6d7f0bb89165f72fb22b05340",
+      "normalizedSourcePatchSha256": "16edc66efa622bf8db500b3fc902fcc03fe46b57c81a2b6072d60f3e73098f41",
+      "compile": "passed",
+      "install": "passed"
+    },
+    {
+      "id": "arm64-3b0e67e",
+      "publicSourceSha": "3b0e67e458e219a94bc57e0e41f07f0d33a922c0",
+      "publicAppTree": "330c268a1ebe0aca1e7a083cfec8172602074b29",
+      "abi": "arm64-v8a",
+      "deviceClass": "physical phone",
+      "apkSha256": "1fa2d0ac30794bd6a228e832f93a0e8685689199862382591b8c9aa01146583e",
+      "apkBytes": 145823281,
+      "installedApkSha256": "1fa2d0ac30794bd6a228e832f93a0e8685689199862382591b8c9aa01146583e",
+      "buildInputDigest": "dc28d7fd121fb9e2e5932d214355908b6d8cad8b84a7ec1079b0a3d1f0b60dd5",
+      "compile": "passed",
+      "install": "passed",
+      "normalizedRuntimePatchSha256": "3e9f1d1f7098e46a8d92b5d3592a3d67ba1330a501137b42915c8c3ddc27391e"
+    }
+  ],
+  "cases": [
+    {
+      "id": "managed-audio-import",
+      "buildId": "x86-2a40118-import",
+      "status": "partial",
+      "durationMs": 95480,
+      "storageLifecycle": "passed",
+      "fixtures": [
+        {
+          "name": "over-four-MiB.wav",
+          "sizeBytes": 4608044,
+          "sha256": "b448e010e4db15f1a493b2b5089821becf924176ef25b400f8ec3167b74715b8"
+        },
+        {
+          "name": "forty-seconds.wav",
+          "sizeBytes": 1280044,
+          "sha256": "a2933ba8091e217fdb57a52610755a774508a6a0eefd002347832777b22f8780"
+        },
+        {
+          "name": "legacy-import.mp3",
+          "sizeBytes": 641664,
+          "sha256": "eeaa46287d6563749b1a0c46149836b9552900fc9c32c8f326535c817309fc49"
+        }
+      ],
+      "importChecks": [
+        "real_managed_import",
+        "send_materialization_only",
+        "durable_chat_record",
+        "owner_cancel_copy_rollback"
+      ],
+      "coldChecks": [
+        "cold_process_hydration",
+        "cold_names_formats_sizes_hashes",
+        "owned_copy_thread_cleanup"
+      ],
+      "retainedByteIdentity": "passed",
+      "cancellationCopyRollback": "passed",
+      "ownedCopyAndThreadCleanup": "passed",
+      "picker": "not_run",
+      "preview": "not_run",
+      "uiAttach": "not_run",
+      "uiSend": "not_run",
+      "nativeDecode": "not_run",
+      "inference": "not_run",
+      "scope": "Direct storage import, send materialization, durable record and real cold hydration only.",
+      "policy": {
+        "importMaxBytes": 26214400,
+        "importContentReadsMaxBytes": 65536,
+        "importAcceptance": "Validate actual copied WAV/MP3 content before publishing the managed draft; preserve original bytes and display name.",
+        "microphonePreparation": {
+          "maxSourceBytes": 4194304,
+          "maxSeconds": 30
+        },
+        "referencePreparation": {
+          "maxSourceBytes": 2097152,
+          "maxSeconds": 8
+        },
+        "nativePreparationAdmissionBytes": 67108864,
+        "nativePreparationBounds": "Android and iOS retain native preparation rate/channel/duration/byte bounds; iOS device execution was not run on this Windows host.",
+        "downstreamDecode": "Separate model-input admission reserves decoder memory; native mono float allocation is bounded to 8 Mi samples. Storage acceptance is not model decode acceptance."
+      },
+      "regressionEvidence": {
+        "scope": "Historical red-first implementation checks through the real TypeScript storage/preparation code; only filesystem/native boundaries mocked. Not device inference.",
+        "red": {
+          "observedAt": "2026-10-20T09:30:34.751Z",
+          "suite": "__tests__/services/AudioImportCompatibility.test.ts",
+          "failed": 5,
+          "passed": 2,
+          "seconds": 7.737,
+          "failedTests": [
+            "imports over-four-MiB.wav unchanged, sends and reopens with its original name",
+            "imports forty-seconds.wav unchanged, sends and reopens with its original name",
+            "imports legacy-import.mp3 unchanged, sends and reopens with its original name",
+            "rejects renamed bytes and corrupt/truncated containers, cleaning the new copy",
+            "does not publish a copy after Stop or owner change during validation"
+          ],
+          "observedFailures": [
+            "4 MiB import rejected as oversized",
+            "40-second WAV and MP3 rejected by short preparation",
+            "invalid-container error mapping mismatch",
+            "owner cancellation masked by preparation failure"
+          ]
+        },
+        "finalTargetedGreen": {
+          "observedAt": "2026-10-20T09:41:43.145Z",
+          "suites": 6,
+          "tests": 153,
+          "seconds": 10.566,
+          "status": "passed",
+          "files": [
+            "__tests__/services/AudioImportCompatibility.test.ts",
+            "__tests__/services/AudioPreparationService.test.ts",
+            "__tests__/services/ChatAttachmentStorageService.test.ts",
+            "__tests__/services/AudioRecordingService.test.ts",
+            "__tests__/hooks/useChatMediaAttachments.test.tsx",
+            "__tests__/ui/AudioRecordingSheet.test.tsx"
+          ]
+        },
+        "currentGate": "The separate latestLocalVerification covers the current source; historical targeted counts do not identify a new native run."
+      }
+    },
+    {
+      "id": "reference-0663",
+      "buildId": "x86-0663b5b",
+      "status": "passed",
+      "nativeLifecycle": "passed",
+      "runnerFinalProvenance": "passed",
+      "profileId": "qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0",
+      "references": [
+        {
+          "clipId": "r1-george",
+          "sha256": "2823353c2b52de60e70304abd2c0a3935ec6f21ab1886a78c158a6ec0bb74d7d",
+          "fileBytes": 151462,
+          "sampleRate": 24000,
+          "sampleCount": 75708,
+          "channels": 1,
+          "bitsPerSample": 16,
+          "durationMs": 3154.5
+        },
+        {
+          "clipId": "r2-zira",
+          "sha256": "105a8ff4e24d4d6539b84ab452bf8e63931de1fbc89fc9d692ff9209e854c6b7",
+          "fileBytes": 154822,
+          "sampleRate": 24000,
+          "sampleCount": 77388,
+          "channels": 1,
+          "bitsPerSample": 16,
+          "durationMs": 3224.5
+        }
+      ],
+      "clips": [
+        {
+          "id": "qwen-r1-eager",
+          "nativeLifecycle": "passed",
+          "sha256": "d59367e8c2945fdebde599f368d6823148f3faa71cab904731e0f84ad6695454",
+          "bytes": 153644,
+          "sampleRate": 24000,
+          "sampleCount": 76800,
+          "channels": 1,
+          "bitsPerSample": 16,
+          "durationMs": 3200.0,
+          "content": {
+            "status": "passed",
+            "wordErrors": 0,
+            "normalizedWer": 0.0,
+            "referenceWords": 8
+          },
+          "profileRestored": true,
+          "operations": [
+            "vocoder_init",
+            "speaker_create",
+            "speaker_bake",
+            "formatter",
+            "prompt_prepare",
+            "completion",
+            "decode",
+            "speaker_release",
+            "vocoder_release"
+          ],
+          "playback": {
+            "status": "not_run",
+            "reason": "Harness proves synthesis and export, not observed audible playback."
+          },
+          "speakerRows": 1,
+          "speakerBaked": true
+        },
+        {
+          "id": "qwen-r2-lazy",
+          "nativeLifecycle": "passed",
+          "sha256": "36a8ad0f34f48ba2b214b11f53e85bd56251df62b22cb72f7c7121efbc34cf5d",
+          "bytes": 134444,
+          "sampleRate": 24000,
+          "sampleCount": 67200,
+          "channels": 1,
+          "bitsPerSample": 16,
+          "durationMs": 2800.0,
+          "content": {
+            "status": "passed",
+            "wordErrors": 0,
+            "normalizedWer": 0.0,
+            "referenceWords": 8
+          },
+          "profileRestored": true,
+          "operations": [
+            "vocoder_init",
+            "speaker_create",
+            "formatter",
+            "prompt_prepare",
+            "completion",
+            "decode",
+            "speaker_release",
+            "vocoder_release"
+          ],
+          "playback": {
+            "status": "not_run",
+            "reason": "Harness proves synthesis and export, not observed audible playback."
+          },
+          "speakerRows": 1,
+          "speakerBaked": true
+        },
+        {
+          "id": "qwen-no-reference",
+          "nativeLifecycle": "passed",
+          "sha256": "b6982510009eee97ef34e3d608132f02f3b12cd06936aa2bf02516b3e79caa91",
+          "bytes": 165164,
+          "sampleRate": 24000,
+          "sampleCount": 82560,
+          "channels": 1,
+          "bitsPerSample": 16,
+          "durationMs": 3440.0,
+          "content": {
+            "status": "passed",
+            "wordErrors": 0,
+            "normalizedWer": 0.0,
+            "referenceWords": 8
+          },
+          "profileRestored": true,
+          "operations": [
+            "vocoder_init",
+            "formatter",
+            "prompt_prepare",
+            "completion",
+            "decode",
+            "vocoder_release"
+          ],
+          "playback": {
+            "status": "not_run",
+            "reason": "Harness proves synthesis and export, not observed audible playback."
+          }
+        },
+        {
+          "id": "qwen-saved-cold",
+          "nativeLifecycle": "passed",
+          "sha256": "d59367e8c2945fdebde599f368d6823148f3faa71cab904731e0f84ad6695454",
+          "bytes": 153644,
+          "sampleRate": 24000,
+          "sampleCount": 76800,
+          "channels": 1,
+          "bitsPerSample": 16,
+          "durationMs": 3200.0,
+          "content": {
+            "status": "passed",
+            "wordErrors": 0,
+            "normalizedWer": 0.0,
+            "referenceWords": 8
+          },
+          "profileRestored": true,
+          "operations": [
+            "vocoder_init",
+            "speaker_create",
+            "speaker_bake",
+            "formatter",
+            "prompt_prepare",
+            "completion",
+            "decode",
+            "speaker_release",
+            "vocoder_release"
+          ],
+          "playback": {
+            "status": "not_run",
+            "reason": "Harness proves synthesis and export, not observed audible playback."
+          },
+          "speakerRows": 1,
+          "speakerBaked": true
+        }
+      ],
+      "chatAfter": {
+        "status": "passed",
+        "profileRestored": true,
+        "callbacks": 30,
+        "chatUnchanged": true,
+        "baseAndAdapterFixture": "../llama-rn-stage3/lora-fixture.json",
+        "baseSha256": "bc64cce8e1c11e4ed870633b557e04af718249c817c4cf8a6784116144ec3e28",
+        "adapterSha256": "4c171a4599f159dc85dd904ea5fd73e91db11e1052e9106783fdd044b521b653",
+        "adapterScale": 0.5,
+        "contextSize": 512,
+        "cpuThreads": 4,
+        "gpuLayers": 0,
+        "parallelSlots": 1,
+        "kvCacheType": "f16",
+        "prompt": "Write one short sentence about a friendly dog.",
+        "maxGeneratedTokens": 32,
+        "temperature": 0,
+        "nonemptyAnswer": true,
+        "completionDrained": true,
+        "identityCheck": "Harness required expected base model ID and equality of the effective load profile, including LoRA identity and scale, before and after TTS and after the next completed answer.",
+        "answerTextRetained": false,
+        "nativeTokenCountersRetained": false
+      },
+      "coldSavedVoice": {
+        "coldAbsenceAfterDeletion": "not_run",
+        "deleteAfterSynthesis": "passed",
+        "forceStopAndReopen": true,
+        "selectedAfterHydration": true,
+        "selectedAfterDelete": false,
+        "handlesPersisted": false,
+        "status": "passed",
+        "voiceCountAfterDelete": 0
+      },
+      "evaluation": {
+        "pythonVersion": "3.12.10",
+        "fullModelHashesVerified": true,
+        "fixedTarget": "The quiet river flows beside the old bridge.",
+        "modelAssets": [
+          {
+            "repository": "Systran/faster-whisper-tiny.en",
+            "revision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+            "filename": "model.bin",
+            "bytes": 75537502,
+            "sha256": "1a5afae06a4db91c975c9a9d78be5cc110ee4ea022ad57d55492e4550e936b2a",
+            "kind": "asr"
+          },
+          {
+            "repository": "Systran/faster-whisper-tiny.en",
+            "revision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+            "filename": "config.json",
+            "bytes": 2317,
+            "sha256": "14b1b421a90349bc551b881461426b561a874049cb9e4c4864f2ca384f6a7cc5",
+            "kind": "asr"
+          },
+          {
+            "repository": "Systran/faster-whisper-tiny.en",
+            "revision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+            "filename": "tokenizer.json",
+            "bytes": 2128466,
+            "sha256": "929c5252409436dce1b38a75d1abbcb5e132d170d8e324e4e04ed915fa2d22df",
+            "kind": "asr"
+          },
+          {
+            "repository": "Systran/faster-whisper-tiny.en",
+            "revision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+            "filename": "vocabulary.txt",
+            "bytes": 422309,
+            "sha256": "ff77588746d3a2595d32ab5b69ffd7b95ce2441ac57533cb66fc3eb575a115cf",
+            "kind": "asr"
+          },
+          {
+            "repository": "Wespeaker/wespeaker-voxceleb-resnet34",
+            "revision": "ff1ac5bca8ef11e90662b879aa923979e0bd277b",
+            "filename": "voxceleb_resnet34.onnx",
+            "bytes": 26534127,
+            "sha256": "9fea6516d7ad6bf0a76c7689f5a49b65d330fad6dde96c91bb4435ffbfe056a1",
+            "kind": "speaker"
+          }
+        ],
+        "referenceWords": 8,
+        "fullAudioHashesVerifiedBeforeAndAfter": true,
+        "conditioning": {
+          "method": "independent WeSpeaker VoxCeleb ResNet34 ONNX; 256 dimensions; unit-vector raw cosine; Kaldi 80-bin hamming fbank + temporal mean subtraction",
+          "fixedTarget": "The quiet river flows beside the old bridge.",
+          "scores": {
+            "r1ToR2": 0.4252612590789795,
+            "outputR1ToR1": 0.622366189956665,
+            "outputR1ToR2": 0.2168414443731308,
+            "outputR2ToR1": 0.3556132912635803,
+            "outputR2ToR2": 0.6844496130943298,
+            "outputR1ToOutputR2": 0.2000616192817688
+          },
+          "margins": {
+            "outputR1OwnMinusOther": 0.40552474558353424,
+            "outputR2OwnMinusOther": 0.3288363218307495
+          },
+          "minimumOwnReferenceMargin": 0.3288363218307495,
+          "bothOwnReferencesRankHigher": true,
+          "weakOrReviewRequired": false,
+          "decision": "passed",
+          "identityThreshold": null,
+          "additionalDescriptiveScores": {
+            "noReferenceToR1": 0.17172333598136902,
+            "noReferenceToR2": 0.15790632367134094,
+            "savedColdToR1": 0.622366189956665,
+            "savedColdToR2": 0.2168414443731308
+          },
+          "additionalScoresHaveAcceptanceThreshold": false,
+          "limitation": "two synthetic voices and one target only; eager/lazy modes and stochastic generation can confound a single pair; no identity claim or calibrated universal threshold"
+        },
+        "maxNormalizedWer": 0.2,
+        "modelManifestSha256": "a540ff0ae688e6f67a639543054d2dcd48b1de072d34fc4c398cdbece5f8eae7",
+        "scope": "Four clips exported from the frozen 0663 reference run; no full Stage 7 or subsequent-source acceptance.",
+        "evaluatorSha256": "16bc115e87c708ddef5969ba676aafb3d2406f8be04cddd0fe7852f227a67653",
+        "versions": {
+          "faster-whisper": "1.2.1",
+          "onnxruntime": "1.31.0",
+          "kaldi-native-fbank": "1.22.3",
+          "ctranslate2": "4.8.3",
+          "numpy": "2.5.4"
+        },
+        "humanListening": "not_run",
+        "status": "passed"
+      },
+      "scope": "Frozen 0663 source: native reference and cold saved-voice lifecycle, exported clips, independent content and paired conditioning only. Does not cover ordinary UI Stop/Delete or audible playback.",
+      "modelPins": {
+        "id": "qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0",
+        "repository": "BricksDisplay/Qwen3-TTS-12Hz-0.6B-GGUF",
+        "revision": "f585ae3ca470e59ef9405d6317a6f11bc6c7ca1f",
+        "backbone": {
+          "filename": "qwen3-tts-0.6b-q4_k_m.gguf",
+          "bytes": 396700064,
+          "sha256": "e3ba7aed5d7147dea8745da98218f2a57d5ca5b4ee408ac2146bead0b4c62f30"
+        },
+        "codec": {
+          "filename": "codec-q8_0.gguf",
+          "bytes": 1278191520,
+          "sha256": "c10e65ef981e8452c841b008892f35e1dca9cf18abd47843acad4316d5bb9b8c"
+        }
+      },
+      "environment": {
+        "systemImage": "android-36.1 Google APIs Play Store x86_64",
+        "configuredRamMiB": 16384,
+        "observedMemoryKiB": {
+          "total": 16376496,
+          "available": 14052440
+        },
+        "backend": "cpu",
+        "gpuLayers": 0,
+        "cpuThreads": 4,
+        "memoryAdmission": "Normal TTS admission retained; configured emulator capacity and an observed memory snapshot are not measured synthesis peak memory.",
+        "ttsEstimatedPeakBytes": 8837808576,
+        "estimateConfidence": "low; policy estimate, not measured"
+      }
+    },
+    {
+      "publicSourceSha": "5e926cd315c5c5a98e7325a901987382f4bc8022",
+      "status": "passed",
+      "reason": "Ordinary DocumentsUI return retained the editor, prepared the pinned R1 sample, and allowed consent then Save.",
+      "execution": "executed",
+      "id": "ordinary-reference-picker-after-handoff-repair",
+      "buildId": "x86-5e926cd",
+      "preparedDurationDisplaySeconds": 3.2,
+      "editorRetained": true,
+      "consentAction": "performed",
+      "save": "passed",
+      "scope": "Picker/preparation/consent/Save only; cold deletion is reported separately."
+    },
+    {
+      "id": "ordinary-stop-drain-delete",
+      "reason": "Ordinary active synthesis Stop settled to stopped/cancelled, Delete removed the saved card, and explicit cold restart confirmed the deleted voice and saved/delete controls were absent.",
+      "status": "passed",
+      "execution": "executed",
+      "buildId": "x86-5e926cd",
+      "activePhase": "synthesizing",
+      "speakerCreateMs": 209,
+      "speakerBakeMs": 10768,
+      "afterStop": {
+        "phase": "stopped",
+        "errorCode": "cancelled",
+        "duration": 0
+      },
+      "afterDelete": {
+        "savedCardPresent": false,
+        "phase": null,
+        "errorCode": null
+      },
+      "coldAbsence": {
+        "status": "passed",
+        "launchState": "COLD",
+        "savedCardPresent": false,
+        "savedNamePresent": false,
+        "createSpeechEnabled": false,
+        "selectedSummary": "My sample",
+        "noLateClipBeforeForceStop": true,
+        "borrowedReferenceUnchanged": true,
+        "editorClosedAfterVerification": true
+      },
+      "scope": "Ordinary UI Stop/Delete and deleted-voice cold absence on this APK. Saved-voice cold handle reconstruction and synthesis are separate historical 0663 acceptance; no native handle introspection inferred."
+    },
+    {
+      "id": "physical-phone-3b0e67e-preparation",
+      "buildId": "arm64-3b0e67e",
+      "status": "partial",
+      "manualHome": "passed",
+      "coldLaunch": "passed",
+      "recommendedOuteDownload": "passed_ordinary_setup",
+      "inputCharacters": 44,
+      "synthesis": "not_run",
+      "recording": "not_run",
+      "reason": "USB disconnected before synthesis or microphone capture. Download, text entry and launch checks are preparation only.",
+      "latency": "not_run",
+      "independentContent": "not_run",
+      "modelInputSeeding": "failed_transport; registry_adoption_not_run",
+      "buildAndLaunch": {
+        "buildSeconds": 876,
+        "executedTasks": 615,
+        "initialAutomatedSmoke": "failed_after_install",
+        "coldLaunch": {
+          "status": "passed",
+          "processAbsentBeforeStart": true,
+          "launchState": "COLD",
+          "totalTimeMs": 1788,
+          "persistenceVerification": "pending"
+        }
+      },
+      "ordinaryImportPickerAttachSend": "not_run"
+    }
+  ],
+  "frontendDiagnostics": {
+    "combinedInputs": "neu-frontend-diagnostic-3b0e67e.json",
+    "crossedInputs": "neu-frontend-diagnostic-88125ab.json",
+    "productionFrontendAcceptance": "not_established",
+    "finding": "For the fixed English Jo case, recorded canonical target phonemes pass content checks with the unchanged builtin reference. Canonical reference data alone does not. The successful target arm bypasses production conversion.",
+    "upstreamDefectEstablished": false
+  },
+  "historicalFailures": [
+    {
+      "publicSourceSha": "2a401183b79992896e70c81c368e6a7f12feef99",
+      "case": "earlier reference run",
+      "status": "failed_final_provenance",
+      "reason": "Source changed during the run; native completion did not establish final acceptance. Frozen reference results are recorded separately on 0663b5b."
+    },
+    {
+      "publicSourceSha": "f7fc664cce89c92c2f503c6fac7a2b1c38092f8e",
+      "case": "ARM64 build",
+      "status": "failed",
+      "reason": "Worklets Ninja relative dependency path resolution failure."
+    },
+    {
+      "publicSourceSha": "e4dc396f100066980652a42c1b9c2f43d75c0328",
+      "case": "ARM64 build",
+      "status": "failed",
+      "reason": "Reanimated Ninja mkdir exceeded Windows path budget."
+    },
+    {
+      "publicSourceSha": "c22b40f0ca3a2836ef28755627c5508401687fe0",
+      "case": "ARM64 build",
+      "status": "failed",
+      "reason": "llama.rn hexagon_opencl target Ninja mkdir exceeded path budget; build/install not accepted on this source."
+    },
+    {
+      "publicSourceSha": "e4dc396f100066980652a42c1b9c2f43d75c0328",
+      "case": "hosted API 33 native release",
+      "status": "failed",
+      "jobUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39445542350/job/118710839891",
+      "reason": "APK build/install and six UI scenarios passed; native-glass-theme-matrix failed restoring Android theme preferences. Nested cause unresolved; no OOM or device-loss conclusion."
+    }
+  ],
+  "windowsBuildRepair": {
+    "publicSourceSha": "3b0e67e458e219a94bc57e0e41f07f0d33a922c0",
+    "freshAgpGraph": {
+      "cmakeObjectPathMax": 217,
+      "objectCount": 2404,
+      "targetCount": 14,
+      "maxObjectPathCharacters": 248,
+      "maxParentPathCharacters": 236,
+      "sameTargetSourcesAndLibraries": true,
+      "hexagonAndOpenclDefinitionsPreserved": true
+    },
+    "actualArm64Build": "passed",
+    "scope": "Windows path staging and CMake object path budget; no inference claim from compilation."
+  },
+  "remainingUnverified": [
+    "Physical-phone ordinary imported WAV/MP3 picker, Attach, Send, inference and cold persistence on the follow-up APK.",
+    "Physical-phone ordinary microphone recording, Stop/Attach, cancellation, 30-second cap, Send and cold persistence.",
+    "Follow-up Oute first/repeat synthesis, automatic playback, stage latency and independent content checks.",
+    "Production Neu frontend conversion for arbitrary text; canonical target diagnostics do not close this gap.",
+    "Fresh application-scoped privacy observation for the outstanding physical audio flows."
+  ],
+  "limitations": [
+    "Reference conditioning is a two-synthetic-voice, one-text paired comparison; no calibrated identity or naturalness claim.",
+    "The reference harness proves synthesis/export and native lifecycle, not observed audible playback.",
+    "Stop/drain/Delete is distinct from deleting a native speaker while synthesis is active.",
+    "The installed phone build is 3b0e67e; the crossed diagnostic build is 88125ab on x86.",
+    "No current hosted CI success is inferred from a local release gate."
+  ],
+  "hostedCi": {
+    "currentSnapshot": {
+      "publicSourceSha": "88125ab30b76cffa7bbe659669c63f5e0f18c93b",
+      "observedAt": "2026-10-20T17:09:00.695Z",
+      "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39460352492",
+      "jobs": [
+        {
+          "name": "native scope",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "deterministic",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "ios native release",
+          "status": "in_progress",
+          "conclusion": null
+        },
+        {
+          "name": "android native release (API 32)",
+          "status": "in_progress",
+          "conclusion": null
+        },
+        {
+          "name": "android native release (API 34)",
+          "status": "in_progress",
+          "conclusion": null
+        },
+        {
+          "name": "android native release (API 33)",
+          "status": "in_progress",
+          "conclusion": null
+        },
+        {
+          "name": "android native release (API 35)",
+          "status": "in_progress",
+          "conclusion": null
+        },
+        {
+          "name": "android (qa)",
+          "status": "completed",
+          "conclusion": "skipped"
+        }
+      ],
+      "otherChecksObservedAt": "2026-10-20T17:03:37.031Z",
+      "otherChecks": [
+        {
+          "name": "Dependency Review",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39460352644"
+        },
+        {
+          "name": "PR Title",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39460352455"
+        }
+      ],
+      "scope": "Snapshot only; the current native jobs had not completed at observation."
+    },
+    "completedHistorical": [
+      {
+        "publicSourceSha": "5e926cd315c5c5a98e7325a901987382f4bc8022",
+        "status": "passed",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39433934882"
+      },
+      {
+        "publicSourceSha": "f7fc664cce89c92c2f503c6fac7a2b1c38092f8e",
+        "status": "passed",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39440730285"
+      }
+    ],
+    "unavailableHistorical": {
+      "observedAt": "2026-10-20T17:12:06.703Z",
+      "runUrls": [
+        "https://github.com/Tah10n/pocket-ai/actions/runs/37497353268",
+        "https://github.com/Tah10n/pocket-ai/actions/runs/37509527950"
+      ],
+      "apiResult": 404,
+      "pullRequestFilteredFirstPageSources": [
+        "8338889bd4d579e6da92f26ceab08eff53ae45de",
+        "379866fbfa04918e33beb8cc8aeb8b40bb35523e"
+      ],
+      "filteredResults": "empty",
+      "interpretation": "Unavailable through the current GitHub API lookup; this does not establish that runs never executed or passed."
+    }
+  }
+}

@@ -1,0 +1,228 @@
+{
+  "schemaVersion": 1,
+  "status": "diagnostic_complete",
+  "diagnosticOnly": true,
+  "productionAcceptance": "not_established",
+  "stageComplete": false,
+  "reportIdentity": "The report commit is resolved from Git history and is distinct from the tested source.",
+  "testedBuild": {
+    "publicSourceSha": "88125ab30b76cffa7bbe659669c63f5e0f18c93b",
+    "publicAppTree": "19ac782db57b4b43452a1616b913e5419d59e4fb",
+    "abi": "x86_64",
+    "deviceClass": "Android emulator",
+    "deviceApi": 36,
+    "runtime": "llama.rn 0.13.0-rc.3",
+    "backend": "cpu",
+    "apkSha256": "c44151cfde34f3660882415a79c4acda0d50b73a064b48b4529e5881591f132c",
+    "apkBytes": 92329014,
+    "installedApkHashMatched": true,
+    "buildInputDigest": "1af501f227091b26ec44112a1c27fa994c542b9580f0c6505440ea3fbe36535c",
+    "compile": "passed",
+    "install": "passed",
+    "smoke": "passed",
+    "normalizedRuntimePatchSha256": "3e9f1d1f7098e46a8d92b5d3592a3d67ba1330a501137b42915c8c3ddc27391e",
+    "sourceUnchanged": true
+  },
+  "configuration": {
+    "profileId": "neutts-nano-q4_k_m-neucodec-q8_0",
+    "modelAndCodecPins": "tts-fixtures.json",
+    "repository": "BricksDisplay/NeuTTS-Nano-GGUF",
+    "revision": "857e272b903daf826606567c9ceaef574bfa793b",
+    "backbone": {
+      "filename": "neutts-nano-q4_k_m.gguf",
+      "bytes": 209571776,
+      "sha256": "14049f27cd9fac6bc703d06bbfd2580ec6fdc2b23780533bb416ddaf236d993f"
+    },
+    "codec": {
+      "filename": "codec-q8_0.gguf",
+      "bytes": 341719168,
+      "sha256": "9972d7cabd38582f0425ba898abffc6f92166154ce046a4f392654dbdad5fafa"
+    },
+    "frontendFixture": "neu-canonical-frontend-diagnostic.json",
+    "frontendFixtureSha256": "94017f55d9679de62837621afd7e9367660708e34cf9d4d9e1435fd5cbb97e58",
+    "voice": "jo",
+    "target": "The quiet river flows beside the old bridge.",
+    "cpuThreads": 4,
+    "seed": 42,
+    "sampleRate": 24000,
+    "maximumAudioSeconds": 16,
+    "builtinCodeCount": 653,
+    "samplerAndOutputBoundsChanged": false,
+    "memoryAdmissionWaived": false
+  },
+  "comparison": [
+    {
+      "id": "neu-jo-canonical-reference",
+      "referenceFrontend": "canonical_fixture",
+      "targetFrontend": "production_js",
+      "productionG2POutputUsed": true,
+      "sampleCount": 137760,
+      "durationMs": 5740.0,
+      "wavBytes": 275564,
+      "wavSha256": "3c50b09a2268c815db5b01b802016ff0058a70f5feb8cabb4ae94d442483a037",
+      "termination": {
+        "schemaVersion": 1,
+        "sampledTokenCount": 288,
+        "audioTokenCount": 287,
+        "stopTokenKind": "expected_speech_end"
+      },
+      "contentPass": false,
+      "normalizedWordErrorRate": 0.875,
+      "transcript": "The quiet rib flows over. The quiet rib flows beside the wheeze bridge.",
+      "fullAudioHashesVerifiedBeforeAndAfter": true,
+      "evaluatorReportSha256": "ad670d868b42c7a694d04a2c7ebb200c5b0e6817b523650cb9a9049eb07ae00a",
+      "referenceConditioning": {
+        "decision": "not_run",
+        "reason": "paired_reference_outputs_not_selected",
+        "identityThreshold": null
+      },
+      "sampleRate": 24000,
+      "nativeLifecycle": {
+        "operations": [
+          "vocoder_init",
+          "phonemizer_module_init",
+          "phonemizer_conversion",
+          "phonemizer",
+          "formatter",
+          "prompt_prepare",
+          "completion",
+          "decode",
+          "vocoder_release"
+        ],
+        "profileRestored": true,
+        "chatUnchanged": true,
+        "status": "passed"
+      },
+      "contentEvaluator": {
+        "model": "Systran/faster-whisper-tiny.en",
+        "revision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+        "modelSha256": "1a5afae06a4db91c975c9a9d78be5cc110ee4ea022ad57d55492e4550e936b2a",
+        "maximumNormalizedWordErrorRate": 0.2
+      }
+    },
+    {
+      "id": "neu-jo-canonical-target",
+      "referenceFrontend": "builtin",
+      "targetFrontend": "canonical_fixture",
+      "productionG2POutputUsed": false,
+      "sampleCount": 54720,
+      "durationMs": 2280.0,
+      "wavBytes": 109484,
+      "wavSha256": "50db6e4e5a338d19e37f1a9c61faa4825eae68b8bcddc01ec8b878c4f7b30164",
+      "termination": {
+        "schemaVersion": 1,
+        "sampledTokenCount": 115,
+        "audioTokenCount": 114,
+        "stopTokenKind": "expected_speech_end"
+      },
+      "contentPass": true,
+      "normalizedWordErrorRate": 0.0,
+      "transcript": "The quiet river flows beside the old bridge.",
+      "fullAudioHashesVerifiedBeforeAndAfter": true,
+      "evaluatorReportSha256": "4b1830b8b6da53dbb391412a4804207e8e4cf6f644d5455bf6ef11db29941247",
+      "referenceConditioning": {
+        "decision": "not_run",
+        "reason": "paired_reference_outputs_not_selected",
+        "identityThreshold": null
+      },
+      "sampleRate": 24000,
+      "nativeLifecycle": {
+        "operations": [
+          "vocoder_init",
+          "formatter",
+          "prompt_prepare",
+          "completion",
+          "decode",
+          "vocoder_release"
+        ],
+        "profileRestored": true,
+        "chatUnchanged": true,
+        "status": "passed"
+      },
+      "contentEvaluator": {
+        "model": "Systran/faster-whisper-tiny.en",
+        "revision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+        "modelSha256": "1a5afae06a4db91c975c9a9d78be5cc110ee4ea022ad57d55492e4550e936b2a",
+        "maximumNormalizedWordErrorRate": 0.2
+      }
+    }
+  ],
+  "chatAfter": {
+    "id": "chat_after",
+    "callbacks": 30,
+    "profileRestored": true,
+    "chatUnchanged": true,
+    "status": "passed"
+  },
+  "localVerification": {
+    "scope": "Focused checks and full local release gate passed on the exact crossed-diagnostic source.",
+    "targetedSuites": 6,
+    "targetedTests": 352,
+    "status": "passed",
+    "otherChecks": [
+      "TypeScript",
+      "scoped lint"
+    ],
+    "fullReleaseGate": {
+      "status": "passed",
+      "publicSourceSha": "88125ab30b76cffa7bbe659669c63f5e0f18c93b",
+      "publicAppTree": "19ac782db57b4b43452a1616b913e5419d59e4fb",
+      "command": "npm run verify:release",
+      "jestSuites": 303,
+      "jestTests": 7088,
+      "jestSeconds": 263.424,
+      "rustUnitTests": 68,
+      "rustIntegrationTests": 3,
+      "otherChecks": [
+        "TypeScript",
+        "lint",
+        "native configuration"
+      ],
+      "scope": "Local release gate on this exact source; hosted CI and native acceptance are separate."
+    },
+    "previousFullReleaseGate": {
+      "publicSourceSha": "3b0e67e458e219a94bc57e0e41f07f0d33a922c0",
+      "jestSuites": 303,
+      "jestTests": 7080,
+      "rustUnitTests": 68,
+      "rustIntegrationTests": 3
+    }
+  },
+  "interpretation": {
+    "priorBaselineAndCombinedCanonical": "neu-frontend-diagnostic-3b0e67e.json",
+    "conclusion": "For this fixed case, canonical target phonemes were sufficient with the unchanged builtin Jo reference; canonical reference phonemes alone with production JS target output were not sufficient. A reference-data-only fix is not supported. Recorded target bypass is diagnostic evidence, not a verified production frontend or general model-quality claim.",
+    "referenceOnlyFixSupported": false,
+    "canonicalTargetSufficientForThisFixedCase": true,
+    "upstreamDefectEstablished": false,
+    "limitations": [
+      "One fixed English target and builtin Jo on x86 CPU.",
+      "Canonical target phonemes are recorded inputs; this does not execute or verify a replacement production G2P frontend.",
+      "The earlier ordinary baseline and combined-canonical arms belong to source 3b0e67e; this source adds crossed diagnostic arms.",
+      "ASR verifies bounded word content, not naturalness or speaker similarity.",
+      "No physical-phone audio, recording, automatic playback latency or general model-quality acceptance follows from this diagnostic."
+    ]
+  },
+  "reproduction": {
+    "sourceCheckout": "88125ab30b76cffa7bbe659669c63f5e0f18c93b",
+    "buildGuide": "../../android-build.md",
+    "buildEnvironment": {
+      "EXPO_PUBLIC_ANDROID_QA": "1",
+      "EXPO_PUBLIC_ANDROID_QA_DOCUMENTS": "1",
+      "POCKET_AI_QA_PRIVATE_FILE_ACCESS": "1",
+      "POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING": "true",
+      "ANDROID_SMOKE_TARGET_ABI": "x86_64"
+    },
+    "buildCommand": "npm run android:smoke -- --emulator --apk-variant release --isolated-qa-install",
+    "scope": "Disposable nonshipping QA build with local debug-fallback signing and embedded release bundle; keep normal memory admission.",
+    "steps": [
+      "Open a chat, select QA Stage 7 (chat-qa-stage7-panel-toggle), then QA diagnostic frontend A/B (not acceptance) (chat-qa-stage7-phonemizer-diagnostic).",
+      "This invokes runAndroidQaStage7Voices(phonemizer_diagnostic). On this source it runs canonical-reference/production-target, then builtin-reference/canonical-target, using the pinned profile and fixed configuration above. The QA path prepares and validates its pinned base/adapter and TTS assets.",
+      "At each awaiting_clip_copy gate, read chat-qa-stage7-evidence and retain its clipId. Export cache/tts-clips/clip.wav from the isolated package with the command below using binary-safe output capture; verify size and SHA-256 before continuing.",
+      "Press QA continue after host action (chat-qa-stage7-continue) within the 180-second gate. The first clip is cleared before the second arm. Repeat export/continue for the second arm.",
+      "Require diagnostic_complete, requiresForceStop=false and successful profile restoration/chat_after. Evaluate each exported clip independently against the fixed target with the pinned content evaluator and WER threshold above. Diagnostic completion alone does not establish content acceptance."
+    ],
+    "exportCommand": "adb -s <device-serial> exec-out run-as com.github.tah10n.pocketai.qa cat cache/tts-clips/clip.wav",
+    "cleanup": "After retaining compact hashes and evaluation, delete only owned exported WAVs. The QA sequence clears its temporary clip and restores the prior app model/settings/thread; do not reset shared app data.",
+    "productionBoundary": "The recorded canonical target is selected by this closed QA mode only; arbitrary text and production G2P are not accepted by this diagnostic."
+  }
+}

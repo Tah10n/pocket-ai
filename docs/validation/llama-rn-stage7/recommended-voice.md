@@ -1,5 +1,22 @@
 # Recommended English voice: scoped phone acceptance
 
+## Follow-up measurement status
+
+The [follow-up record](acceptance-followup.json) keeps new setup separate from the
+historical phone results below. The `3b0e67e` ARM64 QA APK built and installed with
+matching hashes; manual home inspection and cold launch passed after an initial
+post-install automated smoke failure. Recommended Oute assets were downloaded through
+ordinary setup and the fixed target was entered. USB disconnected before synthesis.
+
+New first/repeat synthesis, automatic playback, stage latency and content checks are
+**not run**. No latency improvement is claimed. The historical 46–47-second observation
+windows below include decode, playback progression and host probing; they are not
+isolated synthesis timings. The newer `88125ab` full local gate passed 303 suites /
+7,088 tests, but it does not supply missing physical audio evidence for the installed
+`3b0e67e` APK.
+
+## Historical phone acceptance
+
 Source: `8338889bd4d579e6da92f26ceab08eff53ae45de`. ARM64 APK: `24ad9c0ee90003b7cd59ebf02b8c08f3f10839ff539d3c522dc10729534c2ac1` (145704589 bytes). The later report commit does not change this source/APK identity.
 
 OuteTTS 1.0 0.6B Q4_K_M with DAC F16 is the recommended speakerless English profile. One physical Android CPU device, four threads and zero GPU layers were exercised. Limits remain 240 characters, 512 prompt tokens and 16 seconds of mono 24 kHz audio. Reference conditioning and phonemizer acceptance remain incomplete.

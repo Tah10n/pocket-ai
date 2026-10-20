@@ -8,7 +8,7 @@ import type { TtsRequest } from '../../src/services/TtsService';
 import { prepareAndroidQaStage3Adapter } from '../../src/services/AndroidQaStage3';
 import { LifecycleStatus, type ModelMetadata } from '../../src/types/models';
 import { AudioPreparationError } from '../../src/services/AudioPreparationService';
-import { sanitizeAudioStage7Evidence } from '../../scripts/lib/audio-stage7-evidence';
+import { sanitizeAudioStage7Evidence, validateAudioStage7Evidence } from '../../scripts/lib/audio-stage7-evidence';
 import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 import { TtsCleanupError, TtsError } from '../../src/types/tts';
 
@@ -398,6 +398,46 @@ it('runs fixed-target builtin/eager/lazy/no-reference consumers and cold saved d
   continueAndroidQaAudioStage7(); await cold;
   expect(getAndroidQaAudioStage7Evidence().status).toBe('native_passed'); expect(mockDelete).toHaveBeenCalledWith('qa-saved');
   expect(mockTtsStart.mock.calls.at(-1)?.[0].voice.source).toMatchObject({ kind: 'saved', voiceId: 'qa-saved' });
+});
+it('runs phonemizer synthesis independently without preparing reference fixtures or saving voices', async () => {
+  const work = runAndroidQaStage7Voices('phonemizer');
+  await until('awaiting_clip_copy');
+  expect(getAndroidQaAudioStage7Evidence().clipId).toBe('neu-jo');
+  continueAndroidQaAudioStage7(); await work;
+  const safe = sanitizeAudioStage7Evidence(getAndroidQaAudioStage7Evidence());
+  expect(validateAudioStage7Evidence(safe, 'phonemizer')).toBe(safe);
+  expect(mockTtsStart).toHaveBeenCalledTimes(1);
+  expect(mockTtsStart.mock.calls[0][0].voice).toEqual({ kind: 'builtin', voice: 'jo' });
+  expect(mockPrep).not.toHaveBeenCalled(); expect(mockSave).not.toHaveBeenCalled();
+  expect(mockChatCompletion).toHaveBeenCalledTimes(1); expect(mockThread).toBe('original');
+});
+it('runs the reference lifecycle even when the unselected phonemizer profile would fail', async () => {
+  const original = mockTtsStart.getMockImplementation()!;
+  mockTtsStart.mockImplementation(async (request: TtsRequest) => {
+    if (request.voice?.kind === 'builtin') throw new TtsError('phonemizer_failed');
+    return original(request);
+  });
+  const work = runAndroidQaStage7Voices('reference');
+  for (const id of ['qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference']) {
+    await until('awaiting_clip_copy'); expect(getAndroidQaAudioStage7Evidence().clipId).toBe(id);
+    continueAndroidQaAudioStage7();
+  }
+  await work;
+  const safe = sanitizeAudioStage7Evidence(getAndroidQaAudioStage7Evidence());
+  expect(validateAudioStage7Evidence(safe, 'reference')).toBe(safe);
+  expect(mockPrepareProfile.mock.calls.every(([profile]) => profile.family === 'qwen3_tts')).toBe(true);
+  expect(mockTtsStart).toHaveBeenCalledTimes(3); expect(mockSave).toHaveBeenCalledTimes(1);
+  expect(mockChatCompletion).toHaveBeenCalledTimes(1); expect(mockThread).toBe('original');
+});
+it.each(['phonemizer', 'reference'] as const)('preserves the first native failure stage for targeted %s', async mode => {
+  mockTtsStart.mockImplementationOnce(async (request: TtsRequest) => {
+    request.observe?.({ operation: 'first_failure', phase: 'failed', failureStage: 'decode' });
+    throw new TtsError('native_failed');
+  });
+  await runAndroidQaStage7Voices(mode);
+  expect(sanitizeAudioStage7Evidence(getAndroidQaAudioStage7Evidence())).toMatchObject({
+    mode, status: 'failed', failureStage: 'decode', failureCode: 'native_failed' });
+  expect(mockSave).not.toHaveBeenCalled();
 });
 it('requires an actual formatter speaker receipt before a reference path can pass', async () => {
   const original = mockTtsStart.getMockImplementation()!;

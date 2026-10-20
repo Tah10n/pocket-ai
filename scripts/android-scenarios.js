@@ -3148,6 +3148,11 @@ function buildScenarios() {
       run: ctx => runAudioStage7AcceptanceScenario(ctx, 'recording'),
     },
     {
+      id: 'runtime-stage7-import', tier: 'critical', requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true,
+      description: 'Verify managed WAV/MP3 import, send materialization, durable storage, owner cancellation and cold hydration; UI Send/inference are separate.',
+      run: ctx => runAudioImportAcceptanceScenario(ctx),
+    },
+    {
       id: 'runtime-stage7-audio-input', tier: 'critical', requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true,
       description: 'Use the real audio-input projector for imported and emulator-recorded controlled speech separately.',
       run: ctx => runAudioStage7AcceptanceScenario(ctx, 'input'),
@@ -3157,6 +3162,13 @@ function buildScenarios() {
       description: 'Run Neu builtin/phonemizer and Qwen eager/lazy/speakerless, restore A+LoRA, cold-open saved voice and delete.',
       run: ctx => runAudioStage7AcceptanceScenario(ctx, 'voices'),
     },
+    ...['phonemizer', 'reference'].map(mode => ({
+      id: `runtime-stage7-${mode}`, tier: 'critical', requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true,
+      description: mode === 'phonemizer'
+        ? 'Run required Neu phonemization, synthesis/decode and A+LoRA restoration independently of reference voices.'
+        : 'Run Qwen eager/lazy/speakerless and saved cold voice independently of Neu phonemization.',
+      run: ctx => runAudioStage7AcceptanceScenario(ctx, mode),
+    })),
     {
       id: "runtime-local-tts-playback",
       tier: "critical",
@@ -5679,6 +5691,55 @@ const INFERENCE_SMOKE_FAILURE_CODES = new Set(["actual_backend", "backend_discov
   "operation_failed", "runtime_policy", "stop_not_during_generation", "timeout", "unload_incomplete",
   "verified_model_missing"]);
 
+async function runAudioImportAcceptanceScenario(ctx) {
+  const adbPath = resolveAdbPath();
+  assertTtsPrivateFileAccess(adbPath, ctx.serial, appPackageName);
+  const open = async () => {
+    await goToHome(ctx);
+    await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+    await tapVisibleResource(ctx, 'chat-qa-stage7-panel-toggle', { timeoutMs: 180000 });
+  };
+  const wait = async expected => {
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+      const node = findResourceIdInSnapshot(createUiSnapshot(adbPath, ctx.serial), 'chat-qa-stage7-import-evidence');
+      let value; try { value = JSON.parse(node?.contentDesc || node?.text || 'null'); } catch { value = null; }
+      if (value?.status === 'failed') {
+        const phase = typeof value.phase === 'string' && /^[a-z_]{1,64}$/u.test(value.phase) ? value.phase : 'unknown';
+        throw new Error(`Isolated audio import QA failed: ${phase}.`);
+      }
+      if (value?.status === expected) {
+        const names = ['over-four-MiB.wav', 'forty-seconds.wav', 'legacy-import.mp3'];
+        if (value.uiSend !== 'not_run' || value.inference !== 'not_run' || !Array.isArray(value.fixtures)
+          || value.fixtures.length !== 3 || !Array.isArray(value.steps) || value.steps.length > 8) throw new Error('Invalid import QA evidence.');
+        const fixtures = names.map(name => {
+          const item = value.fixtures.find(fixture => fixture.name === name);
+          if (!item || !Number.isSafeInteger(item.sizeBytes) || item.sizeBytes <= 0 || item.sizeBytes > 25 * 1024 * 1024
+            || !/^[a-f0-9]{64}$/u.test(item.sha256)) throw new Error('Invalid import fixture evidence.');
+          return { name, sizeBytes: item.sizeBytes, sha256: item.sha256 };
+        });
+        if (!value.steps.every(step => typeof step === 'string' && /^[a-z_]{1,64}$/u.test(step))) throw new Error('Invalid import QA step.');
+        return { status: expected, fixtures, steps: value.steps, uiSend: 'not_run', inference: 'not_run' };
+      }
+      await delay(500);
+    }
+    throw new Error('Audio import QA timed out.');
+  };
+  try {
+    await open(); await tapVisibleResource(ctx, 'chat-qa-stage7-import', { timeoutMs: 30000 });
+    const imported = await wait('awaiting_restart');
+    fs.writeFileSync(path.join(artifactsRoot, 'stage7-import-evidence.json'), `${JSON.stringify({ imported, cold: 'not_run' }, null, 2)}\n`);
+    forceStopScenarioApp(adbPath, ctx.serial);
+    await relaunchScenarioApp(ctx); await open();
+    await tapVisibleResource(ctx, 'chat-qa-stage7-import-cold', { timeoutMs: 30000 });
+    const cold = await wait('passed');
+    const details = { imported, cold };
+    fs.writeFileSync(path.join(artifactsRoot, 'stage7-import-evidence.json'), `${JSON.stringify(details, null, 2)}\n`);
+    await tapVisibleResource(ctx, 'chat-qa-stage7-close', { timeoutMs: 30000, allowScroll: true });
+    return { details };
+  } catch (error) { forceStopScenarioApp(adbPath, ctx.serial); throw error; }
+}
+
 async function runAudioStage7AcceptanceScenario(ctx, mode) {
   const adbPath = resolveAdbPath();
   assertTtsPrivateFileAccess(adbPath, ctx.serial, appPackageName);
@@ -5762,8 +5823,10 @@ async function runAudioStage7AcceptanceScenario(ctx, mode) {
         validateAudioStage7Evidence(safe, mode);
         if (mode === 'recording' && (!injection || copied.size !== 1)) throw new Error('Controlled capture provenance missing.');
         if (mode === 'voices' && copied.size !== 4) throw new Error('Independent voice content clips incomplete.');
+        if (mode === 'phonemizer' && copied.size !== 1) throw new Error('Phonemizer synthesis clip missing.');
+        if (mode === 'reference' && copied.size !== 3) throw new Error('Reference comparison clips incomplete.');
         let cold;
-        if (mode === 'voices') {
+        if (mode === 'voices' || mode === 'reference') {
           forceStopScenarioApp(adbPath, ctx.serial);
           await relaunchScenarioApp(ctx); await open();
           await tapVisibleResource(ctx, 'chat-qa-stage7-cold-voice', { timeoutMs: 30000 });
@@ -5788,7 +5851,7 @@ async function runAudioStage7AcceptanceScenario(ctx, mode) {
           validateAudioStage7Evidence(cold, 'cold_voice');
           if (!copied.has('qwen-saved-cold')) throw new Error('Cold saved source content clip missing.');
         }
-        await tapVisibleResource(ctx, 'chat-qa-stage7-close', { timeoutMs: 30000 });
+        await tapVisibleResource(ctx, 'chat-qa-stage7-close', { timeoutMs: 30000, allowScroll: true });
         const details = { ...safe, localClipExports: exports, ...(injection ? { microphoneInjection: injection } : {}), ...(cold ? { cold } : {}) };
         fs.writeFileSync(evidencePath, `${JSON.stringify(details, null, 2)}\n`);
         return { details };
@@ -6162,12 +6225,12 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
       );
     }
     env.EXPO_PUBLIC_ANDROID_QA = "1";
-    if (["documents", "inference", "retrieval", "retrieval-publication", "tts", "audio-voices"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval", "runtime-document-index-publication", "runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback", "runtime-stage7-recording", "runtime-stage7-audio-input", "runtime-stage7-voices"].includes(options.scenario)) {
+    if (["documents", "inference", "retrieval", "retrieval-publication", "tts", "audio-voices"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval", "runtime-document-index-publication", "runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback", "runtime-stage7-recording", "runtime-stage7-import", "runtime-stage7-audio-input", "runtime-stage7-voices", "runtime-stage7-phonemizer", "runtime-stage7-reference"].includes(options.scenario)) {
       env.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS = "1";
     }
     env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
       env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING || "true";
-    if (["tts", "audio-voices"].includes(options.pack) || ["runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback", "runtime-stage7-recording", "runtime-stage7-audio-input", "runtime-stage7-voices"].includes(options.scenario)) {
+    if (["tts", "audio-voices"].includes(options.pack) || ["runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback", "runtime-stage7-recording", "runtime-stage7-import", "runtime-stage7-audio-input", "runtime-stage7-voices", "runtime-stage7-phonemizer", "runtime-stage7-reference"].includes(options.scenario)) {
       if (!options.isolatedQaInstall) throw new ScenarioPreconditionFailureError("Private speech verification requires --isolated-qa-install.");
       env.POCKET_AI_QA_PRIVATE_FILE_ACCESS = "1";
     }
@@ -7460,8 +7523,11 @@ function selectScenarios(scenarios, options) {
       "runtime-local-tts-continuous",
       "runtime-local-tts-playback",
       "runtime-stage7-recording",
+      "runtime-stage7-import",
       "runtime-stage7-audio-input",
       "runtime-stage7-voices",
+      "runtime-stage7-phonemizer",
+      "runtime-stage7-reference",
       "native-glass-theme-matrix",
       "foreground-service-notification-states",
     ]);

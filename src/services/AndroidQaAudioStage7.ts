@@ -28,13 +28,15 @@ import { referenceVoiceStore } from './ReferenceVoiceStore';
 import { TTS_EXECUTION_PROFILES } from './TtsExecutionProfiles';
 import { ttsService } from './TtsService';
 
-type Mode = 'recording' | 'input' | 'voices' | 'cold_voice';
+type VoiceMode = 'voices' | 'phonemizer' | 'reference';
+type Mode = 'recording' | 'input' | VoiceMode | 'cold_voice';
 export interface AndroidQaAudioStage7Step {
   id: string; status: 'passed'; sampleRate?: number; sampleCount?: number; durationMs?: number;
   sizeBytes?: number; sourceSha256?: string; profileId?: string; callbacks?: number;
   outputCharacters?: number; profileRestored?: boolean; chatUnchanged?: boolean;
   interrupted?: boolean; noAutomaticResume?: boolean; headerValidated?: boolean;
   speakerRows?: number; speakerBaked?: boolean; phonemizerElapsedMs?: number;
+  phonemizerModuleInitMs?: number; phonemizerConversionMs?: number;
   operations?: string[]; voiceCount?: number; selected?: boolean; handlesPersisted?: false;
   fixtureKind?: 'recorded' | 'imported'; contentMatched?: boolean; completionDrained?: boolean;
 }
@@ -140,7 +142,7 @@ function run(mode: Mode, action: (recordFailure: (stage: TtsFailureStage) => voi
   let failureStage: TtsFailureStage | undefined;
   const recordFailure = (stage: TtsFailureStage) => {
     if (diagnosticsOpen && failureStage === undefined && isTtsFailureStage(stage)
-      && mode === 'voices') failureStage = stage;
+      && ['voices', 'phonemizer', 'reference'].includes(mode)) failureStage = stage;
   };
   active = action(recordFailure).then(() => {
     diagnosticsOpen = false;
@@ -314,10 +316,10 @@ export function runAndroidQaStage7Input(): Promise<void> {
 }
 
 const TARGET_TEXT = syntheticFixtures.referenceComparisonTarget;
-export function runAndroidQaStage7Voices(): Promise<void> {
-  return run('voices', executeVoices);
+export function runAndroidQaStage7Voices(mode: VoiceMode = 'voices'): Promise<void> {
+  return run(mode, recordFailure => executeVoices(recordFailure, mode));
 }
-async function executeVoices(recordFailure: (stage: TtsFailureStage) => void): Promise<void> {
+async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mode: VoiceMode): Promise<void> {
   const originalThread = useChatStore.getState().activeThreadId;
   const originalBindings = getSettings().auxiliaryModels;
   const originalModel = llmEngineService.getState().activeModelId;
@@ -381,32 +383,43 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void): P
       } else check(!events.includes('speaker_create'), 'unexpected_reference');
       const phones = observations.find(event => event.operation === 'phonemizer' && event.phase === 'settled');
       if (id === 'neu-jo') check(phones && Number.isFinite(phones.elapsedMs), 'phonemizer_not_executed');
+      const phoneTiming = (operation: string) => {
+        const elapsed = observations.find(event => event.operation === operation && event.phase === 'settled')?.elapsedMs;
+        return typeof elapsed === 'number' && Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= 300_000
+          ? elapsed : undefined;
+      };
       await ttsService.play(); check(ttsService.getState().phase === 'playing', 'tts_not_playing');
       await delay(300); await ttsService.stop();
       pass({ id, profileId, sampleRate: decoded.sampleRate, sampleCount: decoded.sampleCount,
         speakerRows: formatted.speakerRows, speakerBaked: formatted.speakerBaked,
-        phonemizerElapsedMs: phones?.elapsedMs, operations: events, profileRestored: true, chatUnchanged: true });
+        phonemizerElapsedMs: phones?.elapsedMs, phonemizerModuleInitMs: phoneTiming('phonemizer_module_init'),
+        phonemizerConversionMs: phoneTiming('phonemizer_conversion'),
+        operations: events, profileRestored: true, chatUnchanged: true });
       await gate('awaiting_clip_copy', id);
       await ttsService.cancelAndClear();
     };
-    await synthesize('neu-jo', 'neutts-nano-q4_k_m-neucodec-q8_0', { kind: 'builtin', voice: 'jo' });
-    const references: Record<'r1' | 'r2', { sha256: string; durationMs: number }> = {} as never;
-    for (const id of ['r1', 'r2'] as const) {
-      const prepared = await prepareManagedAudio({ sourceUri: fixtureUri(id), purpose: 'reference', sampleRate: 24000 });
-      assertSyntheticSource(prepared, id === 'r1' ? 'r1-george.wav' : 'r2-zira.wav');
-      references[id] = { sha256: prepared.sourceSha256, durationMs: prepared.durationMs };
-      pass({ id: `reference-${id}`, sourceSha256: prepared.sourceSha256,
-        sampleRate: prepared.sampleRate, sampleCount: prepared.sampleCount, durationMs: prepared.durationMs });
-      await discardPreparedAudio(prepared);
+    if (mode !== 'reference') {
+      await synthesize('neu-jo', 'neutts-nano-q4_k_m-neucodec-q8_0', { kind: 'builtin', voice: 'jo' });
     }
-    check(references.r1.sha256 !== references.r2.sha256, 'reference_fixture_same');
-    await synthesize('qwen-r1-eager', 'qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0', { kind: 'reference', bake: 'eager',
-      source: { kind: 'temporary', sourceUri: fixtureUri('r1'), sourceSha256: references.r1.sha256,
-        durationMs: references.r1.durationMs, consent: true } });
-    await synthesize('qwen-r2-lazy', 'qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0', { kind: 'reference', bake: 'lazy',
-      source: { kind: 'temporary', sourceUri: fixtureUri('r2'), sourceSha256: references.r2.sha256,
-        durationMs: references.r2.durationMs, consent: true } });
-    await synthesize('qwen-no-reference', 'qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0', { kind: 'speakerless' });
+    const references: Record<'r1' | 'r2', { sha256: string; durationMs: number }> = {} as never;
+    if (mode !== 'phonemizer') {
+      for (const id of ['r1', 'r2'] as const) {
+        const prepared = await prepareManagedAudio({ sourceUri: fixtureUri(id), purpose: 'reference', sampleRate: 24000 });
+        assertSyntheticSource(prepared, id === 'r1' ? 'r1-george.wav' : 'r2-zira.wav');
+        references[id] = { sha256: prepared.sourceSha256, durationMs: prepared.durationMs };
+        pass({ id: `reference-${id}`, sourceSha256: prepared.sourceSha256,
+          sampleRate: prepared.sampleRate, sampleCount: prepared.sampleCount, durationMs: prepared.durationMs });
+        await discardPreparedAudio(prepared);
+      }
+      check(references.r1.sha256 !== references.r2.sha256, 'reference_fixture_same');
+      await synthesize('qwen-r1-eager', 'qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0', { kind: 'reference', bake: 'eager',
+        source: { kind: 'temporary', sourceUri: fixtureUri('r1'), sourceSha256: references.r1.sha256,
+          durationMs: references.r1.durationMs, consent: true } });
+      await synthesize('qwen-r2-lazy', 'qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0', { kind: 'reference', bake: 'lazy',
+        source: { kind: 'temporary', sourceUri: fixtureUri('r2'), sourceSha256: references.r2.sha256,
+          durationMs: references.r2.durationMs, consent: true } });
+      await synthesize('qwen-no-reference', 'qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0', { kind: 'speakerless' });
+    }
     publish({ phase: 'chat_after' });
     let callbacks = 0;
     const result = await llmEngineService.chatCompletion({ expectedModelId: base.id,
@@ -414,6 +427,7 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void): P
       params: { n_predict: 32, temperature: 0, enable_thinking: false }, onToken: () => { callbacks += 1; } });
     check(callbacks > 0 && (result.content ?? result.text)?.trim().length && !llmEngineService.hasActiveCompletion(), 'chat_after_failed');
     restored(); pass({ id: 'chat_after', callbacks, profileRestored: true, chatUnchanged: true });
+    if (mode === 'phonemizer') return;
     referenceVoiceStore.hydrate();
     check(referenceVoiceStore.getState().voices.length === 0, 'qa_voice_library_not_empty');
     const saved = await referenceVoiceStore.save({ sourceUri: fixtureUri('r1'), sourceSha256: references.r1.sha256,

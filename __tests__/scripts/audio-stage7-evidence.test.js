@@ -82,6 +82,30 @@ it('selects the small new pack without the prior six clips/retrieval pack', () =
   configureScenarioBuildEnvironment({ pack: 'audio-voices', isolatedQaInstall: true }, true, env);
   expect(env).toMatchObject({ EXPO_PUBLIC_ANDROID_QA: '1', EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1', POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1' });
 });
+it.each(['phonemizer', 'reference'])('isolates targeted %s while preserving native QA build gates', mode => {
+  const scenario = `runtime-stage7-${mode}`;
+  const selected = buildScenarios().filter(item => item.id === scenario);
+  expect(selected).toHaveLength(1);
+  expect(selected[0]).toMatchObject({ requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true });
+  expect(() => validateScenarioExecutionOptions(selected, { isolatedQaInstall: false })).toThrow();
+  const env = { ANDROID_SMOKE_APK_VARIANT: 'release' };
+  configureScenarioBuildEnvironment({ scenario, isolatedQaInstall: true }, true, env);
+  expect(env).toMatchObject({ EXPO_PUBLIC_ANDROID_QA: '1',
+    EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1', POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1' });
+  expect(sanitizeAudioStage7Evidence({ ...initial(mode), status: 'failed',
+    failureCode: 'native_failed', failureStage: 'decode' })).toMatchObject({ mode, failureStage: 'decode' });
+});
+it('requires actual native synthesis and decode for targeted phonemizer acceptance', () => {
+  const evidence = { ...initial('phonemizer'), steps: [
+    step('neu-jo', { sampleRate: 24000, sampleCount: 12000, profileRestored: true, chatUnchanged: true,
+      phonemizerElapsedMs: 20, phonemizerModuleInitMs: 15, phonemizerConversionMs: 5,
+      operations: ['phonemizer_module_init', 'phonemizer_conversion', 'phonemizer', 'formatter', 'completion', 'decode'] }),
+    step('chat_after', { profileRestored: true })] };
+  expect(validateAudioStage7Evidence(sanitizeAudioStage7Evidence(evidence), 'phonemizer').steps[0])
+    .toMatchObject({ phonemizerModuleInitMs: 15, phonemizerConversionMs: 5 });
+  evidence.steps[0].operations = ['phonemizer_module_init', 'phonemizer_conversion', 'phonemizer'];
+  expect(() => validateAudioStage7Evidence(evidence, 'phonemizer')).toThrow();
+});
 
 it('handles the OS prompt with no QA marker, exclusively after explicit Record', () => {
   const snapshot = parseUiSnapshot('<hierarchy><node bounds="[0,0][1080,2400]" />'

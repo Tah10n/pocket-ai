@@ -7,10 +7,11 @@ const CLIPS = ['recorded', 'neu-jo', 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-r
 const PHASES = ['idle', 'prepare', 'complete', 'recording_awaiting_controlled_sound', 'recording_awaiting_background',
   'awaiting_clip_copy', 'input_imported', 'input_recorded', 'chat_after', ...CLIPS];
 const PROFILES = ['neutts-nano-q4_k_m-neucodec-q8_0', 'qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0'];
-const OPERATIONS = ['phonemizer', 'formatter', 'vocoder_init', 'speaker_create', 'speaker_bake', 'speaker_release',
+const OPERATIONS = ['phonemizer', 'phonemizer_module_init', 'phonemizer_conversion', 'prompt_prepare',
+  'formatter', 'vocoder_init', 'speaker_create', 'speaker_bake', 'speaker_release',
   'completion', 'completion_stop', 'decode', 'vocoder_release'];
 const NUMBERS = ['sampleRate', 'sampleCount', 'durationMs', 'sizeBytes', 'callbacks', 'outputCharacters',
-  'speakerRows', 'phonemizerElapsedMs', 'voiceCount'];
+  'speakerRows', 'phonemizerElapsedMs', 'phonemizerModuleInitMs', 'phonemizerConversionMs', 'voiceCount'];
 const BOOLEANS = ['profileRestored', 'chatUnchanged', 'interrupted', 'noAutomaticResume', 'headerValidated',
   'speakerBaked', 'selected', 'contentMatched', 'completionDrained'];
 const FAILURES = ['qa_operation_failed', 'host_continuation_timeout', 'isolated_package_required', 'preview_not_playing',
@@ -43,12 +44,12 @@ function sanitizeAudioStage7Evidence(value) {
   const result = { schemaVersion: source.schemaVersion === 1 ? 1 : null,
     status: ['idle', 'running', 'native_passed', 'failed'].includes(source.status) ? source.status : 'failed',
     phase: PHASES.includes(source.phase) ? source.phase : 'invalid',
-    mode: ['recording', 'input', 'voices', 'cold_voice'].includes(source.mode) ? source.mode : null,
+    mode: ['recording', 'input', 'voices', 'phonemizer', 'reference', 'cold_voice'].includes(source.mode) ? source.mode : null,
     requiresForceStop: source.requiresForceStop !== false, runtimeVersion: source.runtimeVersion === '0.13.0-rc.3' ? source.runtimeVersion : 'unknown',
     backend: source.backend === 'cpu' ? 'cpu' : 'unknown', contentVerification: 'not_run', referenceConditioning: 'not_run', steps: [] };
   if (CLIPS.includes(source.clipId)) result.clipId = source.clipId;
   if (FAILURES.includes(source.failureCode)) result.failureCode = source.failureCode;
-  if (result.status === 'failed' && result.mode === 'voices'
+  if (result.status === 'failed' && ['voices', 'phonemizer', 'reference'].includes(result.mode)
     && FAILURE_STAGES.includes(source.failureStage)) result.failureStage = source.failureStage;
   if (result.status === 'failed' && result.failureCode === 'phonemizer_failed') {
     const failure = source.phonemizerFailure;
@@ -69,7 +70,7 @@ function sanitizeAudioStage7Evidence(value) {
     if (PROFILES.includes(step.profileId)) safe.profileId = step.profileId;
     if (['recorded', 'imported'].includes(step.fixtureKind)) safe.fixtureKind = step.fixtureKind;
     if (step.handlesPersisted === false) safe.handlesPersisted = false;
-    if (Array.isArray(step.operations)) safe.operations = step.operations.slice(0, 16).filter(item => OPERATIONS.includes(item));
+    if (Array.isArray(step.operations)) safe.operations = step.operations.filter(item => OPERATIONS.includes(item)).slice(0, 16);
     return [safe];
   });
   return result;
@@ -92,23 +93,31 @@ function validateAudioStage7Evidence(evidence, mode) {
       if (step.contentMatched !== true || step.completionDrained !== true || step.headerValidated !== true
         || step.sampleRate !== 16000 || !step.sampleCount || !step.callbacks) fail();
     }
-  } else if (mode === 'voices') {
-    const neu = requireStep('neu-jo');
-    if (!neu.operations?.includes('phonemizer') || !Number.isFinite(neu.phonemizerElapsedMs)) fail();
-    ['reference-r1', 'reference-r2'].forEach(requireStep);
-    for (const [id, eager] of [['qwen-r1-eager', true], ['qwen-r2-lazy', false]]) {
-      const step = requireStep(id); const ops = step.operations ?? [];
-      if (step.speakerRows !== 1 || step.speakerBaked !== true || !ops.includes('speaker_create') || !ops.includes('speaker_release')
-        || ops.includes('speaker_bake') !== eager || ops.indexOf('speaker_release') >= ops.indexOf('vocoder_release')) fail();
+  } else if (['voices', 'phonemizer', 'reference'].includes(mode)) {
+    if (mode !== 'reference') {
+      const neu = requireStep('neu-jo');
+      if (!neu.operations?.includes('phonemizer') || !Number.isFinite(neu.phonemizerElapsedMs)) fail();
     }
-    const none = requireStep('qwen-no-reference');
-    if (none.operations?.includes('speaker_create')) fail();
-    for (const id of ['neu-jo', 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference']) {
+    if (mode !== 'phonemizer') {
+      ['reference-r1', 'reference-r2'].forEach(requireStep);
+      for (const [id, eager] of [['qwen-r1-eager', true], ['qwen-r2-lazy', false]]) {
+        const step = requireStep(id); const ops = step.operations ?? [];
+        if (step.speakerRows !== 1 || step.speakerBaked !== true || !ops.includes('speaker_create') || !ops.includes('speaker_release')
+          || ops.includes('speaker_bake') !== eager || ops.indexOf('speaker_release') >= ops.indexOf('vocoder_release')) fail();
+      }
+      const none = requireStep('qwen-no-reference');
+      if (none.operations?.includes('speaker_create')) fail();
+      if (requireStep('voice_saved').handlesPersisted !== false) fail();
+    }
+    const clips = mode === 'phonemizer' ? ['neu-jo']
+      : mode === 'reference' ? ['qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference']
+        : ['neu-jo', 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference'];
+    for (const id of clips) {
       const step = requireStep(id);
       if (!step.sampleRate || !step.sampleCount || step.profileRestored !== true || step.chatUnchanged !== true
         || !step.operations?.includes('formatter') || !step.operations.includes('completion') || !step.operations.includes('decode')) fail();
     }
-    if (requireStep('chat_after').profileRestored !== true || requireStep('voice_saved').handlesPersisted !== false) fail();
+    if (requireStep('chat_after').profileRestored !== true) fail();
   } else if (mode === 'cold_voice') {
     if (requireStep('voice_cold').handlesPersisted !== false || requireStep('voice_deleted').voiceCount !== 0) fail();
     const saved = requireStep('qwen-saved-cold'); const ops = saved.operations ?? [];

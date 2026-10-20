@@ -4674,8 +4674,11 @@ describe('android-scenarios pack selection', () => {
         'runtime-local-tts-continuous',
         'runtime-local-tts-playback',
         'runtime-stage7-recording',
+        'runtime-stage7-import',
         'runtime-stage7-audio-input',
         'runtime-stage7-voices',
+        'runtime-stage7-phonemizer',
+        'runtime-stage7-reference',
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));
@@ -4721,6 +4724,18 @@ describe('android-scenarios pack selection', () => {
     expect(() => parseCliOptions(['--isolated-qa-install', '--qa-instance', 'other.stage7'])).toThrow(/QA instance/);
     expect(() => configureScenarioBuildEnvironment({ pack: 'audio-voices' }, true,
       { POCKET_AI_ANDROID_QA_INSTANCE: 'stage7' })).toThrow(/requires --isolated-qa-install/);
+  });
+
+  it('keeps Stage7 import storage/cold proof explicit and requires its isolated native build', () => {
+    const options = parseCliOptions(['--scenario', 'runtime-stage7-import', '--apk-variant', 'release', '--isolated-qa-install']);
+    const selected = selectScenarios(scenarios, options);
+    expect(selected.map(item => item.id)).toEqual(['runtime-stage7-import']);
+    expect(selected[0]).toMatchObject({ requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true });
+    const env = {};
+    configureScenarioBuildEnvironment(options, true, env);
+    expect(env).toMatchObject({ EXPO_PUBLIC_ANDROID_QA: '1', EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1', POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1' });
+    expect(() => configureScenarioBuildEnvironment({ scenario: 'runtime-stage7-import', apkVariant: 'release' }, true, {}))
+      .toThrow(/isolated-qa-install/);
   });
 
   it('keeps Stage7 capture, audio input and voices in one explicit bounded pack', () => {

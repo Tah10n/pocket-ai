@@ -19,6 +19,11 @@ jest.mock('../../src/services/AndroidQaAudioStage7', () => ({
   runAndroidQaStage7Voices: jest.fn(), checkAndroidQaStage7ColdVoice: jest.fn(),
   continueAndroidQaAudioStage7: jest.fn(),
 }));
+const mockImports = { status: 'idle', phase: 'idle', steps: [], fixtures: [], uiSend: 'not_run', inference: 'not_run' };
+jest.mock('../../src/services/AndroidQaAudioImport', () => ({
+  getAndroidQaAudioImportEvidence: () => mockImports, subscribeAndroidQaAudioImport: () => () => undefined,
+  runAndroidQaAudioImport: jest.fn(),
+}));
 let mockRecording: AudioRecordingState = { phase: 'idle', durationMillis: 0 };
 const mockListeners = new Set<() => void>();
 jest.mock('../../src/services/AudioRecordingService', () => ({ audioRecordingService: {

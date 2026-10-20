@@ -1147,6 +1147,136 @@ describe('ChatScreen', () => {
     });
   });
 
+  it.each(['success', 'cancel', 'background', 'close', 'thread', 'blur', 'model', 'unmount', 'timeout', 'drain-failure'] as const)(
+    'owns the real speech reference picker through parent AppState: %s', async outcome => {
+      const { AppState } = require('react-native') as typeof import('react-native');
+      const picker = require('expo-document-picker') as typeof import('expo-document-picker');
+      const files = require('expo-file-system/legacy') as typeof import('expo-file-system/legacy');
+      const tts = require('../../src/services/TtsService') as typeof import('../../src/services/TtsService');
+      const preparation = require('../../src/services/AudioPreparationService') as typeof import('../../src/services/AudioPreparationService');
+      const { audioSamplePreviewService } = require('../../src/services/AudioSamplePreviewService') as typeof import('../../src/services/AudioSamplePreviewService');
+      const { referenceVoiceStore } = require('../../src/services/ReferenceVoiceStore') as typeof import('../../src/services/ReferenceVoiceStore');
+      const navigation = require('@react-navigation/native') as { __setIsFocused: (value: boolean) => void };
+      const sharedMocks = [AppState.addEventListener, picker.getDocumentAsync, files.getInfoAsync, files.deleteAsync]
+        .filter(jest.isMockFunction).map(mock => ({ mock: mock as jest.Mock, implementation: (mock as jest.Mock).getMockImplementation() }));
+      const descriptor = Object.getOwnPropertyDescriptor(AppState, 'currentState');
+      const listeners = new Set<(next: import('react-native').AppStateStatus) => void>();
+      const setAppState = (next: import('react-native').AppStateStatus) => {
+        Object.defineProperty(AppState, 'currentState', { configurable: true, value: next });
+        for (const listener of [...listeners]) listener(next);
+      };
+      Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'active' });
+      navigation.__setIsFocused(true);
+      let selection = { profileId: 'qwen3-tts', modelName: 'Qwen', languages: ['en'], voiceModes: ['reference'] as const };
+      const state = { phase: null };
+      const savedState = { voices: [], selectedVoiceId: null };
+      const selected = createDeferred<import('expo-document-picker').DocumentPickerResult>();
+      const sourceUri = 'test-cache/reference-picked.wav';
+      const prepared = { uri: 'test-cache/audio-preparation/reference.wav', sourceSha256: 'a'.repeat(64),
+        identity: 'reference', sampleRate: 24000, sampleCount: 24000, durationMs: 1000, channels: 1, sizeBytes: 48044 };
+      const temporary = { uri: 'test-cache/audio-reference/reference.wav', sourceSha256: 'a'.repeat(64), durationMs: 1000,
+        sourceMimeType: 'audio/wav' as const, isCurrent: () => true, release: jest.fn().mockResolvedValue(undefined) };
+      const cancel = jest.spyOn(tts.ttsService, 'cancelAndClear').mockResolvedValue(undefined);
+      const prepare = jest.spyOn(preparation, 'prepareManagedAudio').mockResolvedValue(prepared as import('../../src/services/AudioPreparationService').PreparedAudio);
+      const retain = jest.spyOn(referenceVoiceStore, 'retainTemporarySource').mockResolvedValue(temporary);
+      const save = jest.spyOn(referenceVoiceStore, 'save');
+      const spies: jest.SpyInstance[] = [cancel, prepare, retain, save,
+        jest.spyOn(AppState, 'addEventListener').mockImplementation((_event, listener) => {
+          listeners.add(listener); return { remove: () => { listeners.delete(listener); } };
+        }),
+        jest.spyOn(picker, 'getDocumentAsync').mockReturnValue(selected.promise),
+        jest.spyOn(tts, 'getTtsSelectionStatus').mockImplementation(() => selection),
+        jest.spyOn(tts.ttsService, 'getState').mockReturnValue(state),
+        jest.spyOn(tts.ttsService, 'subscribe').mockReturnValue(() => undefined),
+        jest.spyOn(preparation, 'discardPreparedAudio').mockResolvedValue(undefined),
+        jest.spyOn(preparation, 'waitForAudioPreparationDrain').mockResolvedValue(undefined),
+        jest.spyOn(audioSamplePreviewService, 'stop').mockResolvedValue(undefined),
+        jest.spyOn(referenceVoiceStore, 'hydrate').mockImplementation(() => undefined),
+        jest.spyOn(referenceVoiceStore, 'getState').mockReturnValue(savedState),
+        jest.spyOn(referenceVoiceStore, 'select').mockImplementation(() => undefined),
+        jest.spyOn(files, 'getInfoAsync').mockResolvedValue({ exists: false, uri: sourceUri, isDirectory: false }),
+      ];
+      const deletion = jest.spyOn(files, 'deleteAsync').mockResolvedValue(undefined);
+      spies.push(deletion);
+      const view = render(React.createElement(ChatScreen));
+      let unmounted = false;
+      try {
+        fireEvent.press(view.getByTestId('chat-speech-preview'));
+        await waitFor(() => expect(view.getByTestId('tts-preview-sheet')).toBeTruthy());
+        fireEvent.changeText(view.getByTestId('tts-text-input'), 'Keep this preview.');
+        if (outcome === 'background') {
+          await act(async () => { setAppState('background'); });
+          expect(view.queryByTestId('tts-preview-sheet')).toBeNull();
+          expect(cancel).toHaveBeenCalled();
+          return;
+        }
+        fireEvent.press(view.getByTestId('tts-voice-options'));
+        await waitFor(() => expect(view.getByTestId('tts-reference-import')).toBeEnabled());
+        if (outcome === 'drain-failure') cancel.mockRejectedValueOnce(new Error('native drain failed'));
+        fireEvent.press(view.getByTestId('tts-reference-import'));
+        if (outcome === 'drain-failure') {
+          await waitFor(() => expect(view.getByText('tts.errors.reference_invalid')).toBeTruthy());
+          expect(picker.getDocumentAsync).not.toHaveBeenCalled();
+          return;
+        }
+        await waitFor(() => expect(picker.getDocumentAsync).toHaveBeenCalledTimes(1));
+        const beforeBackground = cancel.mock.calls.length;
+        await act(async () => { setAppState('inactive'); setAppState('background'); });
+        expect(cancel.mock.calls.length).toBeGreaterThan(beforeBackground);
+        if (outcome === 'success' || outcome === 'cancel' || outcome === 'timeout') {
+          expect(view.getByTestId('tts-preview-sheet')).toBeTruthy();
+          expect(view.getByTestId('tts-text-input').props.value).toBe('Keep this preview.');
+        }
+        if (outcome === 'close') await act(async () => { fireEvent.press(view.getByTestId('tts-close')); });
+        if (outcome === 'thread') await act(async () => { useChatStore.setState({ activeThreadId: null }); });
+        if (outcome === 'blur') await act(async () => { navigation.__setIsFocused(false); view.rerender(React.createElement(ChatScreen)); });
+        if (outcome === 'model') await act(async () => {
+          selection = { ...selection, modelName: 'Replacement' };
+          updateSettings({ autoSelectTtsModel: !getSettings().autoSelectTtsModel });
+        });
+        if (outcome === 'unmount') { view.unmount(); unmounted = true; }
+        if (outcome === 'timeout') jest.useFakeTimers();
+        await act(async () => { selected.resolve(outcome === 'cancel' ? { canceled: true, assets: null }
+          : { canceled: false, assets: [{ uri: sourceUri, name: 'reference.wav', mimeType: 'audio/x-wav', lastModified: 1 }] });
+          await selected.promise;
+        });
+        expect(prepare).not.toHaveBeenCalled(); // Activity result may arrive before onResume.
+        if (outcome === 'timeout') {
+          await act(async () => { await jest.advanceTimersByTimeAsync(5001); });
+          jest.useRealTimers();
+        } else await act(async () => { setAppState('active'); });
+        if (outcome === 'success') {
+          await waitFor(() => expect(view.getByTestId('tts-reference-preview')).toBeEnabled());
+          expect(prepare).toHaveBeenCalledWith({ sourceUri, purpose: 'reference', sampleRate: 24000, assertCurrent: expect.any(Function) });
+          expect(retain).toHaveBeenCalledTimes(1);
+          fireEvent.press(view.getByTestId('tts-save-options'));
+          fireEvent.changeText(view.getByTestId('tts-reference-name'), 'Allowed sample');
+          expect(view.getByTestId('tts-reference-save')).toBeDisabled();
+          fireEvent.press(view.getByTestId('tts-reference-consent'));
+          await waitFor(() => expect(view.getByTestId('tts-reference-save')).toBeEnabled());
+          expect(save).not.toHaveBeenCalled();
+        } else {
+          expect(prepare).not.toHaveBeenCalled();
+          expect(retain).not.toHaveBeenCalled();
+        }
+        if (outcome !== 'cancel') await waitFor(() => expect(deletion).toHaveBeenCalledWith(sourceUri, { idempotent: true }));
+        if (outcome === 'cancel' || outcome === 'timeout') {
+          await waitFor(() => expect(view.getByTestId('tts-reference-import')).toBeEnabled());
+          await act(async () => { setAppState('background'); });
+          expect(view.queryByTestId('tts-preview-sheet')).toBeNull(); // No stale handoff exemption.
+        }
+      } finally {
+        jest.useRealTimers();
+        if (!unmounted) view.unmount();
+        selected.resolve({ canceled: true, assets: null });
+        await act(async () => { await selected.promise; });
+        navigation.__setIsFocused(true);
+        for (const spy of spies.reverse()) spy.mockRestore();
+        for (const { mock, implementation } of sharedMocks) if (implementation) mock.mockImplementation(implementation);
+        if (descriptor) Object.defineProperty(AppState, 'currentState', descriptor);
+        else Reflect.deleteProperty(AppState, 'currentState');
+      }
+    });
   it('shows preset generation seeds, sends explicit draft edits, and resets them for a new draft', async () => {
     const presetParameters = { ...getGenerationParametersForModel('author/model-q4'), temperature: 0.2,
       output: { mode: 'json_object' as const }, template: { jinja: true, prefillText: '{' }, stop: [' END '] };

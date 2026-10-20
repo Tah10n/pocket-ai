@@ -48,7 +48,7 @@ import { ttsService } from '@/services/TtsService';
 import { getAndroidQaAudioStage7Evidence, isAndroidQaAudioStage7Enabled, subscribeAndroidQaAudioStage7 } from '@/services/AndroidQaAudioStage7';
 import { getAndroidQaTtsEvidence, subscribeAndroidQaTts, runAndroidQaTts, runAndroidQaTtsPlayback, continueAndroidQaTts } from '@/services/AndroidQaTts';
 import { prepareSpeechText, type PreparedSpeechText } from '@/utils/ttsText';
-import type { TtsErrorCode, TtsFlow } from '@/types/tts';
+import { TtsError, type TtsErrorCode, type TtsFlow } from '@/types/tts';
 import ttsQaFixtures from '../../../docs/validation/llama-rn-stage6/tts-fixtures.json';
 import { ChatSystemEventRow } from '@/components/ui/ChatSystemEventRow';
 import { ChatModelSelectorSheet } from '@/components/ui/ChatModelSelectorSheet';
@@ -1166,6 +1166,9 @@ const ChatScreenContent = () => {
     const [speechCleanupPending, setSpeechCleanupPending] = useState(false);
     const [speechUiError, setSpeechUiError] = useState<TtsErrorCode | 'unsafe_content'>();
     const speechVersion = useRef(0);
+    const referencePickerHandoff = useRef<{
+        onAppState: (next: string) => void; revoke: () => void;
+    } | null>(null);
     const speechMounted = useRef(true);
     const speechCleanupFailed = useRef(false);
     const speechFocused = useRef(isScreenFocused);
@@ -1175,6 +1178,7 @@ const ChatScreenContent = () => {
         if (speechMounted.current) setSpeechUiError('storage_failed');
     }, []);
     const cancelSpeech = useCallback(() => {
+        referencePickerHandoff.current?.revoke();
         ++speechVersion.current;
         if (speechMounted.current) {
             setSpeechPreview(null);
@@ -1189,7 +1193,8 @@ const ChatScreenContent = () => {
     useEffect(() => {
         speechMounted.current = true;
         const listener = AppState.addEventListener('change', next => {
-            if (next !== 'active') void cancelSpeech().catch(() => undefined);
+            if (referencePickerHandoff.current) referencePickerHandoff.current.onAppState(next);
+            else if (next !== 'active') void cancelSpeech().catch(() => undefined);
         });
         return () => {
             speechMounted.current = false;
@@ -1197,6 +1202,64 @@ const ChatScreenContent = () => {
             void cancelSpeech().catch(() => undefined);
         };
     }, [cancelSpeech]);
+    const beginReferencePickerHandoff = useCallback(() => {
+        if (!speechMounted.current || !speechFocused.current || speechCleanupFailed.current
+            || speechPreview?.id !== speechVersion.current || AppState.currentState !== 'active'
+            || referencePickerHandoff.current) throw new TtsError('cancelled');
+        const version = speechVersion.current;
+        const threadId = useChatStore.getState().activeThreadId;
+        const source = speechPreview.source;
+        const originalContent = speechPreview.originalContent;
+        let live = true;
+        let drain = Promise.resolve();
+        let finish: ((error?: TtsError) => void) | undefined;
+        const assertCurrent = () => {
+            if (!live || !speechMounted.current || !speechFocused.current || speechCleanupFailed.current
+                || version !== speechVersion.current || useChatStore.getState().activeThreadId !== threadId) throw new TtsError('cancelled');
+            if (source) {
+                const message = useChatStore.getState().threads[source.threadId]?.messages.find(item => item.id === source.messageId);
+                if (message?.role !== 'assistant' || message.state !== 'complete' || message.content !== originalContent) throw new TtsError('cancelled');
+            }
+        };
+        const token = {
+            revoke: () => {
+                if (!live) return;
+                live = false;
+                if (referencePickerHandoff.current === token) referencePickerHandoff.current = null;
+                finish?.(new TtsError('cancelled'));
+            },
+            onAppState: (next: string) => {
+                if (next === 'active') finish?.();
+                else {
+                    // The picker keeps only its editor. Native speech is still cancelled.
+                    drain = ttsService.cancelAndClear();
+                    void drain.catch(() => { onSpeechCleanupFailure(); token.revoke(); });
+                }
+            },
+        };
+        referencePickerHandoff.current = token;
+        return {
+            release: token.revoke,
+            waitForForeground: async () => {
+                assertCurrent();
+                if (AppState.currentState !== 'active') {
+                    await new Promise<void>((resolve, reject) => {
+                        const timer = setTimeout(() => finish?.(new TtsError('cancelled')), 5000);
+                        finish = error => {
+                            clearTimeout(timer);
+                            finish = undefined;
+                            if (error) reject(error); else resolve();
+                        };
+                        // The screen's existing AppState listener owns notifications.
+                        if (AppState.currentState === 'active') finish();
+                    });
+                }
+                await drain;
+                assertCurrent();
+                if (AppState.currentState !== 'active') throw new TtsError('cancelled');
+            },
+        };
+    }, [onSpeechCleanupFailure, speechPreview]);
     useFocusEffect(useCallback(() => () => {
         // Invalidate first; cleanup rejection remains visible and blocks further starts.
         void cancelSpeech().catch(() => undefined);
@@ -3952,7 +4015,7 @@ const ChatScreenContent = () => {
             {speechPreview ? <TtsPreviewSheet key={speechPreview.id}
                 initialText={speechPreview.text} reviewReason={speechPreview.reason} source={speechPreview.source}
                 isPreviewCurrent={isSpeechPreviewCurrent} onClose={closeSpeechPreview}
-                onCleanupFailure={onSpeechCleanupFailure}
+                onCleanupFailure={onSpeechCleanupFailure} onReferencePickerHandoff={beginReferencePickerHandoff}
                 onOpenModels={() => {
                     closeSpeechPreview();
                     router.navigate('/(tabs)/models');

@@ -32,6 +32,7 @@ export interface TtsPreviewSheetProps {
   onClose: () => void;
   onOpenModels: () => void;
   onCleanupFailure: () => void;
+  onReferencePickerHandoff?: () => { waitForForeground: () => Promise<void>; release: () => void };
 }
 
 /** QA-only bounded status: never serialize the full service state or speech content. */
@@ -80,7 +81,7 @@ export function getTtsQaPlaybackMarker(state: TtsServiceState): string {
 }
 
 export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCurrent,
-  onClose, onOpenModels, onCleanupFailure }: TtsPreviewSheetProps) {
+  onClose, onOpenModels, onCleanupFailure, onReferencePickerHandoff }: TtsPreviewSheetProps) {
   const { t } = useTranslation();
   const { height } = useWindowDimensions();
   const state = useSyncExternalStore(ttsService.subscribe, ttsService.getState, ttsService.getState);
@@ -115,6 +116,7 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
   const mounted = useRef(true);
   const current = useRef(true);
   const revision = useRef(0);
+  const referencePickerHandoff = useRef<ReturnType<NonNullable<TtsPreviewSheetProps['onReferencePickerHandoff']>> | null>(null);
   const restoreVersion = useRef(0);
   const voiceRevision = useRef(0);
   const busy = useRef(false);
@@ -124,6 +126,8 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
   const selectionIdentity = useRef(JSON.stringify(selection));
 
   const clear = useCallback((): Promise<void> => {
+    referencePickerHandoff.current?.release();
+    referencePickerHandoff.current = null;
     ++revision.current; // Invalidate the visible request before waiting for native drain.
     if (clearDrain.current) return clearDrain.current;
     if (mounted.current) setClearing(true);
@@ -418,24 +422,34 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
                       const captured = revision.current;
                       await drain;
                       assertReferenceCurrent(captured);
-                      const picked = await DocumentPicker.getDocumentAsync({ type: ['audio/wav', 'audio/wave', 'audio/x-wav', 'audio/mpeg', 'audio/mp4'],
-                        copyToCacheDirectory: true, multiple: false });
-                      if (picked.canceled) return;
-                      const asset = picked.assets[0];
-                      let preparedAudio: PreparedAudio | undefined;
+                      const handoff = onReferencePickerHandoff?.();
+                      referencePickerHandoff.current = handoff ?? null;
                       try {
-                        assertReferenceCurrent(captured);
-                        preparedAudio = await prepareManagedAudio({ sourceUri: asset.uri, purpose: 'reference', sampleRate: 24000,
-                          assertCurrent: () => assertReferenceCurrent(captured) });
-                        const mime = asset.mimeType === 'audio/wav' || asset.mimeType === 'audio/wave' || asset.mimeType === 'audio/x-wav' ? 'audio/wav'
-                          : asset.mimeType === 'audio/mpeg' ? 'audio/mpeg' : 'audio/mp4';
-                        await retainReference(preparedAudio, asset.uri, mime);
-                      } finally {
-                        if (preparedAudio) await discardPreparedAudio(preparedAudio);
-                        if (FileSystem.cacheDirectory && asset.uri.startsWith(FileSystem.cacheDirectory)) {
-                          await FileSystem.deleteAsync(asset.uri, { idempotent: true });
-                          if ((await FileSystem.getInfoAsync(asset.uri)).exists) throw new TtsError('storage_failed');
+                        const picked = await DocumentPicker.getDocumentAsync({ type: ['audio/wav', 'audio/wave', 'audio/x-wav', 'audio/mpeg', 'audio/mp4'],
+                          copyToCacheDirectory: true, multiple: false });
+                        const asset = picked.canceled ? undefined : picked.assets[0];
+                        let preparedAudio: PreparedAudio | undefined;
+                        try {
+                          await handoff?.waitForForeground();
+                          assertReferenceCurrent(captured);
+                          handoff?.release();
+                          if (referencePickerHandoff.current === handoff) referencePickerHandoff.current = null;
+                          if (!asset) return;
+                          preparedAudio = await prepareManagedAudio({ sourceUri: asset.uri, purpose: 'reference', sampleRate: 24000,
+                            assertCurrent: () => assertReferenceCurrent(captured) });
+                          const mime = asset.mimeType === 'audio/wav' || asset.mimeType === 'audio/wave' || asset.mimeType === 'audio/x-wav' ? 'audio/wav'
+                            : asset.mimeType === 'audio/mpeg' ? 'audio/mpeg' : 'audio/mp4';
+                          await retainReference(preparedAudio, asset.uri, mime);
+                        } finally {
+                          if (preparedAudio) await discardPreparedAudio(preparedAudio);
+                          if (asset && FileSystem.cacheDirectory && asset.uri.startsWith(FileSystem.cacheDirectory)) {
+                            await FileSystem.deleteAsync(asset.uri, { idempotent: true });
+                            if ((await FileSystem.getInfoAsync(asset.uri)).exists) throw new TtsError('storage_failed');
+                          }
                         }
+                      } finally {
+                        handoff?.release();
+                        if (referencePickerHandoff.current === handoff) referencePickerHandoff.current = null;
                       }
                     }, 'reference_invalid')}><ButtonText>{t('tts.importReference')}</ButtonText></Button>
                 </Box>

@@ -56,9 +56,9 @@ describe('Windows scoped native staging', () => {
   it('fails closed when the root-plugin lifecycle boundary is absent', () => {
     expect(() => ensureWindowsNativeStaging('buildscript { }\n')).toThrow(/root plugin boundary/);
   });
-  it('limits Windows configuration to the app and MMKV using their respective Android plugin types', () => {
+  it('limits Windows configuration to the app, MMKV and worklets-core using their respective Android plugin types', () => {
     const gate = 'if (System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).startsWith("windows"))';
-    const registry = 'def pocketNativeModules = [":react-native-mmkv": ["com.android.library", "m"], ":app": ["com.android.application", "a"]]';
+    const registry = 'def pocketNativeModules = [":react-native-mmkv": ["com.android.library", "m"], ":react-native-worklets-core": ["com.android.library", "w"], ":app": ["com.android.application", "a"]]';
     expect(WINDOWS_NATIVE_STAGING.indexOf(gate)).toBeLessThan(WINDOWS_NATIVE_STAGING.indexOf(registry));
     expect(WINDOWS_NATIVE_STAGING).toContain(registry);
     expect(WINDOWS_NATIVE_STAGING).toMatch(/def pocketNativeModule = pocketNativeModules\[subproject.path\]\s+if \(pocketNativeModule != null\) \{\s+subproject.plugins.withId\(pocketNativeModule\[0\]\)/u);
@@ -72,6 +72,28 @@ describe('Windows scoped native staging', () => {
     const dependent = build + '/../prefab/x86_64/prefab/lib/x86_64-linux-android/cmake/react-native-nitro-modules/react-native-nitro-modulesConfig.cmake';
     expect(dependent.length).toBeLessThan(260);
     expect(staging).toMatch(/\\g-123456789abc\\n\\m-123456789abc$/u);
+  });
+
+  it('shortens the worklets ARM64 Hermes prefab dependency before Ninja resolves its parent segment', () => {
+    const relative = '/../prefab/arm64-v8a/prefab/lib/aarch64-linux-android/cmake/hermes-engine/hermes-engineConfigVersion.cmake';
+    const original = path.win32.join('C:/Users/developer/.codex/worktrees/stage-seven-followup/pocket_ai/app/node_modules/react-native-worklets-core/android/.cxx', 'RelWithDebInfo/60125n11/arm64-v8a');
+    const registry = Object.fromEntries([...WINDOWS_NATIVE_STAGING.matchAll(/"(:[^"]+)": \["([^"]+)", "([^"]+)"\]/gu)]
+      .map(([, module, plugin, suffix]) => [module, { plugin, suffix }]));
+    expect(registry[':react-native-worklets-core']).toEqual({ plugin: 'com.android.library', suffix: 'w' });
+    const staged = path.win32.join('C:/Users/developer/.pa/g-123456789abc', `n/${registry[':react-native-worklets-core'].suffix}-123456789abc`, 'RelWithDebInfo/60125n11/arm64-v8a');
+    // Do not normalize away ../: legacy Ninja stats the joined spelling first.
+    expect((original + relative).length).toBeGreaterThanOrEqual(260);
+    expect((staged + relative).length).toBeLessThan(260);
+    expect(new Set(Object.values(registry).map(entry => entry.suffix)).size).toBe(3);
+  });
+
+  it('upgrades the existing app/MMKV block to include worklets before root plugin evaluation', () => {
+    const previous = WINDOWS_NATIVE_STAGING.replace(', ":react-native-worklets-core": ["com.android.library", "w"]', '');
+    const upgraded = ensureWindowsNativeStaging(mockRootGradle + '\n' + previous);
+    expect(upgraded).toContain('":react-native-worklets-core": ["com.android.library", "w"]');
+    expect(upgraded.indexOf('":react-native-worklets-core"')).toBeLessThan(upgraded.indexOf('apply plugin: "expo-root-project"'));
+    expect(upgraded.split('// @generated pocket-ai Windows native staging')).toHaveLength(2);
+    expect(ensureWindowsNativeStaging(upgraded)).toBe(upgraded);
   });
 
   it('uses a stable canonical project hash so checkouts sharing Gradle home stay isolated', () => {

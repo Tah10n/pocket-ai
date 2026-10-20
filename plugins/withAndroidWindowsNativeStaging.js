@@ -5,7 +5,7 @@ const END = '// @end pocket-ai Windows native staging';
 const WINDOWS_NATIVE_STAGING = `${START}
 // Keep legacy Ninja prefab paths and CMake's hashed object paths below Windows limits.
 if (System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).startsWith("windows")) {
-    def pocketNativeModules = [":react-native-mmkv": ["com.android.library", "m"], ":app": ["com.android.application", "a"]]
+    def pocketNativeModules = [":react-native-mmkv": ["com.android.library", "m"], ":react-native-worklets-core": ["com.android.library", "w"], ":app": ["com.android.application", "a"]]
     subprojects { subproject ->
         def pocketNativeModule = pocketNativeModules[subproject.path]
         if (pocketNativeModule != null) {

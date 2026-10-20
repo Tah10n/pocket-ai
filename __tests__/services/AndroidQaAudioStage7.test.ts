@@ -496,3 +496,50 @@ it('ignores a closed voices observer after a new run starts rather than resurrec
   await next;
   expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureStage: 'decode', steps: [] });
 });
+
+
+it('retains bounded failed-attempt observations through native rejection without creating a passed step', async () => {
+  let oldObserve: TtsRequest['observe'];
+  mockTtsStart.mockImplementationOnce(async (request: TtsRequest) => {
+    oldObserve = request.observe;
+    request.observe?.({ operation: 'phonemizer_module_init', phase: 'settled', elapsedMs: 12 });
+    request.observe?.({ operation: 'phonemizer_conversion', phase: 'settled', elapsedMs: 4 });
+    request.observe?.({ operation: 'formatter', phase: 'settled', flow: 'tokens' });
+    request.observe?.({ operation: 'completion', phase: 'started', grammarPresent: true, promptTokens: 420 } as never);
+    request.observe?.({ operation: 'first_failure', phase: 'failed', failureStage: 'completion', failureReason: 'grammar_parse_failed', message: '/private/speech' } as never);
+    request.observe?.({ operation: 'vocoder_release', phase: 'settled' });
+    throw new TtsError('native_failed');
+  });
+  await runAndroidQaStage7Voices('phonemizer');
+  const safe = sanitizeAudioStage7Evidence(getAndroidQaAudioStage7Evidence());
+  expect(safe).toMatchObject({ status: 'failed', steps: [], failedAttempt: { id: 'neu-jo', observations: [
+    { operation: 'phonemizer_module_init', phase: 'settled', elapsedMs: 12 },
+    { operation: 'phonemizer_conversion', phase: 'settled', elapsedMs: 4 },
+    { operation: 'formatter', phase: 'settled', flow: 'tokens' },
+    { operation: 'completion', phase: 'started', grammarPresent: true, promptTokens: 420 },
+    { operation: 'first_failure', phase: 'failed', failureStage: 'completion', failureReason: 'grammar_parse_failed' },
+    { operation: 'vocoder_release', phase: 'settled' },
+  ] } });
+  expect(JSON.stringify(safe)).not.toContain('/private/');
+  oldObserve?.({ operation: 'decode', phase: 'settled', sampleCount: 20 });
+  expect(sanitizeAudioStage7Evidence(getAndroidQaAudioStage7Evidence())).toEqual(safe);
+});
+
+it('bounds device-side failed-attempt storage and starts the next run without stale observations', async () => {
+  mockTtsStart.mockImplementationOnce(async (request: TtsRequest) => {
+    for (let index = 0; index < 100; index++) request.observe?.({ operation: 'formatter', phase: 'settled', promptTokens: index } as never);
+    request.observe?.({ operation: 'completion', phase: 'settled', elapsedMs: Infinity, tokensEvaluated: -1,
+      sampleCount: 1000001, grammarPresent: 'yes', message: '/private' } as never);
+    request.observe?.({ operation: '/private', phase: 'settled' } as never);
+    throw new TtsError('native_failed');
+  });
+  await runAndroidQaStage7Voices('phonemizer');
+  const failed = getAndroidQaAudioStage7Evidence();
+  expect(failed.failedAttempt?.observations).toHaveLength(64);
+  expect(failed.failedAttempt?.observations[0].promptTokens).toBe(37);
+  expect(failed.failedAttempt?.observations.at(-1)).toEqual({ operation: 'completion', phase: 'settled' });
+  expect(JSON.stringify(failed)).not.toContain('/private');
+  jest.mocked(prepareAndroidQaStage3Adapter).mockRejectedValueOnce(new Error('private'));
+  await runAndroidQaStage7Voices('phonemizer');
+  expect(getAndroidQaAudioStage7Evidence().failedAttempt).toBeUndefined();
+});

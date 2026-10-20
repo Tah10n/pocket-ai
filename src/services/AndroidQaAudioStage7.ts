@@ -7,7 +7,7 @@ import { useChatStore } from '../store/chatStore';
 import { useDownloadStore } from '../store/downloadStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../types/models';
 import { DEFAULT_PRESET_SNAPSHOT } from '../types/chat';
-import { TtsError, sanitizePhonemizerFailure, isTtsFailureStage, type TtsFailureStage, type PhonemizerFailure, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
+import { TtsError, sanitizeTtsObservation, sanitizePhonemizerFailure, isTtsFailureStage, type TtsFailureStage, type PhonemizerFailure, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
 import { getCompanionBindingIdentity, getCompanionSourceIdentity } from '../utils/modelArtifacts';
 import { getModelFileIdentity } from '../utils/modelRoles';
 import { audioRecordingService } from './AudioRecordingService';
@@ -45,6 +45,7 @@ export interface AndroidQaAudioStage7Evidence {
   mode?: Mode; clipId?: string; failureCode?: string; requiresForceStop: boolean;
   phonemizerFailure?: PhonemizerFailure;
   failureStage?: TtsFailureStage;
+  failedAttempt?: { id: string; observations: TtsObservation[] };
   steps: AndroidQaAudioStage7Step[]; runtimeVersion: '0.13.0-rc.3'; backend: 'cpu';
   contentVerification: 'not_run'; referenceConditioning: 'not_run';
 }
@@ -362,13 +363,22 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
       const model = await prepareAndroidQaTtsProfile(profile);
       selectAuxiliaryModel('tts', model);
       const observations: TtsObservation[] = [];
+      let observing = true;
       failureStage = 'tts_setup';
-      await ttsService.start({ text: TARGET_TEXT, language: 'en', voice, playAfterSynthesis: false,
-        observe: event => {
-          if (event.operation === 'first_failure') {
-            if (event.phase === 'failed' && isTtsFailureStage(event.failureStage)) recordFailure(event.failureStage);
-          } else observations.push(event);
-        } });
+      try {
+        await ttsService.start({ text: TARGET_TEXT, language: 'en', voice, playAfterSynthesis: false,
+          observe: event => {
+            if (!observing) return;
+            const safe = sanitizeTtsObservation(event);
+            if (!safe) return;
+            observations.push(safe);
+            if (observations.length > 64) observations.shift();
+            if (safe.operation === 'first_failure' && safe.phase === 'failed' && isTtsFailureStage(safe.failureStage)) recordFailure(safe.failureStage);
+          } });
+      } catch (error) {
+        publish({ failedAttempt: { id, observations: [...observations] } });
+        throw error;
+      } finally { observing = false; }
       failureStage = 'qa_voice_sequence';
       restored();
       const decoded = observations.find(event => event.operation === 'decode' && event.phase === 'settled');

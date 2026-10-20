@@ -72,10 +72,12 @@ export async function synthesizeTtsOnContext(
   const observe = (event: TtsObservation) => { try { options.observe?.(event); } catch { /* Observation cannot alter ownership. */ } };
   let failureStage: TtsFailureStage = 'tts_setup';
   let failureObserved = false;
-  const observeFailure = (stage: TtsFailureStage) => {
+  const observeFailure = (stage: TtsFailureStage, error?: unknown) => {
     if (failureObserved) return;
     failureObserved = true;
-    observe({ operation: 'first_failure', phase: 'failed', failureStage: stage });
+    observe({ operation: 'first_failure', phase: 'failed', failureStage: stage,
+      ...(stage === 'completion' && error instanceof Error && error.message === 'failed to parse grammar'
+        ? { failureReason: 'grammar_parse_failed' as const } : {}) });
   };
   const observed = async <T>(operation: TtsOperation, call: () => Promise<T>): Promise<T> => {
     failureStage = operation === 'phonemizer_module_init' || operation === 'phonemizer_conversion' ? 'phonemizer' : operation;
@@ -240,7 +242,7 @@ export async function synthesizeTtsOnContext(
     completionActive = true;
     failureStage = 'completion';
     let result: LlamaCompletionResult;
-    observe({ operation: 'completion', phase: 'started', flow });
+    observe({ operation: 'completion', phase: 'started', flow, promptTokens, grammarPresent: Boolean(formatted.grammar) });
     try {
       result = await runCompletionOnContext({ context, params });
       observe({ operation: 'completion', phase: 'settled', flow,
@@ -249,7 +251,7 @@ export async function synthesizeTtsOnContext(
         nativePrefillMs: boundedTtsLatencyMs(result.timings?.prompt_ms),
         nativeGenerationMs: boundedTtsLatencyMs(result.timings?.predicted_ms),
         interrupted: result.interrupted, stoppedEos: result.stopped_eos });
-    } catch (error) { observeFailure('completion'); observe({ operation: 'completion', phase: 'settled', flow }); throw error; }
+    } catch (error) { observeFailure('completion', error); observe({ operation: 'completion', phase: 'settled', flow }); throw error; }
     finally { completionActive = false; await stopping; }
     failureStage = 'completion';
     check();

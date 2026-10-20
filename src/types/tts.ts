@@ -102,6 +102,9 @@ export interface TtsObservation {
   operation: TtsOperation | 'first_failure';
   phase: 'started' | 'settled' | 'failed';
   failureStage?: TtsFailureStage;
+  failureReason?: 'grammar_parse_failed';
+  grammarPresent?: boolean;
+  promptTokens?: number;
   flow?: TtsFlow;
   elementCount?: number;
   sampleRate?: number;
@@ -158,4 +161,31 @@ export function sanitizeTtsLatency(value: unknown): TtsLatency | undefined {
     if (duration !== undefined && (key !== 'audioDurationMs' || duration <= TTS_LIMITS.durationSeconds * 1000)) numeric[key] = duration;
   }
   return Object.freeze({ runKind: source.runKind, stagesMs: Object.freeze(stagesMs), ...numeric });
+}
+
+/** Closed receipt, bounded before retention. Settled is not a success assertion. */
+export function sanitizeTtsObservation(value: unknown): TtsObservation | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const source = value as Record<string, unknown>;
+  const operations = ['vocoder_init', 'speaker_create', 'speaker_bake', 'speaker_release',
+    'phonemizer', 'phonemizer_module_init', 'phonemizer_conversion', 'prompt_prepare', 'formatter',
+    'completion', 'completion_stop', 'decode', 'vocoder_release', 'first_failure'];
+  if (!operations.includes(source.operation as string) || !['started', 'settled', 'failed'].includes(source.phase as string)) return undefined;
+  const result: TtsObservation = { operation: source.operation as TtsObservation['operation'], phase: source.phase as TtsObservation['phase'] };
+  if (isTtsFailureStage(source.failureStage)) result.failureStage = source.failureStage;
+  if (source.operation === 'first_failure' && source.phase === 'failed' && source.failureStage === 'completion'
+    && source.failureReason === 'grammar_parse_failed') result.failureReason = 'grammar_parse_failed';
+  if (['tokens', 'continuous_embd', 'talker_embd'].includes(source.flow as string)) result.flow = source.flow as TtsFlow;
+  for (const key of ['elementCount', 'sampleRate', 'sampleCount', 'tokensPredicted', 'tokensEvaluated', 'speakerRows', 'promptTokens'] as const) {
+    const number = source[key];
+    if (typeof number === 'number' && Number.isSafeInteger(number) && number >= 0 && number <= 1_000_000) result[key] = number;
+  }
+  for (const key of ['elapsedMs', 'nativePrefillMs', 'nativeGenerationMs'] as const) {
+    const number = boundedTtsLatencyMs(source[key]);
+    if (number !== undefined) result[key] = number;
+  }
+  for (const key of ['interrupted', 'stoppedEos', 'speakerBaked', 'grammarPresent'] as const) {
+    if (typeof source[key] === 'boolean') result[key] = source[key];
+  }
+  return result;
 }

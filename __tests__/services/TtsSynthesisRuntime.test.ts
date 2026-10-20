@@ -566,3 +566,18 @@ it('reports actual native prefill and generation counters separately from format
     operation: 'completion', phase: 'settled', nativePrefillMs: 21, nativeGenerationMs: 89,
   }));
 });
+
+
+it.each(['failed to parse grammar', 'failed to parse grammar /private/voice.wav'])('only classifies the exact native grammar rejection: %s', async message => {
+  const { native, context } = nativeContext();
+  native.completion.mockRejectedValueOnce(new Error(message));
+  const observe = jest.fn();
+  await expect(synthesizeTtsOnContext(context, tokensProfile, { ...options(), observe })).rejects.toMatchObject({ code: 'native_failed' });
+  const events = observe.mock.calls.map(([event]) => event);
+  expect(events).toContainEqual(expect.objectContaining({ operation: 'completion', phase: 'started', grammarPresent: true, promptTokens: 3 }));
+  const failure = events.find(event => event.operation === 'first_failure');
+  expect(failure?.failureReason).toBe(message === 'failed to parse grammar' ? 'grammar_parse_failed' : undefined);
+  expect(JSON.stringify(events)).not.toContain('/private/');
+  expect(native.decodeAudioTokens).not.toHaveBeenCalled();
+  expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
+});

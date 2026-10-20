@@ -73,6 +73,28 @@ function sanitizeAudioStage7Evidence(value) {
     if (Array.isArray(step.operations)) safe.operations = step.operations.filter(item => OPERATIONS.includes(item)).slice(0, 16);
     return [safe];
   });
+  const attempt = source.failedAttempt;
+  if (['running', 'failed'].includes(result.status) && attempt && CLIPS.includes(attempt.id) && Array.isArray(attempt.observations)) {
+    result.failedAttempt = { id: attempt.id, observations: attempt.observations.slice(-64).flatMap(event => {
+      if (!event || ![...OPERATIONS, 'first_failure'].includes(event.operation)
+        || !['started', 'settled', 'failed'].includes(event.phase)) return [];
+      const safe = { operation: event.operation, phase: event.phase };
+      if (FAILURE_STAGES.includes(event.failureStage)) safe.failureStage = event.failureStage;
+      if (event.operation === 'first_failure' && event.phase === 'failed' && event.failureStage === 'completion'
+        && event.failureReason === 'grammar_parse_failed') safe.failureReason = 'grammar_parse_failed';
+      if (['tokens', 'continuous_embd', 'talker_embd'].includes(event.flow)) safe.flow = event.flow;
+      for (const key of ['elementCount', 'sampleRate', 'sampleCount', 'tokensPredicted', 'tokensEvaluated', 'speakerRows', 'promptTokens']) {
+        if (Number.isSafeInteger(event[key]) && event[key] >= 0 && event[key] <= 1_000_000) safe[key] = event[key];
+      }
+      for (const key of ['elapsedMs', 'nativePrefillMs', 'nativeGenerationMs']) {
+        if (typeof event[key] === 'number' && Number.isFinite(event[key]) && event[key] >= 0 && event[key] <= 600_000) safe[key] = Math.round(event[key]);
+      }
+      for (const key of ['interrupted', 'stoppedEos', 'speakerBaked', 'grammarPresent']) {
+        if (typeof event[key] === 'boolean') safe[key] = event[key];
+      }
+      return [safe];
+    }) };
+  }
   return result;
 }
 function validateAudioStage7Evidence(evidence, mode) {

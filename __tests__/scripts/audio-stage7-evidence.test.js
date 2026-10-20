@@ -138,3 +138,20 @@ it('retains one closed failure stage only for failed voices and never upgrades f
       .not.toHaveProperty('failureStage');
   }
 });
+
+it('bounds failed-attempt retention and strips untrusted fields, nonfinite counters and nonexact reasons', () => {
+  const receipt = { ...initial('phonemizer'), status: 'failed', failedAttempt: { id: 'neu-jo', observations: [
+    ...Array.from({ length: 100 }, (_, promptTokens) => ({ operation: 'completion', phase: 'started', promptTokens })),
+    { operation: 'first_failure', phase: 'failed', failureStage: 'completion', failureReason: 'grammar_parse_failed /private',
+      elapsedMs: Infinity, sampleCount: 1000001, nativePrefillMs: -1, grammarPresent: 'true', stoppedEos: true,
+      pcm: [1], prompt: '/private', message: '/private', speakerId: 12 },
+    { operation: '/private', phase: 'failed' }, null,
+  ] } };
+  const safe = sanitizeAudioStage7Evidence(receipt);
+  expect(safe.failedAttempt.observations).toHaveLength(62);
+  expect(safe.failedAttempt.observations[0].promptTokens).toBe(39);
+  expect(safe.failedAttempt.observations.at(-1)).toEqual({ operation: 'first_failure', phase: 'failed', failureStage: 'completion', stoppedEos: true });
+  expect(JSON.stringify(safe)).not.toMatch(/private|speakerId|pcm|message/u);
+  expect(sanitizeAudioStage7Evidence({ ...receipt, status: 'native_passed' }).failedAttempt).toBeUndefined();
+  expect(() => validateAudioStage7Evidence(safe, 'phonemizer')).toThrow();
+});

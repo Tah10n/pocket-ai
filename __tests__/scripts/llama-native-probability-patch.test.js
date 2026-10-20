@@ -79,6 +79,30 @@ describe('pinned serial sampling and template clock corrections', () => {
     for (const [guarded, bytes] of before) expect(fs.readFileSync(guarded)).toEqual(bytes);
   });
 
+  it('migrates the exact previous audio guard and remains idempotent without changing other sources', () => {
+    const relative = 'cpp/tools/mtmd/mtmd-helper.cpp';
+    const patch = SOURCE_PATCHES.find(entry => entry.source === relative);
+    const previousHash = 'c9a29e969cbba13599e169f99b7c5a340008e11a963030f6004d67d4efac934d';
+    const migration = patch.intermediates.find(entry => entry.sha256 === previousHash);
+    patchLlamaBridge(root);
+    const file = path.join(root, 'node_modules/llama.rn', relative);
+    const final = fs.readFileSync(file, 'utf8');
+    const otherSources = SOURCE_PATCHES.filter(entry => entry.source !== relative).map(entry => {
+      const other = path.join(root, 'node_modules/llama.rn', entry.source);
+      return [other, fs.readFileSync(other)];
+    });
+    let previous = final;
+    for (const [before, after] of [...migration.replacements].reverse()) previous = previous.replace(after, before);
+    expect(hashSource(previous)).toBe(previousHash);
+    fs.writeFileSync(file, previous);
+    expect(() => patchLlamaBridge(root, { check: true })).toThrow(/patch is missing/u);
+    expect(patchLlamaBridge(root).status).toBe('applied');
+    expect(fs.readFileSync(file, 'utf8')).toBe(final);
+    expect(hashSource(final)).toBe(patch.afterSha256);
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+    for (const [other, bytes] of otherSources) expect(fs.readFileSync(other)).toEqual(bytes);
+  });
+
   it('bounds actual input decoder allocations and rejects truncated/nonfinite PCM before bitmap publication', () => {
     patchLlamaBridge(root);
     const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn/cpp/tools/mtmd/mtmd-helper.cpp'), 'utf8');
@@ -98,8 +122,10 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(decode.indexOf('len > max_input_bytes')).toBeLessThan(decode.indexOf('ma_decoder_init_memory('));
     expect(decode.indexOf('frame_count > max_pcm_frames')).toBeLessThan(decode.indexOf('pcmf32_mono.resize('));
     expect(decode).toContain('result != MA_SUCCESS || frame_count == 0');
-    expect(decode).toContain('result != MA_SUCCESS || frames_read != frame_count');
-    expect(decode).toContain('extra_frames != 0 || (result != MA_SUCCESS && result != MA_AT_END)');
+    expect(decode).toContain('frames_read == 0 || frames_read > frame_count');
+    expect(decode).toContain('extra_frames != 0 || result != MA_AT_END');
+    expect(decode).toContain('source_cursor != source_length');
+    expect(decode).toContain('pcmf32_mono.resize(static_cast<size_t>(frames_read))');
     expect(decode).toContain('!std::isfinite(sample)');
     expect(decode).toContain('~decoder_guard() { ma_decoder_uninit(value); }');
     expect(decode).toContain('audio_decoder_duration_limit');

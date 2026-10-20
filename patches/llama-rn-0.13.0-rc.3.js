@@ -663,6 +663,88 @@ const AUDIO_INPUT_BOUNDS_REPLACEMENTS = [
 
     size_t n_read = fread(buf.data(), 1, file_size, f);`],
 ];
+// Preserve valid resampler rounding without accepting truncated encoded WAV data.
+const AUDIO_INPUT_RESAMPLING_REPLACEMENTS = [
+  [`    if (len > max_input_bytes) throw std::runtime_error("audio_decoder_size_limit");
+    ma_result result;`,
+  `    if (len > max_input_bytes) throw std::runtime_error("audio_decoder_size_limit");
+    // miniaudio may clamp a truncated WAV's backend length. Validate the encoded
+    // RIFF extents before using backend EOF as evidence of complete source data.
+    if (len >= 12 && memcmp(buf_in, "RIFF", 4) == 0 && memcmp(buf_in + 8, "WAVE", 4) == 0) {
+        const auto u16 = [](const unsigned char * p) -> uint32_t {
+            return uint32_t(p[0]) | (uint32_t(p[1]) << 8);
+        };
+        const auto u32 = [](const unsigned char * p) -> uint32_t {
+            return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+        };
+        const auto invalid = []() { throw std::runtime_error("audio_decoder_invalid_format"); };
+        if (uint64_t(u32(buf_in + 4)) + 8 != len) invalid();
+        size_t offset = 12;
+        size_t chunks = 0;
+        uint32_t alignment = 0;
+        bool have_data = false;
+        while (offset < len) {
+            if (++chunks > 4096 || len - offset < 8) invalid();
+            const unsigned char * chunk = buf_in + offset;
+            const size_t size = u32(chunk + 4);
+            offset += 8;
+            if (size > len - offset || (size & 1) > len - offset - size) invalid();
+            if (memcmp(chunk, "fmt ", 4) == 0) {
+                if (alignment != 0 || size < 16) invalid();
+                const unsigned char * fmt = buf_in + offset;
+                const uint32_t encoding = u16(fmt);
+                const uint32_t source_channels = u16(fmt + 2);
+                const uint32_t rate = u32(fmt + 4);
+                const uint32_t bits = u16(fmt + 14);
+                alignment = u16(fmt + 12);
+                const bool pcm = encoding == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32);
+                const bool floating = encoding == 3 && (bits == 32 || bits == 64);
+                if ((!pcm && !floating) || source_channels < 1 || source_channels > 2
+                    || rate < 8000 || rate > 192000 || alignment != source_channels * bits / 8
+                    || u32(fmt + 8) != uint64_t(rate) * alignment) invalid();
+            } else if (memcmp(chunk, "data", 4) == 0) {
+                if (alignment == 0 || have_data || size == 0 || size % alignment != 0) invalid();
+                have_data = true;
+            }
+            offset += size + (size & 1);
+        }
+        if (!have_data || alignment == 0) invalid();
+    }
+    ma_result result;`],
+  [`    if (result != MA_SUCCESS || frames_read != frame_count) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    float extra_sample = 0;
+    ma_uint64 extra_frames = 0;
+    result = ma_decoder_read_pcm_frames(&decoder, &extra_sample, 1, &extra_frames);
+    if (extra_frames != 0 || (result != MA_SUCCESS && result != MA_AT_END)) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    for (float sample : pcmf32_mono) {`,
+  `    if ((result != MA_SUCCESS && result != MA_AT_END) || frames_read == 0 || frames_read > frame_count) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    float extra_sample = 0;
+    ma_uint64 extra_frames = 0;
+    result = ma_decoder_read_pcm_frames(&decoder, &extra_sample, 1, &extra_frames);
+    ma_uint64 source_cursor = 0;
+    ma_uint64 source_length = 0;
+    // Resampled output length is a conservative estimate, not an exact count.
+    // Accept fewer frames only after both output EOF and full backend consumption;
+    // never grow beyond the already admitted allocation or publish zero padding.
+    if (extra_frames != 0 || result != MA_AT_END || decoder.pBackend == nullptr
+        || ma_data_source_get_cursor_in_pcm_frames(decoder.pBackend, &source_cursor) != MA_SUCCESS
+        || ma_data_source_get_length_in_pcm_frames(decoder.pBackend, &source_length) != MA_SUCCESS
+        || source_length == 0 || source_cursor != source_length) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    pcmf32_mono.resize(static_cast<size_t>(frames_read));
+    for (float sample : pcmf32_mono) {`],
+];
 const NEU_DIAGNOSTIC_PATCHES = [
   {
     "source": "cpp/rn-completion.h",
@@ -774,7 +856,9 @@ const SOURCE_PATCHES = [
     afterSha256: 'f86e0f9835196146a78c0b52660f4ba80825c3fe9139e21914c6d86a58fd28f8', replacements: DAC_DECODE_THREAD_REPLACEMENTS },
   { source: 'cpp/tools/mtmd/mtmd-helper.cpp',
     beforeSha256: '323d595dfb719edb53c8720105f2da18abc76dade2dc3e7f38ecdf94200886d2',
-    afterSha256: 'c9a29e969cbba13599e169f99b7c5a340008e11a963030f6004d67d4efac934d', replacements: AUDIO_INPUT_BOUNDS_REPLACEMENTS },
+    afterSha256: '7977edcac38005046c3630488de4da59fab6298824bfc34ea94a3540836b2b8f',
+    replacements: [...AUDIO_INPUT_BOUNDS_REPLACEMENTS, ...AUDIO_INPUT_RESAMPLING_REPLACEMENTS],
+    intermediates: [{ sha256: 'c9a29e969cbba13599e169f99b7c5a340008e11a963030f6004d67d4efac934d', replacements: AUDIO_INPUT_RESAMPLING_REPLACEMENTS }] },
   { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256,
     replacements: [[BEFORE, AFTER], ...SPEAKER_RECEIPT_REPLACEMENTS],
     intermediates: [{ sha256: SPEAKER_RECEIPT_PREVIOUS_SHA256, replacements: SPEAKER_RECEIPT_REPLACEMENTS }] },

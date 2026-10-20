@@ -12,6 +12,10 @@ if (System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).startsWith(
             subproject.plugins.withId(pocketNativeModule[0]) {
                 def pocketNativeRootHash = java.security.MessageDigest.getInstance("SHA-256").digest(rootProject.projectDir.canonicalPath.getBytes("UTF-8")).encodeHex().toString().substring(0, 12)
                 subproject.android.externalNativeBuild.cmake.buildStagingDirectory = new File(gradle.gradleUserHomeDir, "n/" + pocketNativeModule[1] + "-" + pocketNativeRootHash)
+                if (subproject.path == ":llama.rn") {
+                    // CMake 3.22 caches source object names before the longest variant adds 33 characters.
+                    subproject.android.defaultConfig.externalNativeBuild.cmake.arguments "-DCMAKE_OBJECT_PATH_MAX=217"
+                }
             }
         }
     }

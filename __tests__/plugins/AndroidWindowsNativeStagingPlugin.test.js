@@ -63,7 +63,28 @@ describe('Windows scoped native staging', () => {
     expect(WINDOWS_NATIVE_STAGING).toContain(registry);
     expect(WINDOWS_NATIVE_STAGING).toMatch(/def pocketNativeModule = pocketNativeModules\[subproject.path\]\s+if \(pocketNativeModule != null\) \{\s+subproject.plugins.withId\(pocketNativeModule\[0\]\)/u);
     expect(WINDOWS_NATIVE_STAGING).toContain('new File(gradle.gradleUserHomeDir, "n/" + pocketNativeModule[1] + "-" + pocketNativeRootHash)');
-    expect(WINDOWS_NATIVE_STAGING).not.toMatch(/ndkVersion|cmake\.version|CMAKE_MAKE_PROGRAM|CMAKE_OBJECT_PATH_MAX|rnllama|abiFilters/u);
+    expect(WINDOWS_NATIVE_STAGING).not.toMatch(/ndkVersion|cmake\.version|CMAKE_MAKE_PROGRAM|abiFilters/u);
+  });
+  it('reserves the cached object-name delta only for llama on Windows without replacing existing CMake arguments', () => {
+    const scopedArgument = `if (subproject.path == ":llama.rn") {
+                    // CMake 3.22 caches source object names before the longest variant adds 33 characters.
+                    subproject.android.defaultConfig.externalNativeBuild.cmake.arguments "-DCMAKE_OBJECT_PATH_MAX=217"
+                }`;
+    const gate = WINDOWS_NATIVE_STAGING.indexOf('startsWith("windows")');
+    expect(WINDOWS_NATIVE_STAGING).toContain(scopedArgument);
+    expect(WINDOWS_NATIVE_STAGING.indexOf(scopedArgument)).toBeGreaterThan(gate);
+    expect(WINDOWS_NATIVE_STAGING.match(/CMAKE_OBJECT_PATH_MAX/gu)).toHaveLength(1);
+    expect(WINDOWS_NATIVE_STAGING).not.toMatch(/cmake\.arguments\s*=/u);
+    const variants = ['rnllama', 'rnllama_v8', 'rnllama_v8_2', 'rnllama_v8_2_dotprod',
+      'rnllama_v8_2_i8mm', 'rnllama_v8_2_dotprod_i8mm', 'rnllama_v8_2_dotprod_i8mm_hexagon_opencl'];
+    const delta = Math.max(...variants.map(target => target.length)) - variants[0].length;
+    expect(delta).toBe(33);
+    expect(217 + delta).toBe(250);
+    const previous = WINDOWS_NATIVE_STAGING.replace(scopedArgument, '');
+    const upgraded = ensureWindowsNativeStaging(mockRootGradle + '\n' + previous);
+    expect(upgraded).toContain(scopedArgument);
+    expect(ensureWindowsNativeStaging(upgraded)).toBe(upgraded);
+    expect(upgraded.indexOf(scopedArgument)).toBeLessThan(upgraded.indexOf('apply plugin: "expo-root-project"'));
   });
   it('puts the failing prefab descendant below the legacy Ninja path limit in the isolated Gradle home', () => {
     const staging = path.win32.join('C:/Users/developer/.pa/g-123456789abc', 'n/m-123456789abc');
@@ -103,7 +124,7 @@ describe('Windows scoped native staging', () => {
     { module: 'llama.rn', suffix: 'l', hash: '2a3ns5a6',
       target: 'rnllama/CMakeFiles/rnllama_v8_2_dotprod_i8mm_hexagon_opencl.dir', source: 'cpp/ggml-hexagon/htp/v73',
       filename: 'htp_iface_stub.c.o' },
-  ])('gives CMake room to hash the evidenced ARM64 object path for $module', ({ module, suffix, hash, target, source, filename }) => {
+  ])('checks the minimum hash layout budget, not generated object names, for $module', ({ module, suffix, hash, target, source, filename }) => {
     expect(WINDOWS_NATIVE_STAGING).toContain(`":${module}": ["com.android.library", "${suffix}"]`);
     const project = 'C:/Users/developer/.codex/worktrees/stage-seven-followup/pocket_ai/app';
     const originalBuild = path.win32.join(project, `node_modules/${module}/android/.cxx/RelWithDebInfo/${hash}/arm64-v8a`);
@@ -111,7 +132,9 @@ describe('Windows scoped native staging', () => {
     expect(originalObject.length).toBeGreaterThanOrEqual(260);
     const stagedBuild = path.win32.join(`C:/Users/developer/.pa/g-123456789abc/n/${suffix}-123456789abc`, `RelWithDebInfo/${hash}/arm64-v8a`);
     // CMake must regenerate the graph: shortening alone retains the old mangled source path.
-    // Its existing 250-character budget now has room for a 32-hex source-parent hash.
+    // This is only a layout feasibility check. CMake 3.22 reuses cached source names across targets,
+    // so llama also needs the 217 budget above. Actual configure-only graph verification covers
+    // all source/target combinations; this synthetic hash does not prove native generation.
     expect(path.win32.join(stagedBuild, target, 'a'.repeat(32), filename).length).toBeLessThanOrEqual(250);
   });
 

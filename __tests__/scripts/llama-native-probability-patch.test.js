@@ -497,7 +497,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
     expect(hashSource(fs.readFileSync(sourcePath, 'utf8'))).toBe(BEFORE_SHA256);
     fs.writeFileSync(paramsPath, paramsOriginal);
-    const probabilityPatch = SOURCE_PATCHES[0];
+    const probabilityPatch = SOURCE_PATCHES.find(patch => patch.source === SOURCE);
     fs.writeFileSync(sourcePath, applyReplacements(fs.readFileSync(sourcePath, 'utf8'), probabilityPatch.replacements));
     expect(patchLlamaBridge(root).status).toBe('applied');
     expect(patchLlamaBridge(root, { check: true }).sources[PARAMS_SOURCE]).toBe(PARAMS_AFTER_SHA256);
@@ -526,20 +526,20 @@ describe('pinned serial sampling and template clock corrections', () => {
     const clockPath = path.join(root, 'node_modules/llama.rn', CLOCK_SOURCE);
     fs.appendFileSync(clockPath, '\n// clock source drift\n');
     expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
-    for (const patch of SOURCE_PATCHES.slice(0, 2)) {
+    for (const patch of SOURCE_PATCHES.filter(patch => [SOURCE, PARAMS_SOURCE].includes(patch.source))) {
       expect(hashSource(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8'))).toBe(patch.beforeSha256);
     }
   });
 
   it('adds the core fix to an already-corrected bridge installation without changing bridge bytes', () => {
-    const bridgeBytes = SOURCE_PATCHES.slice(0, 2).map((patch) => {
+    const bridgeBytes = SOURCE_PATCHES.filter(patch => [SOURCE, PARAMS_SOURCE].includes(patch.source)).map((patch) => {
       const file = path.join(root, 'node_modules/llama.rn', patch.source);
       const text = applyReplacements(fs.readFileSync(file, 'utf8'), patch.replacements);
       fs.writeFileSync(file, text);
       return text;
     });
     expect(patchLlamaBridge(root).status).toBe('applied');
-    SOURCE_PATCHES.slice(0, 2).forEach((patch, index) => {
+    SOURCE_PATCHES.filter(patch => [SOURCE, PARAMS_SOURCE].includes(patch.source)).forEach((patch, index) => {
       expect(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8')).toBe(bridgeBytes[index]);
     });
     expect(patchLlamaBridge(root, { check: true }).sources[CLOCK_SOURCE]).toBe(CLOCK_AFTER_SHA256);
@@ -640,7 +640,7 @@ describe('pinned serial sampling and template clock corrections', () => {
       expect(hashSource(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8'))).toBe(patch.beforeSha256);
     }
     fs.writeFileSync(file, original);
-    const previous = SOURCE_PATCHES.slice(0, 3).map((patch) => {
+    const previous = SOURCE_PATCHES.filter(patch => [SOURCE, PARAMS_SOURCE, CLOCK_SOURCE].includes(patch.source)).map((patch) => {
       const target = path.join(root, 'node_modules/llama.rn', patch.source);
       const text = applyReplacements(fs.readFileSync(target, 'utf8'), patch.replacements);
       fs.writeFileSync(target, text);
@@ -673,7 +673,7 @@ describe('pinned serial sampling and template clock corrections', () => {
   it('preflights sixth-source drift before changing any of the five earlier sources', () => {
     fs.appendFileSync(path.join(root, 'node_modules/llama.rn', GRAMMAR_SOURCE), '\n// drift\n');
     expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
-    for (const patch of SOURCE_PATCHES.slice(0, 5)) {
+    for (const patch of SOURCE_PATCHES.filter(patch => [SOURCE, PARAMS_SOURCE, CLOCK_SOURCE, COMPLETION_SOURCE, SAMPLING_SOURCE].includes(patch.source))) {
       expect(hashSource(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8'))).toBe(patch.beforeSha256);
     }
   });

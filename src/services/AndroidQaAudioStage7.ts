@@ -33,7 +33,7 @@ type VoiceMode = 'voices' | 'phonemizer' | 'reference' | 'phonemizer_diagnostic'
 type Mode = 'recording' | 'input' | VoiceMode | 'cold_voice';
 export interface AndroidQaAudioStage7Step {
   termination?: TtsTerminationDiagnostics;
-  diagnosticFrontend?: 'production_js' | 'canonical_fixture';
+  referenceFrontend?: 'builtin' | 'canonical_fixture'; targetFrontend?: 'production_js' | 'canonical_fixture';
   productionG2POutputUsed?: boolean; frontendFixtureSha256?: string;
   id: string; status: 'passed'; sampleRate?: number; sampleCount?: number; durationMs?: number;
   sizeBytes?: number; sourceSha256?: string; profileId?: string; callbacks?: number;
@@ -360,9 +360,10 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
         && getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters()) === before, 'profile_restore');
       check(JSON.stringify(useChatStore.getState().threads) === history, 'chat_history_changed');
     };
-    const synthesize = async (id: 'neu-jo' | 'neu-jo-production' | 'neu-jo-canonical' | 'qwen-r1-eager' | 'qwen-r2-lazy' | 'qwen-no-reference',
+    const synthesize = async (id: 'neu-jo' | 'neu-jo-canonical-reference' | 'neu-jo-canonical-target' | 'qwen-r1-eager' | 'qwen-r2-lazy' | 'qwen-no-reference',
       profileId: string, voice: TtsVoiceSelection, qaFrontend?: AndroidQaNeuFrontend) => {
       publish({ phase: id });
+      const productionTarget = !qaFrontend || qaFrontend === 'neu-canonical-reference-v1';
       const profile = TTS_EXECUTION_PROFILES.find(item => item.id === profileId);
       check(profile, 'profile_missing');
       failureStage = 'tts_fixture_prepare';
@@ -399,8 +400,8 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
         check(events.indexOf('speaker_release') < events.indexOf('vocoder_release'), 'speaker_release_order');
       } else check(!events.includes('speaker_create'), 'unexpected_reference');
       const phones = observations.find(event => event.operation === 'phonemizer' && event.phase === 'settled');
-      if (id === 'neu-jo' || id === 'neu-jo-production') check(phones && Number.isFinite(phones.elapsedMs), 'phonemizer_not_executed');
-      if (id === 'neu-jo-canonical') check(!phones && !events.includes('phonemizer_conversion'), 'prerequisite_missing');
+      if (id.startsWith('neu-jo') && productionTarget) check(phones && Number.isFinite(phones.elapsedMs), 'phonemizer_not_executed');
+      if (qaFrontend && !productionTarget) check(!phones && !events.includes('phonemizer_conversion'), 'prerequisite_missing');
       const phoneTiming = (operation: string) => {
         const elapsed = observations.find(event => event.operation === operation && event.phase === 'settled')?.elapsedMs;
         return typeof elapsed === 'number' && Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= 300_000
@@ -409,8 +410,10 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
       await ttsService.play(); check(ttsService.getState().phase === 'playing', 'tts_not_playing');
       await delay(300); await ttsService.stop();
       pass({ id, profileId, sampleRate: decoded.sampleRate, sampleCount: decoded.sampleCount,
-        ...(mode === 'phonemizer_diagnostic' ? { diagnosticFrontend: qaFrontend ? 'canonical_fixture' as const : 'production_js' as const,
-          productionG2POutputUsed: !qaFrontend, frontendFixtureSha256: ANDROID_QA_NEU_FRONTEND_SHA256 } : {}),
+        ...(mode === 'phonemizer_diagnostic' ? {
+          referenceFrontend: qaFrontend && qaFrontend !== 'neu-canonical-target-v1' ? 'canonical_fixture' as const : 'builtin' as const,
+          targetFrontend: productionTarget ? 'production_js' as const : 'canonical_fixture' as const,
+          productionG2POutputUsed: productionTarget, frontendFixtureSha256: ANDROID_QA_NEU_FRONTEND_SHA256 } : {}),
         termination: observations.find(event => event.operation === 'completion' && event.phase === 'settled')?.termination,
         speakerRows: formatted.speakerRows, speakerBaked: formatted.speakerBaked,
         phonemizerElapsedMs: phones?.elapsedMs, phonemizerModuleInitMs: phoneTiming('phonemizer_module_init'),
@@ -420,8 +423,8 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
       await ttsService.cancelAndClear();
     };
     if (mode === 'phonemizer_diagnostic') {
-      await synthesize('neu-jo-production', 'neutts-nano-q4_k_m-neucodec-q8_0', { kind: 'builtin', voice: 'jo' });
-      await synthesize('neu-jo-canonical', 'neutts-nano-q4_k_m-neucodec-q8_0', { kind: 'builtin', voice: 'jo' }, 'neu-canonical-frontend-v1');
+      await synthesize('neu-jo-canonical-reference', 'neutts-nano-q4_k_m-neucodec-q8_0', { kind: 'builtin', voice: 'jo' }, 'neu-canonical-reference-v1');
+      await synthesize('neu-jo-canonical-target', 'neutts-nano-q4_k_m-neucodec-q8_0', { kind: 'builtin', voice: 'jo' }, 'neu-canonical-target-v1');
     } else if (mode !== 'reference') {
       await synthesize('neu-jo', 'neutts-nano-q4_k_m-neucodec-q8_0', { kind: 'builtin', voice: 'jo' });
     }

@@ -32,7 +32,7 @@ import { referenceVoiceStore, type ReferenceVoiceLease } from './ReferenceVoiceS
 import { prepareManagedAudio, readPreparedReferencePcm, discardPreparedAudio, AudioPreparationError, type PreparedAudio } from './AudioPreparationService';
 import { LOCAL_PHONEMIZER_IDENTITY } from './TtsPhonemizer';
 import { TtsLatencyMeasurement } from '../utils/ttsLatency';
-import { resolveAndroidQaNeuFrontend, ANDROID_QA_NEU_FRONTEND_IDENTITY, type AndroidQaNeuFrontend } from './AndroidQaNeuFrontend';
+import { resolveAndroidQaNeuFrontend, type AndroidQaNeuFrontend } from './AndroidQaNeuFrontend';
 
 let hasStartedTtsInProcess = false;
 
@@ -473,7 +473,7 @@ export class TtsService {
             failureStage = 'tts_setup';
             this.executionIdentity = getTtsProfileIdentity(binding.profile,
               ['llama.rn/0.13.0-rc.3', getLlamaBuildInfo(), LLAMA_SOURCE_PATCH_SHA256,
-                qaFrontend ? ANDROID_QA_NEU_FRONTEND_IDENTITY : binding.profile.phonemizerLanguage ? LOCAL_PHONEMIZER_IDENTITY : null,
+                qaFrontend ? qaFrontend.executionIdentity : binding.profile.phonemizerLanguage ? LOCAL_PHONEMIZER_IDENTITY : null,
                 voice.kind, 'voice' in voice ? voice.voice : referenceSha ?? null,
                 voice.kind === 'reference' ? voice.bake ?? 'eager' : null]);
             const native = synthesizeTtsOnContext(context, binding.profile, {

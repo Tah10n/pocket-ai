@@ -126,6 +126,8 @@ export async function synthesizeTtsOnContext(
       if (qaFrontend) {
         check();
         if (text !== qaFrontend.targetText || language !== 'en-us') throw new TtsError('prerequisite_missing');
+      }
+      if (qaFrontend?.canonicalTarget) {
         // Deliberate diagnostic bypass: do not emit production phonemizer observations.
         return qaFrontend.canonicalTargetPhones;
       }
@@ -157,7 +159,7 @@ export async function synthesizeTtsOnContext(
           if (copied.ref_codes.length !== qaFrontend.referenceCodesCount || copied.ref_phones !== qaFrontend.builtinReferencePhones) {
             throw new TtsError('prerequisite_missing');
           }
-          copied.ref_phones = qaFrontend.canonicalReferencePhones;
+          if (qaFrontend.canonicalReference) copied.ref_phones = qaFrontend.canonicalReferencePhones;
         }
         // The handle path skips upstream ref_text phonemization. Payload references are
         // explicitly prepared here, while exact pre-baked IPA is retained unchanged.

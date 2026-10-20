@@ -46,3 +46,13 @@ it('keeps the closed allowlist independent of a mutable JSON import', () => {
     expect(resolveAndroidQaNeuFrontend(original.id, original.profileId, original.targetText, 'en', { kind: 'builtin', voice: 'jo' })?.id).toBe(original.id);
   } finally { Object.assign(fixture, original); }
 });
+
+it.each([
+  ['neu-canonical-reference-v1', true, false],
+  ['neu-canonical-target-v1', false, true],
+] as const)('admits only the frozen crossed selector %s with a distinct execution identity', (selector, canonicalReference, canonicalTarget) => {
+  const value = resolveAndroidQaNeuFrontend(selector, fixture.profileId, fixture.targetText, 'en', { kind: 'builtin', voice: 'jo' });
+  expect(value).toMatchObject({ canonicalReference, canonicalTarget, executionIdentity: `diagnostic:${selector}:${ANDROID_QA_NEU_FRONTEND_SHA256}` });
+  expect(Object.isFrozen(value)).toBe(true);
+  expect(() => resolveAndroidQaNeuFrontend(selector, fixture.profileId, 'Other target', 'en', { kind: 'builtin', voice: 'jo' })).toThrow();
+});

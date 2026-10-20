@@ -118,7 +118,7 @@ beforeEach(() => {
     const settled = (operation: string, extra = {}) => request.observe?.({ operation, phase: 'settled', ...extra } as never);
     settled('vocoder_init');
     if (request.voice?.kind === 'reference') { settled('speaker_create'); if (request.voice.bake === 'eager') settled('speaker_bake'); }
-    if (request.voice?.kind === 'builtin' && !request.qaFrontend) settled('phonemizer', { elapsedMs: 10 });
+    if (request.voice?.kind === 'builtin' && (!request.qaFrontend || request.qaFrontend === 'neu-canonical-reference-v1')) settled('phonemizer', { elapsedMs: 10 });
     settled('formatter', request.voice?.kind === 'reference' ? { speakerRows: 1, speakerBaked: true } : {});
     settled('completion'); settled('decode', { sampleRate: 24000, sampleCount: 24000 });
     if (request.voice?.kind === 'reference') settled('speaker_release'); settled('vocoder_release');
@@ -562,19 +562,19 @@ it('retains only closed Neu termination diagnostics in successful QA evidence an
 it('runs two isolated diagnostic arms through copy/clear gates and can never satisfy production acceptance', async () => {
   const work = runAndroidQaStage7Voices('phonemizer_diagnostic');
   await until('awaiting_clip_copy');
-  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ diagnosticOnly: true, clipId: 'neu-jo-production' });
-  expect(mockTtsStart.mock.calls[0][0]).not.toHaveProperty('qaFrontend');
+  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ diagnosticOnly: true, clipId: 'neu-jo-canonical-reference' });
+  expect(mockTtsStart.mock.calls[0][0]).toMatchObject({ qaFrontend: 'neu-canonical-reference-v1' });
   continueAndroidQaAudioStage7(); await until('awaiting_clip_copy');
-  expect(getAndroidQaAudioStage7Evidence().clipId).toBe('neu-jo-canonical');
+  expect(getAndroidQaAudioStage7Evidence().clipId).toBe('neu-jo-canonical-target');
   expect(mockTtsClear).toHaveBeenCalledTimes(1);
-  expect(mockTtsStart.mock.calls[1][0]).toMatchObject({ qaFrontend: 'neu-canonical-frontend-v1',
+  expect(mockTtsStart.mock.calls[1][0]).toMatchObject({ qaFrontend: 'neu-canonical-target-v1',
     text: syntheticFixtures.referenceComparisonTarget, language: 'en', voice: { kind: 'builtin', voice: 'jo' } });
   continueAndroidQaAudioStage7(); await work;
   const result = getAndroidQaAudioStage7Evidence();
   expect(result).toMatchObject({ status: 'diagnostic_complete', mode: 'phonemizer_diagnostic', diagnosticOnly: true });
   expect(result.steps.slice(0, 2)).toMatchObject([
-    { id: 'neu-jo-production', productionG2POutputUsed: true, diagnosticFrontend: 'production_js', profileRestored: true },
-    { id: 'neu-jo-canonical', productionG2POutputUsed: false, diagnosticFrontend: 'canonical_fixture', profileRestored: true },
+    { id: 'neu-jo-canonical-reference', productionG2POutputUsed: true, referenceFrontend: 'canonical_fixture', targetFrontend: 'production_js', profileRestored: true },
+    { id: 'neu-jo-canonical-target', productionG2POutputUsed: false, referenceFrontend: 'builtin', targetFrontend: 'canonical_fixture', profileRestored: true },
   ]);
   expect(result.steps[1].operations).not.toContain('phonemizer');
   expect(result.steps[0].frontendFixtureSha256).toMatch(/^[0-9a-f]{64}$/);
@@ -587,13 +587,13 @@ it('runs two isolated diagnostic arms through copy/clear gates and can never sat
 it('clears a failed canonical arm, restores the original owner and does not claim diagnostic completion', async () => {
   const ordinary = mockTtsStart.getMockImplementation()!;
   mockTtsStart.mockImplementation(async (request: TtsRequest) => {
-    if (request.qaFrontend) throw new TtsError('cancelled');
+    if (request.qaFrontend === 'neu-canonical-target-v1') throw new TtsError('cancelled');
     return ordinary(request);
   });
   const work = runAndroidQaStage7Voices('phonemizer_diagnostic');
   await until('awaiting_clip_copy'); continueAndroidQaAudioStage7(); await work;
   expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'cancelled',
-    failedAttempt: { id: 'neu-jo-canonical' }, diagnosticOnly: true });
+    failedAttempt: { id: 'neu-jo-canonical-target' }, diagnosticOnly: true });
   expect(mockTtsClear).toHaveBeenCalledTimes(2); expect(mockThread).toBe('original');
   expect(mockLoad).toHaveBeenLastCalledWith('base', expect.objectContaining({ forceReload: true }));
 });

@@ -683,7 +683,8 @@ it('rejects a changed builtin reference before formatting and releases the codec
   expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
 });
 
-it('rejects a late canonical callback after cancellation and never retains an override', async () => {
+it.each(['neu-canonical-frontend-v1', 'neu-canonical-reference-v1', 'neu-canonical-target-v1'] as const)(
+  'rejects a late %s callback after cancellation and never retains an override', async qaFrontend => {
   const { context, native } = canonicalContext();
   const controller = new AbortController();
   native.getFormattedAudioCompletion.mockImplementationOnce(async config => {
@@ -691,11 +692,36 @@ it('rejects a late canonical callback after cancellation and never retains an ov
     await config.phonemizer!(config.prompt, config.language!);
     throw new Error('unreachable');
   });
-  await expect(synthesizeTtsOnContext(context, neuProfile, { ...canonicalRequest(), signal: controller.signal }))
+  await expect(synthesizeTtsOnContext(context, neuProfile, { ...canonicalRequest(), qaFrontend, signal: controller.signal }))
     .rejects.toMatchObject({ code: 'cancelled' });
   expect(native.completion).not.toHaveBeenCalled();
   expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
   const { qaFrontend: _unused, ...ordinary } = canonicalRequest();
   await synthesizeTtsOnContext(context, neuProfile, ordinary);
   expect(JSON.parse(native.completion.mock.calls[0][0].prompt!)[1]).toBe(canonicalFixture.productionTargetPhones);
+});
+
+it.each([
+  ['neu-canonical-reference-v1', true, false],
+  ['neu-canonical-target-v1', false, true],
+] as const)('isolates the reference/target intervention for %s and leaves the following request ordinary', async (qaFrontend, canonicalReference, canonicalTarget) => {
+  const { native, context, payload } = canonicalContext();
+  const observe = jest.fn();
+  await synthesizeTtsOnContext(context, neuProfile, { ...canonicalRequest(), qaFrontend, observe });
+  const config = native.getFormattedAudioCompletion.mock.calls[0][0];
+  expect(config.speaker).toEqual({ ref_phones: canonicalReference ? canonicalFixture.canonicalReferencePhones : canonicalFixture.builtinReferencePhones, ref_codes: payload.ref_codes });
+  expect((config.speaker as { ref_codes: readonly number[] }).ref_codes).toBe(payload.ref_codes);
+  expect(JSON.parse(native.completion.mock.calls[0][0].prompt!)[1]).toBe(canonicalTarget ? canonicalFixture.canonicalTargetPhones : canonicalFixture.productionTargetPhones);
+  expect(observe.mock.calls.some(([event]) => event.operation === 'phonemizer_conversion' && event.phase === 'settled')).toBe(!canonicalTarget);
+  expect(payload.ref_phones).toBe(canonicalFixture.builtinReferencePhones);
+  const { qaFrontend: _unused, ...ordinary } = canonicalRequest();
+  await synthesizeTtsOnContext(context, neuProfile, ordinary);
+  const [crossedParams, baselineParams] = native.completion.mock.calls.map(([params]) => params);
+  expect({ ...crossedParams, prompt: null }).toEqual({ ...baselineParams, prompt: null });
+  expect(crossedParams).toMatchObject({ seed: 42, n_predict: 801, temperature: 1, top_k: 50, top_p: 1, penalty_repeat: 1 });
+  expect(JSON.parse(baselineParams.prompt!)[1]).toBe(canonicalFixture.productionTargetPhones);
+  expect(native.getFormattedAudioCompletion.mock.calls[1][0].speaker).toEqual(payload);
+  expect(native.decodeAudioTokens).toHaveBeenNthCalledWith(1, [1, 2, 3, 4]);
+  expect(native.decodeAudioTokens).toHaveBeenNthCalledWith(2, [1, 2, 3, 4]);
+  expect(native.releaseVocoder).toHaveBeenCalledTimes(2);
 });

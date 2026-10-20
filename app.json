@@ -94,7 +94,7 @@
         }
       ],
       "./plugins/withLlamaSourceBuild",
-      "./plugins/withAndroidWindowsMmkvStaging",
+      "./plugins/withAndroidWindowsNativeStaging",
       "./plugins/withAndroidGradleJvmMemory",
       "./plugins/withAndroidGradlePluginManagement",
       "./plugins/withAndroidReleaseConfig",

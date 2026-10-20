@@ -49,6 +49,8 @@ export function AndroidQaAudioStage7Panel() {
             onPress={() => void runAndroidQaStage7Voices()}><ButtonText>QA voices and phonemizer</ButtonText></Button>
           <Button size="sm" action="secondary" testID="chat-qa-stage7-phonemizer" disabled={busy}
             onPress={() => void runAndroidQaStage7Voices('phonemizer')}><ButtonText>QA phonemizer synthesis</ButtonText></Button>
+          <Button size="sm" action="secondary" testID="chat-qa-stage7-phonemizer-diagnostic" disabled={busy}
+            onPress={() => void runAndroidQaStage7Voices('phonemizer_diagnostic')}><ButtonText>QA diagnostic frontend A/B (not acceptance)</ButtonText></Button>
           <Button size="sm" action="secondary" testID="chat-qa-stage7-reference" disabled={busy}
             onPress={() => void runAndroidQaStage7Voices('reference')}><ButtonText>QA reference voices</ButtonText></Button>
           <Button size="sm" action="secondary" testID="chat-qa-stage7-cold-voice" disabled={busy}

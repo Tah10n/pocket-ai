@@ -46,3 +46,7 @@ modules/pocket-anydoc/rust/fixtures/**/*.xlsm binary
 modules/pocket-anydoc/rust/fixtures/**/*.xlsx binary
 modules/pocket-anydoc/rust/fixtures/**/*.xz binary
 modules/pocket-anydoc/rust/fixtures/**/*.zip binary
+
+# Diagnostic fixture identity and upstream license use exact SHA-256 byte hashes.
+docs/validation/llama-rn-stage7/neu-canonical-frontend-diagnostic.json text eol=lf
+docs/validation/llama-rn-stage7/neutts-open-license-v1.txt text eol=lf

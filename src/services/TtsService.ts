@@ -32,10 +32,13 @@ import { referenceVoiceStore, type ReferenceVoiceLease } from './ReferenceVoiceS
 import { prepareManagedAudio, readPreparedReferencePcm, discardPreparedAudio, AudioPreparationError, type PreparedAudio } from './AudioPreparationService';
 import { LOCAL_PHONEMIZER_IDENTITY } from './TtsPhonemizer';
 import { TtsLatencyMeasurement } from '../utils/ttsLatency';
+import { resolveAndroidQaNeuFrontend, ANDROID_QA_NEU_FRONTEND_IDENTITY, type AndroidQaNeuFrontend } from './AndroidQaNeuFrontend';
 
 let hasStartedTtsInProcess = false;
 
 export interface TtsRequest {
+  /** Fixed isolated-QA experiment; never a production voice or G2P setting. */
+  qaFrontend?: AndroidQaNeuFrontend;
   /** Exact text already shown in the preview. No chat protocol or hidden channels. */
   text: string;
   language: string;
@@ -314,6 +317,8 @@ export class TtsService {
       if (!exactText || exactText.length > TTS_LIMITS.textCharacters) throw new TtsError('input_too_large');
       const binding = resolveTtsBinding();
       const voice: TtsVoiceSelection = request.voice ?? { kind: 'speakerless' };
+      const qaFrontendSelector = request.qaFrontend;
+      const qaFrontend = resolveAndroidQaNeuFrontend(qaFrontendSelector, binding.profile.id, exactText, request.language, voice);
       // A builtin name must be explicitly selected; never synthesize a phantom default.
       if (!['speakerless', 'builtin', 'reference'].includes(voice.kind)
         || !(binding.profile.voiceModes ?? ['speakerless']).includes(voice.kind)) throw new TtsError('voice_unavailable');
@@ -468,12 +473,12 @@ export class TtsService {
             failureStage = 'tts_setup';
             this.executionIdentity = getTtsProfileIdentity(binding.profile,
               ['llama.rn/0.13.0-rc.3', getLlamaBuildInfo(), LLAMA_SOURCE_PATCH_SHA256,
-                binding.profile.phonemizerLanguage ? LOCAL_PHONEMIZER_IDENTITY : null,
+                qaFrontend ? ANDROID_QA_NEU_FRONTEND_IDENTITY : binding.profile.phonemizerLanguage ? LOCAL_PHONEMIZER_IDENTITY : null,
                 voice.kind, 'voice' in voice ? voice.voice : referenceSha ?? null,
                 voice.kind === 'reference' ? voice.bake ?? 'eager' : null]);
             const native = synthesizeTtsOnContext(context, binding.profile, {
               text: exactText, language: request.language, codecPath: binding.codecPath, signal: controller.signal,
-              voice,
+              voice, ...(qaFrontend ? { qaFrontend: qaFrontendSelector } : {}),
               ...(referenceSamples ? { referenceAudio: { samples: referenceSamples, sampleRate: binding.profile.reference!.sampleRate } } : {}),
               assertCurrent: check, observe,
               onPhase: phase => this.publish({ ...this.state, phase: controller.signal.aborted ? 'stopping' : phase }),

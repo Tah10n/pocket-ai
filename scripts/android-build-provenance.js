@@ -54,6 +54,7 @@ const EMBEDDED_BUNDLE_INPUTS = [
   // Stage 7 controlled audio identity and voice profiles are imported by its QA surface.
   "docs/validation/llama-rn-stage7/audio-input-fixtures.json",
   "docs/validation/llama-rn-stage7/tts-fixtures.json",
+  "docs/validation/llama-rn-stage7/neu-canonical-frontend-diagnostic.json",
   "docs/validation/llama-rn-stage7/synthetic-inputs.json",
   "app",
   "src",

@@ -2,7 +2,7 @@ import React from 'react';
 import { act, fireEvent, render } from '@testing-library/react-native';
 import { AndroidQaAudioStage7Panel } from '../../src/components/ui/AndroidQaAudioStage7Panel';
 import { audioRecordingService, type AudioRecordingState } from '../../src/services/AudioRecordingService';
-import { runAndroidQaStage7Recording } from '../../src/services/AndroidQaAudioStage7';
+import { runAndroidQaStage7Recording, runAndroidQaStage7Voices } from '../../src/services/AndroidQaAudioStage7';
 
 jest.mock('react-native-css-interop', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- Jest factory resolves React after mock hoisting.
@@ -34,7 +34,7 @@ jest.mock('../../src/services/AudioRecordingService', () => ({ audioRecordingSer
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockEnabled = true;
+  mockEnabled = true; mockEvidence.status = 'running';
   mockRecording = { phase: 'idle', durationMillis: 0 };
   mockListeners.clear();
 });
@@ -84,4 +84,19 @@ it('redacts ordinary consumer owner identities and hides the panel outside isola
   expect(disabled.queryByTestId('chat-qa-stage7-panel-toggle')).toBeNull();
   expect(disabled.queryByTestId('chat-qa-stage7-recording-state')).toBeNull();
   expect(audioRecordingService.start).not.toHaveBeenCalled();
+});
+
+it('labels the separate frontend action as diagnostic, requires an explicit press and disables it while busy', () => {
+  mockEvidence.status = 'idle';
+  const view = openPanel();
+  expect(runAndroidQaStage7Voices).not.toHaveBeenCalled();
+  expect(view.getByText('QA diagnostic frontend A/B (not acceptance)')).toBeTruthy();
+  fireEvent.press(view.getByTestId('chat-qa-stage7-phonemizer-diagnostic'));
+  expect(runAndroidQaStage7Voices).toHaveBeenCalledWith('phonemizer_diagnostic');
+  view.unmount(); jest.mocked(runAndroidQaStage7Voices).mockClear();
+  mockEvidence.status = 'running';
+  const busy = openPanel(); fireEvent.press(busy.getByTestId('chat-qa-stage7-phonemizer-diagnostic'));
+  expect(runAndroidQaStage7Voices).not.toHaveBeenCalled();
+  busy.unmount(); mockEnabled = false;
+  expect(render(<AndroidQaAudioStage7Panel />).queryByTestId('chat-qa-stage7-phonemizer-diagnostic')).toBeNull();
 });

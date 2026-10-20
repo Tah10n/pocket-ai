@@ -5,8 +5,10 @@ import { requireLlamaModule } from './llamaRnModule';
 import { getCompletionPromptTokenCount } from './LlamaPromptTokenCount';
 import { runCompletionOnContext, type LlamaCompletionResult } from './LlamaRuntimeAdapter';
 import { phonemizeSpeech } from './TtsPhonemizer';
+import { resolveAndroidQaNeuFrontend, type AndroidQaNeuFrontend } from './AndroidQaNeuFrontend';
 
 export interface TtsRuntimeOptions {
+  qaFrontend?: AndroidQaNeuFrontend;
   text: string;
   language: string;
   speaker?: string;
@@ -87,6 +89,7 @@ export async function synthesizeTtsOnContext(
     finally { observe({ operation, phase: 'settled' }); }
   };
   check();
+  const qaFrontend = resolveAndroidQaNeuFrontend(options.qaFrontend, profile.id, options.text, options.language, options.voice);
   if (!options.text.trim() || options.text.length > TTS_LIMITS.textCharacters) throw new TtsError('input_too_large');
   if (!profile.languages.includes(options.language)) throw new TtsError('language_unsupported');
   let initIssued = false;
@@ -120,6 +123,12 @@ export async function synthesizeTtsOnContext(
     const modes = profile.voiceModes ?? ['speakerless'];
     if (!modes.includes(voice.kind)) throw new TtsError('voice_unavailable');
     const phonemizer = profile.phonemizerLanguage ? async (text: string, language: string) => {
+      if (qaFrontend) {
+        check();
+        if (text !== qaFrontend.targetText || language !== 'en-us') throw new TtsError('prerequisite_missing');
+        // Deliberate diagnostic bypass: do not emit production phonemizer observations.
+        return qaFrontend.canonicalTargetPhones;
+      }
       const started = Date.now();
       observe({ operation: 'phonemizer', phase: 'started' });
       try { return await phonemizeSpeech(text, language, check, observe); }
@@ -143,6 +152,12 @@ export async function synthesizeTtsOnContext(
         if (!Array.isArray(copied.ref_codes) || !copied.ref_codes.length || copied.ref_codes.length > 800
           || copied.ref_codes.some(value => !Number.isSafeInteger(value) || value < 0 || value >= 65536)) {
           throw new TtsError('voice_unavailable');
+        }
+        if (qaFrontend) {
+          if (copied.ref_codes.length !== qaFrontend.referenceCodesCount || copied.ref_phones !== qaFrontend.builtinReferencePhones) {
+            throw new TtsError('prerequisite_missing');
+          }
+          copied.ref_phones = qaFrontend.canonicalReferencePhones;
         }
         // The handle path skips upstream ref_text phonemization. Payload references are
         // explicitly prepared here, while exact pre-baked IPA is retained unchanged.

@@ -1,3 +1,5 @@
+import * as qaBootstrap from '../../src/services/AndroidQaDocumentModelBootstrap';
+import { ANDROID_QA_NEU_FRONTEND_IDENTITY } from '../../src/services/AndroidQaNeuFrontend';
 import type { LlamaContext } from 'llama.rn';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as RNFS from 'react-native-fs';
@@ -33,7 +35,8 @@ jest.mock('../../src/services/AuxiliaryModelService', () => ({
   ...jest.requireActual('../../src/services/AuxiliaryModelService'), validateAuxiliaryFile: jest.fn(),
 }));
 jest.mock('../../src/services/SystemMetricsService', () => ({ getSystemMemorySnapshot: jest.fn() }));
-jest.mock('../../src/services/FileSystemSetup', () => ({ getModelsDir: () => 'file:///models/' }));
+jest.mock('../../src/services/FileSystemSetup', () => ({ getModelsDir: () => 'file:///models/',
+  getAppCacheRootDir: () => 'file:///data/user/0/app.qa/cache/' }));
 jest.mock('../../src/utils/ggufValidation', () => ({
   validateGgufFileHeader: jest.fn(async () => ({ ok: true })), GgufValidationError: class extends Error {},
 }));
@@ -1261,4 +1264,39 @@ it('retains sanitized termination in the existing playback marker state and clea
   expect(service.getState().nativeCompletion?.termination).toEqual(termination);
   await service.start({ text: 'Hello again.', language: 'en', playAfterSynthesis: false });
   expect(service.getState().nativeCompletion).toBeUndefined();
+});
+
+it('rejects the closed canonical diagnostic before detaching A in an ordinary request', async () => {
+  choose();
+  const request = { text: 'Hello.', language: 'en', qaFrontend: 'neu-canonical-frontend-v1' as const };
+  await expect(service.start(request)).rejects.toMatchObject({ code: 'prerequisite_missing' });
+  expect(engine.runWithAuxiliarySequence).not.toHaveBeenCalled();
+  expect(synthesize).not.toHaveBeenCalled();
+});
+
+it('binds canonical clip identity only to its guarded request, clears it and restores A before a subsequent ordinary request', async () => {
+  jest.spyOn(qaBootstrap, 'isAndroidQaDocumentModelBootstrapEnabled').mockReturnValue(true);
+  const profile = TTS_EXECUTION_PROFILES.find(value => value.family === 'neutts')!;
+  registry.saveModels([chatModel(), ttsModel(profile)]); choose(profile);
+  jest.mocked(FileSystem.getInfoAsync).mockResolvedValue({ exists: true, isDirectory: false,
+    uri: 'file:///models/tokens-codec-original.gguf', size: profile.codec.bytes, modificationTime: 1 });
+  jest.mocked(RNFS.hash).mockResolvedValue(profile.codec.sha256);
+  const ordinary = { text: 'The quiet river flows beside the old bridge.', language: 'en',
+    voice: { kind: 'builtin' as const, voice: 'jo' }, playAfterSynthesis: false };
+  const mutableRequest: Parameters<TtsService['start']>[0] = { ...ordinary, qaFrontend: 'neu-canonical-frontend-v1' };
+  jest.mocked(validateAuxiliaryFile).mockImplementationOnce(async model => {
+    mutableRequest.qaFrontend = undefined;
+    return `/models/${model.localPath}`;
+  });
+  await service.start(mutableRequest);
+  expect(mutableRequest.qaFrontend).toBeUndefined();
+  expect(synthesize.mock.calls[0][2]).toMatchObject({ qaFrontend: 'neu-canonical-frontend-v1' });
+  expect(service.getExecutionIdentity()).toContain(ANDROID_QA_NEU_FRONTEND_IDENTITY);
+  expect(releaseContext).toHaveBeenCalledTimes(1); expect(restoreA).toHaveBeenCalledTimes(1);
+  await service.cancelAndClear(); expect(service.getExecutionIdentity()).toBeNull();
+  await service.start(ordinary);
+  expect(synthesize.mock.calls[1][2]).not.toHaveProperty('qaFrontend');
+  expect(service.getExecutionIdentity()).not.toContain(ANDROID_QA_NEU_FRONTEND_IDENTITY);
+  expect(service.getExecutionIdentity()).toContain('phonemize/2.0.1');
+  expect(releaseContext).toHaveBeenCalledTimes(2); expect(restoreA).toHaveBeenCalledTimes(2);
 });

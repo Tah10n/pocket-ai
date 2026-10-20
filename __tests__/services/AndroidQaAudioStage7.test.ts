@@ -118,7 +118,7 @@ beforeEach(() => {
     const settled = (operation: string, extra = {}) => request.observe?.({ operation, phase: 'settled', ...extra } as never);
     settled('vocoder_init');
     if (request.voice?.kind === 'reference') { settled('speaker_create'); if (request.voice.bake === 'eager') settled('speaker_bake'); }
-    if (request.voice?.kind === 'builtin') settled('phonemizer', { elapsedMs: 10 });
+    if (request.voice?.kind === 'builtin' && !request.qaFrontend) settled('phonemizer', { elapsedMs: 10 });
     settled('formatter', request.voice?.kind === 'reference' ? { speakerRows: 1, speakerBaked: true } : {});
     settled('completion'); settled('decode', { sampleRate: 24000, sampleCount: 24000 });
     if (request.voice?.kind === 'reference') settled('speaker_release'); settled('vocoder_release');
@@ -557,4 +557,43 @@ it('retains only closed Neu termination diagnostics in successful QA evidence an
   const safe = sanitizeAudioStage7Evidence(getAndroidQaAudioStage7Evidence()) as { steps: { termination?: unknown }[] };
   expect(safe.steps[0].termination).toEqual(termination);
   expect(JSON.stringify(safe)).not.toContain('private'); expect(safe.steps[0].termination).not.toHaveProperty('tokenId');
+});
+
+it('runs two isolated diagnostic arms through copy/clear gates and can never satisfy production acceptance', async () => {
+  const work = runAndroidQaStage7Voices('phonemizer_diagnostic');
+  await until('awaiting_clip_copy');
+  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ diagnosticOnly: true, clipId: 'neu-jo-production' });
+  expect(mockTtsStart.mock.calls[0][0]).not.toHaveProperty('qaFrontend');
+  continueAndroidQaAudioStage7(); await until('awaiting_clip_copy');
+  expect(getAndroidQaAudioStage7Evidence().clipId).toBe('neu-jo-canonical');
+  expect(mockTtsClear).toHaveBeenCalledTimes(1);
+  expect(mockTtsStart.mock.calls[1][0]).toMatchObject({ qaFrontend: 'neu-canonical-frontend-v1',
+    text: syntheticFixtures.referenceComparisonTarget, language: 'en', voice: { kind: 'builtin', voice: 'jo' } });
+  continueAndroidQaAudioStage7(); await work;
+  const result = getAndroidQaAudioStage7Evidence();
+  expect(result).toMatchObject({ status: 'diagnostic_complete', mode: 'phonemizer_diagnostic', diagnosticOnly: true });
+  expect(result.steps.slice(0, 2)).toMatchObject([
+    { id: 'neu-jo-production', productionG2POutputUsed: true, diagnosticFrontend: 'production_js', profileRestored: true },
+    { id: 'neu-jo-canonical', productionG2POutputUsed: false, diagnosticFrontend: 'canonical_fixture', profileRestored: true },
+  ]);
+  expect(result.steps[1].operations).not.toContain('phonemizer');
+  expect(result.steps[0].frontendFixtureSha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(() => validateAudioStage7Evidence(sanitizeAudioStage7Evidence(result), 'phonemizer')).toThrow();
+  expect(mockTtsClear).toHaveBeenCalledTimes(3);
+  expect(mockChatCompletion).toHaveBeenCalledTimes(1);
+  expect(mockSave).not.toHaveBeenCalled(); expect(mockPrep).not.toHaveBeenCalled(); expect(mockThread).toBe('original');
+});
+
+it('clears a failed canonical arm, restores the original owner and does not claim diagnostic completion', async () => {
+  const ordinary = mockTtsStart.getMockImplementation()!;
+  mockTtsStart.mockImplementation(async (request: TtsRequest) => {
+    if (request.qaFrontend) throw new TtsError('cancelled');
+    return ordinary(request);
+  });
+  const work = runAndroidQaStage7Voices('phonemizer_diagnostic');
+  await until('awaiting_clip_copy'); continueAndroidQaAudioStage7(); await work;
+  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'cancelled',
+    failedAttempt: { id: 'neu-jo-canonical' }, diagnosticOnly: true });
+  expect(mockTtsClear).toHaveBeenCalledTimes(2); expect(mockThread).toBe('original');
+  expect(mockLoad).toHaveBeenLastCalledWith('base', expect.objectContaining({ forceReload: true }));
 });

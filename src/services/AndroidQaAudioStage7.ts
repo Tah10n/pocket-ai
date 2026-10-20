@@ -27,11 +27,14 @@ import { getSettings, updateSettings } from './SettingsStore';
 import { referenceVoiceStore } from './ReferenceVoiceStore';
 import { TTS_EXECUTION_PROFILES } from './TtsExecutionProfiles';
 import { ttsService } from './TtsService';
+import { ANDROID_QA_NEU_FRONTEND_SHA256, type AndroidQaNeuFrontend } from './AndroidQaNeuFrontend';
 
-type VoiceMode = 'voices' | 'phonemizer' | 'reference';
+type VoiceMode = 'voices' | 'phonemizer' | 'reference' | 'phonemizer_diagnostic';
 type Mode = 'recording' | 'input' | VoiceMode | 'cold_voice';
 export interface AndroidQaAudioStage7Step {
   termination?: TtsTerminationDiagnostics;
+  diagnosticFrontend?: 'production_js' | 'canonical_fixture';
+  productionG2POutputUsed?: boolean; frontendFixtureSha256?: string;
   id: string; status: 'passed'; sampleRate?: number; sampleCount?: number; durationMs?: number;
   sizeBytes?: number; sourceSha256?: string; profileId?: string; callbacks?: number;
   outputCharacters?: number; profileRestored?: boolean; chatUnchanged?: boolean;
@@ -42,7 +45,8 @@ export interface AndroidQaAudioStage7Step {
   fixtureKind?: 'recorded' | 'imported'; contentMatched?: boolean; completionDrained?: boolean;
 }
 export interface AndroidQaAudioStage7Evidence {
-  schemaVersion: 1; status: 'idle' | 'running' | 'native_passed' | 'failed'; phase: string;
+  schemaVersion: 1; status: 'idle' | 'running' | 'native_passed' | 'diagnostic_complete' | 'failed'; phase: string;
+  diagnosticOnly?: true;
   mode?: Mode; clipId?: string; failureCode?: string; requiresForceStop: boolean;
   phonemizerFailure?: PhonemizerFailure;
   failureStage?: TtsFailureStage;
@@ -139,16 +143,17 @@ function safeFailureCode(error: unknown): string {
 function run(mode: Mode, action: (recordFailure: (stage: TtsFailureStage) => void) => Promise<void>): Promise<void> {
   if (!isAndroidQaAudioStage7Enabled()) return Promise.resolve();
   if (active) return active;
-  evidence = initial(); publish({ mode, status: 'running', phase: 'prepare' });
+  evidence = initial(); publish({ mode, status: 'running', phase: 'prepare',
+    ...(mode === 'phonemizer_diagnostic' ? { diagnosticOnly: true as const } : {}) });
   let diagnosticsOpen = true;
   let failureStage: TtsFailureStage | undefined;
   const recordFailure = (stage: TtsFailureStage) => {
     if (diagnosticsOpen && failureStage === undefined && isTtsFailureStage(stage)
-      && ['voices', 'phonemizer', 'reference'].includes(mode)) failureStage = stage;
+      && ['voices', 'phonemizer', 'reference', 'phonemizer_diagnostic'].includes(mode)) failureStage = stage;
   };
   active = action(recordFailure).then(() => {
     diagnosticsOpen = false;
-    publish({ status: 'native_passed', phase: 'complete' });
+    publish({ status: mode === 'phonemizer_diagnostic' ? 'diagnostic_complete' : 'native_passed', phase: 'complete' });
   }, error => {
     diagnosticsOpen = false;
     publish({ status: 'failed', phase: 'complete', failureCode: safeFailureCode(error),
@@ -355,8 +360,8 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
         && getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters()) === before, 'profile_restore');
       check(JSON.stringify(useChatStore.getState().threads) === history, 'chat_history_changed');
     };
-    const synthesize = async (id: 'neu-jo' | 'qwen-r1-eager' | 'qwen-r2-lazy' | 'qwen-no-reference',
-      profileId: string, voice: TtsVoiceSelection) => {
+    const synthesize = async (id: 'neu-jo' | 'neu-jo-production' | 'neu-jo-canonical' | 'qwen-r1-eager' | 'qwen-r2-lazy' | 'qwen-no-reference',
+      profileId: string, voice: TtsVoiceSelection, qaFrontend?: AndroidQaNeuFrontend) => {
       publish({ phase: id });
       const profile = TTS_EXECUTION_PROFILES.find(item => item.id === profileId);
       check(profile, 'profile_missing');
@@ -368,6 +373,7 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
       failureStage = 'tts_setup';
       try {
         await ttsService.start({ text: TARGET_TEXT, language: 'en', voice, playAfterSynthesis: false,
+          ...(qaFrontend ? { qaFrontend } : {}),
           observe: event => {
             if (!observing) return;
             const safe = sanitizeTtsObservation(event);
@@ -393,7 +399,8 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
         check(events.indexOf('speaker_release') < events.indexOf('vocoder_release'), 'speaker_release_order');
       } else check(!events.includes('speaker_create'), 'unexpected_reference');
       const phones = observations.find(event => event.operation === 'phonemizer' && event.phase === 'settled');
-      if (id === 'neu-jo') check(phones && Number.isFinite(phones.elapsedMs), 'phonemizer_not_executed');
+      if (id === 'neu-jo' || id === 'neu-jo-production') check(phones && Number.isFinite(phones.elapsedMs), 'phonemizer_not_executed');
+      if (id === 'neu-jo-canonical') check(!phones && !events.includes('phonemizer_conversion'), 'prerequisite_missing');
       const phoneTiming = (operation: string) => {
         const elapsed = observations.find(event => event.operation === operation && event.phase === 'settled')?.elapsedMs;
         return typeof elapsed === 'number' && Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= 300_000
@@ -402,6 +409,8 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
       await ttsService.play(); check(ttsService.getState().phase === 'playing', 'tts_not_playing');
       await delay(300); await ttsService.stop();
       pass({ id, profileId, sampleRate: decoded.sampleRate, sampleCount: decoded.sampleCount,
+        ...(mode === 'phonemizer_diagnostic' ? { diagnosticFrontend: qaFrontend ? 'canonical_fixture' as const : 'production_js' as const,
+          productionG2POutputUsed: !qaFrontend, frontendFixtureSha256: ANDROID_QA_NEU_FRONTEND_SHA256 } : {}),
         termination: observations.find(event => event.operation === 'completion' && event.phase === 'settled')?.termination,
         speakerRows: formatted.speakerRows, speakerBaked: formatted.speakerBaked,
         phonemizerElapsedMs: phones?.elapsedMs, phonemizerModuleInitMs: phoneTiming('phonemizer_module_init'),
@@ -410,11 +419,14 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
       await gate('awaiting_clip_copy', id);
       await ttsService.cancelAndClear();
     };
-    if (mode !== 'reference') {
+    if (mode === 'phonemizer_diagnostic') {
+      await synthesize('neu-jo-production', 'neutts-nano-q4_k_m-neucodec-q8_0', { kind: 'builtin', voice: 'jo' });
+      await synthesize('neu-jo-canonical', 'neutts-nano-q4_k_m-neucodec-q8_0', { kind: 'builtin', voice: 'jo' }, 'neu-canonical-frontend-v1');
+    } else if (mode !== 'reference') {
       await synthesize('neu-jo', 'neutts-nano-q4_k_m-neucodec-q8_0', { kind: 'builtin', voice: 'jo' });
     }
     const references: Record<'r1' | 'r2', { sha256: string; durationMs: number }> = {} as never;
-    if (mode !== 'phonemizer') {
+    if (mode !== 'phonemizer' && mode !== 'phonemizer_diagnostic') {
       for (const id of ['r1', 'r2'] as const) {
         const prepared = await prepareManagedAudio({ sourceUri: fixtureUri(id), purpose: 'reference', sampleRate: 24000 });
         assertSyntheticSource(prepared, id === 'r1' ? 'r1-george.wav' : 'r2-zira.wav');
@@ -439,7 +451,7 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
       params: { n_predict: 32, temperature: 0, enable_thinking: false }, onToken: () => { callbacks += 1; } });
     check(callbacks > 0 && (result.content ?? result.text)?.trim().length && !llmEngineService.hasActiveCompletion(), 'chat_after_failed');
     restored(); pass({ id: 'chat_after', callbacks, profileRestored: true, chatUnchanged: true });
-    if (mode === 'phonemizer') return;
+    if (mode === 'phonemizer' || mode === 'phonemizer_diagnostic') return;
     referenceVoiceStore.hydrate();
     check(referenceVoiceStore.getState().voices.length === 0, 'qa_voice_library_not_empty');
     const saved = await referenceVoiceStore.save({ sourceUri: fixtureUri('r1'), sourceSha256: references.r1.sha256,

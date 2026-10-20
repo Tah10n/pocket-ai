@@ -1,3 +1,4 @@
+import canonicalFixture from '../../docs/validation/llama-rn-stage7/neu-canonical-frontend-diagnostic.json';
 import type { LlamaContext, LlamaSpeaker, NativeCompletionResult, TTSCapabilities } from 'llama.rn';
 import { synthesizeTtsOnContext, validateTtsAudioPayload, validateTtsCompletion } from '../../src/services/TtsSynthesisRuntime';
 import { TTS_EXECUTION_PROFILES, type TtsExecutionProfile } from '../../src/services/TtsExecutionProfiles';
@@ -6,6 +7,10 @@ import { requireLlamaModule } from '../../src/services/llamaRnModule';
 import type { LlamaCompletionResult } from '../../src/services/LlamaRuntimeAdapter';
 
 jest.mock('../../src/services/llamaRnModule', () => ({ requireLlamaModule: jest.fn() }));
+let mockCanonicalEnabled = true;
+let mockCanonicalCache = 'file:///data/user/0/app.qa/cache/';
+jest.mock('../../src/services/AndroidQaDocumentModelBootstrap', () => ({ isAndroidQaDocumentModelBootstrapEnabled: () => mockCanonicalEnabled }));
+jest.mock('../../src/services/FileSystemSetup', () => ({ getAppCacheRootDir: () => mockCanonicalCache }));
 
 type FormattedAudio = Awaited<ReturnType<LlamaContext['getFormattedAudioCompletion']>>;
 const tokensProfile = TTS_EXECUTION_PROFILES.find(profile => profile.flow === 'tokens')!;
@@ -74,6 +79,7 @@ async function flush() {
 }
 
 beforeEach(() => {
+  mockCanonicalEnabled = true; mockCanonicalCache = 'file:///data/user/0/app.qa/cache/';
   jest.clearAllMocks();
   jest.mocked(requireLlamaModule).mockReturnValue({
     listTTSVoices: jest.fn(() => []), getTTSVoice: jest.fn(() => undefined), listTTSLanguages: jest.fn(() => []),
@@ -607,4 +613,89 @@ it('does not expose Neu diagnostics for an ordinary non-Neu TTS profile', async 
   const observe = jest.fn();
   await synthesizeTtsOnContext(context, tokensProfile, { ...options(), observe });
   expect(observe.mock.calls.map(([value]) => value).find(value => value.operation === 'completion' && value.phase === 'settled').termination).toBeUndefined();
+});
+
+it('rejects the closed canonical diagnostic outside its exact Neu fixture before native initialization', async () => {
+  const { native, context } = nativeContext();
+  const request = { ...options(), qaFrontend: 'neu-canonical-frontend-v1' as const };
+  await expect(synthesizeTtsOnContext(context, tokensProfile, request)).rejects.toMatchObject({ code: 'prerequisite_missing' });
+  expect(native.initVocoder).not.toHaveBeenCalled();
+  expect(native.completion).not.toHaveBeenCalled();
+});
+
+function canonicalContext() {
+  const pair = nativeContext(neuProfile);
+  pair.native.getTTSCapabilities.mockResolvedValue({ ...capabilities(neuProfile), requiresPhonemes: true });
+  const payload = Object.freeze({ ref_phones: canonicalFixture.builtinReferencePhones,
+    ref_codes: Object.freeze(Array.from({ length: 653 }, (_, i) => i)) });
+  jest.mocked(requireLlamaModule).mockReturnValue({ listTTSVoices: jest.fn(() => ['jo']),
+    listTTSLanguages: jest.fn(() => ['en-us']), getTTSVoice: jest.fn(() => payload) } as unknown as ReturnType<typeof requireLlamaModule>);
+  pair.native.getFormattedAudioCompletion.mockImplementation(async config => {
+    const phones = await config.phonemizer!(config.prompt, config.language!);
+    return { prompt: JSON.stringify([config.speaker, phones]), grammar: 'same native grammar', embedding: false, flow: 'tokens' };
+  });
+  return { ...pair, payload };
+}
+const canonicalRequest = () => ({ ...options(neuProfile), text: canonicalFixture.targetText,
+  voice: { kind: 'builtin' as const, voice: 'jo' }, qaFrontend: 'neu-canonical-frontend-v1' as const });
+
+it('changes only fixed frontend inputs, retains Jo codes and native completion/decode parameters, then uses production G2P on the next request', async () => {
+  const { native, context, payload } = canonicalContext();
+  const observe = jest.fn();
+  await synthesizeTtsOnContext(context, neuProfile, { ...canonicalRequest(), observe });
+  const canonicalConfig = native.getFormattedAudioCompletion.mock.calls[0][0];
+  expect(canonicalConfig.speaker).toEqual({ ref_phones: canonicalFixture.canonicalReferencePhones, ref_codes: payload.ref_codes });
+  expect((canonicalConfig.speaker as { ref_codes: readonly number[] }).ref_codes).toBe(payload.ref_codes);
+  expect(payload.ref_phones).toBe(canonicalFixture.builtinReferencePhones);
+  expect(observe.mock.calls.some(([event]) => event.operation.startsWith('phonemizer'))).toBe(false);
+  expect(JSON.parse(native.completion.mock.calls[0][0].prompt!)[1]).toBe(canonicalFixture.canonicalTargetPhones);
+  expect(native.decodeAudioTokens).toHaveBeenCalledWith([1, 2, 3, 4]);
+  const { qaFrontend: _unused, ...ordinary } = canonicalRequest();
+  await synthesizeTtsOnContext(context, neuProfile, ordinary);
+  const [canonicalParams, baselineParams] = native.completion.mock.calls.map(([params]) => params);
+  expect({ ...canonicalParams, prompt: null }).toEqual({ ...baselineParams, prompt: null });
+  expect(canonicalParams).toMatchObject({ seed: 42, n_predict: 801, temperature: 1, top_k: 50, top_p: 1, penalty_repeat: 1 });
+  expect(JSON.parse(baselineParams.prompt!)[1]).toBe(canonicalFixture.productionTargetPhones);
+  expect(native.getFormattedAudioCompletion.mock.calls[1][0].speaker).toEqual(payload);
+  expect(native.releaseVocoder).toHaveBeenCalledTimes(2);
+});
+
+it.each(['disabled', 'ordinary-package', 'other-text', 'other-voice', 'other-language', 'unknown-selector'] as const)(
+  'rejects canonical admission %s before native init', async reason => {
+    const { context, native } = canonicalContext();
+    const request = canonicalRequest();
+    if (reason === 'disabled') mockCanonicalEnabled = false;
+    if (reason === 'ordinary-package') mockCanonicalCache = 'file:///data/user/0/app/cache/';
+    if (reason === 'other-text') request.text = 'Another target.';
+    if (reason === 'other-voice') request.voice.voice = 'dave';
+    if (reason === 'other-language') request.language = 'de';
+    if (reason === 'unknown-selector') request.qaFrontend = 'unknown' as never;
+    await expect(synthesizeTtsOnContext(context, neuProfile, request)).rejects.toMatchObject({ code: 'prerequisite_missing' });
+    expect(native.initVocoder).not.toHaveBeenCalled();
+  });
+
+it('rejects a changed builtin reference before formatting and releases the codec', async () => {
+  const { context, native } = canonicalContext();
+  jest.mocked(requireLlamaModule).mockReturnValue({ listTTSVoices: () => ['jo'], listTTSLanguages: () => ['en-us'],
+    getTTSVoice: () => ({ ref_phones: 'changed reference', ref_codes: Array(653).fill(1) }) } as unknown as ReturnType<typeof requireLlamaModule>);
+  await expect(synthesizeTtsOnContext(context, neuProfile, canonicalRequest())).rejects.toMatchObject({ code: 'prerequisite_missing' });
+  expect(native.getFormattedAudioCompletion).not.toHaveBeenCalled();
+  expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
+});
+
+it('rejects a late canonical callback after cancellation and never retains an override', async () => {
+  const { context, native } = canonicalContext();
+  const controller = new AbortController();
+  native.getFormattedAudioCompletion.mockImplementationOnce(async config => {
+    controller.abort();
+    await config.phonemizer!(config.prompt, config.language!);
+    throw new Error('unreachable');
+  });
+  await expect(synthesizeTtsOnContext(context, neuProfile, { ...canonicalRequest(), signal: controller.signal }))
+    .rejects.toMatchObject({ code: 'cancelled' });
+  expect(native.completion).not.toHaveBeenCalled();
+  expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
+  const { qaFrontend: _unused, ...ordinary } = canonicalRequest();
+  await synthesizeTtsOnContext(context, neuProfile, ordinary);
+  expect(JSON.parse(native.completion.mock.calls[0][0].prompt!)[1]).toBe(canonicalFixture.productionTargetPhones);
 });

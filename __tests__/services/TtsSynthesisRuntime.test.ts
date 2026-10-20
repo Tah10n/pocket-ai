@@ -581,3 +581,30 @@ it.each(['failed to parse grammar', 'failed to parse grammar /private/voice.wav'
   expect(native.decodeAudioTokens).not.toHaveBeenCalled();
   expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
 });
+
+it.each(['expected_speech_end', 'other_eog'] as const)('retains closed Neu %s telemetry through the real completion adapter without changing decoding', async stopTokenKind => {
+  const { native, context } = nativeContext(neuProfile);
+  native.getTTSCapabilities.mockResolvedValue({ ...capabilities(neuProfile), requiresPhonemes: true });
+  jest.mocked(requireLlamaModule).mockReturnValue({ listTTSLanguages: jest.fn(() => ['en-us']),
+    listTTSVoices: jest.fn(() => ['jo']), getTTSVoice: jest.fn(() => ({ ref_codes: [1, 2], ref_phones: 'hɛloʊ' })),
+  } as unknown as ReturnType<typeof requireLlamaModule>);
+  const termination = { schemaVersion: 1, sampledTokenCount: 5, audioTokenCount: 4, stopTokenKind };
+  const result = { ...completed(), tts_diagnostics: { ...termination, tokenId: 128261, text: 'private', path: '/private' } };
+  native.completion.mockResolvedValue(result);
+  const observe = jest.fn();
+  await synthesizeTtsOnContext(context, neuProfile, { ...options(neuProfile), voice: { kind: 'builtin', voice: 'jo' }, observe });
+  const event = observe.mock.calls.map(([value]) => value).find(value => value.operation === 'completion' && value.phase === 'settled');
+  expect(event.termination).toEqual(termination);
+  expect(JSON.stringify(event)).not.toContain('private'); expect(event.termination).not.toHaveProperty('tokenId');
+  expect(native.decodeAudioTokens).toHaveBeenCalledWith(result.audio_tokens);
+  expect(native.completion.mock.calls[0][0]).toMatchObject({ n_predict: 801, seed: 42, temperature: 1, top_k: 50, top_p: 1, ignore_eos: false });
+});
+
+it('does not expose Neu diagnostics for an ordinary non-Neu TTS profile', async () => {
+  const { native, context } = nativeContext();
+  const result = { ...completed(), tts_diagnostics: { schemaVersion: 1, sampledTokenCount: 5, audioTokenCount: 4, stopTokenKind: 'other_eog' } };
+  native.completion.mockResolvedValue(result);
+  const observe = jest.fn();
+  await synthesizeTtsOnContext(context, tokensProfile, { ...options(), observe });
+  expect(observe.mock.calls.map(([value]) => value).find(value => value.operation === 'completion' && value.phase === 'settled').termination).toBeUndefined();
+});

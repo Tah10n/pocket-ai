@@ -7,7 +7,7 @@ import { useChatStore } from '../store/chatStore';
 import { useDownloadStore } from '../store/downloadStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../types/models';
 import { DEFAULT_PRESET_SNAPSHOT } from '../types/chat';
-import { TtsError, sanitizeTtsObservation, sanitizePhonemizerFailure, isTtsFailureStage, type TtsFailureStage, type PhonemizerFailure, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
+import { TtsError, sanitizeTtsObservation, sanitizePhonemizerFailure, isTtsFailureStage, type TtsFailureStage, type TtsTerminationDiagnostics, type PhonemizerFailure, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
 import { getCompanionBindingIdentity, getCompanionSourceIdentity } from '../utils/modelArtifacts';
 import { getModelFileIdentity } from '../utils/modelRoles';
 import { audioRecordingService } from './AudioRecordingService';
@@ -31,6 +31,7 @@ import { ttsService } from './TtsService';
 type VoiceMode = 'voices' | 'phonemizer' | 'reference';
 type Mode = 'recording' | 'input' | VoiceMode | 'cold_voice';
 export interface AndroidQaAudioStage7Step {
+  termination?: TtsTerminationDiagnostics;
   id: string; status: 'passed'; sampleRate?: number; sampleCount?: number; durationMs?: number;
   sizeBytes?: number; sourceSha256?: string; profileId?: string; callbacks?: number;
   outputCharacters?: number; profileRestored?: boolean; chatUnchanged?: boolean;
@@ -401,6 +402,7 @@ async function executeVoices(recordFailure: (stage: TtsFailureStage) => void, mo
       await ttsService.play(); check(ttsService.getState().phase === 'playing', 'tts_not_playing');
       await delay(300); await ttsService.stop();
       pass({ id, profileId, sampleRate: decoded.sampleRate, sampleCount: decoded.sampleCount,
+        termination: observations.find(event => event.operation === 'completion' && event.phase === 'settled')?.termination,
         speakerRows: formatted.speakerRows, speakerBaked: formatted.speakerBaked,
         phonemizerElapsedMs: phones?.elapsedMs, phonemizerModuleInitMs: phoneTiming('phonemizer_module_init'),
         phonemizerConversionMs: phoneTiming('phonemizer_conversion'),

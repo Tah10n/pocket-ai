@@ -40,7 +40,27 @@ export function sanitizePhonemizerFailure(value: unknown): PhonemizerFailure | u
     ...(source.moduleInitMs === undefined ? {} : { moduleInitMs: source.moduleInitMs as number }) });
 }
 
+export interface TtsTerminationDiagnostics {
+  readonly schemaVersion: 1;
+  /** Includes the terminating EOG draw, unlike legacy tokensPredicted. */
+  readonly sampledTokenCount: number;
+  readonly audioTokenCount: number;
+  readonly stopTokenKind?: 'expected_speech_end' | 'other_eog';
+}
+export function sanitizeTtsTerminationDiagnostics(value: unknown): TtsTerminationDiagnostics | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const source = value as Record<string, unknown>;
+  if (source.schemaVersion !== 1 || !['sampledTokenCount', 'audioTokenCount'].every(key =>
+    Number.isSafeInteger(source[key]) && (source[key] as number) >= 0 && (source[key] as number) <= 1_000_000)
+    || (source.audioTokenCount as number) > (source.sampledTokenCount as number)) return undefined;
+  const stopTokenKind = source.stopTokenKind === 'expected_speech_end' || source.stopTokenKind === 'other_eog'
+    ? source.stopTokenKind : undefined;
+  return Object.freeze({ schemaVersion: 1, sampledTokenCount: source.sampledTokenCount as number,
+    audioTokenCount: source.audioTokenCount as number, ...(stopTokenKind ? { stopTokenKind } : {}) });
+}
+
 export interface TtsNativeCompletion {
+  readonly termination?: TtsTerminationDiagnostics;
   readonly tokensPredicted?: number;
   readonly tokensEvaluated?: number;
   readonly elapsedMs?: number;
@@ -51,7 +71,7 @@ export function sanitizeTtsNativeCompletion(value: unknown): TtsNativeCompletion
   const source = value as Record<string, unknown>;
   const bounded = (field: unknown, maximum: number): number | undefined => typeof field === 'number'
     && Number.isSafeInteger(field) && field >= 0 && field <= maximum ? field : undefined;
-  const result = { tokensPredicted: bounded(source.tokensPredicted, 1_000_000),
+  const result = { termination: sanitizeTtsTerminationDiagnostics(source.termination), tokensPredicted: bounded(source.tokensPredicted, 1_000_000),
     tokensEvaluated: bounded(source.tokensEvaluated, 1_000_000), elapsedMs: bounded(source.elapsedMs, 300_000) };
   if (Object.values(result).every(field => field === undefined)) return undefined;
   return Object.freeze(result);
@@ -99,6 +119,7 @@ export function isTtsFailureStage(value: unknown): value is TtsFailureStage {
 export type TtsOperation = 'vocoder_init' | 'speaker_create' | 'speaker_bake' | 'speaker_release'
   | 'phonemizer' | 'phonemizer_module_init' | 'phonemizer_conversion' | 'prompt_prepare' | 'formatter' | 'completion' | 'completion_stop' | 'decode' | 'vocoder_release';
 export interface TtsObservation {
+  termination?: TtsTerminationDiagnostics;
   operation: TtsOperation | 'first_failure';
   phase: 'started' | 'settled' | 'failed';
   failureStage?: TtsFailureStage;
@@ -172,6 +193,10 @@ export function sanitizeTtsObservation(value: unknown): TtsObservation | undefin
     'completion', 'completion_stop', 'decode', 'vocoder_release', 'first_failure'];
   if (!operations.includes(source.operation as string) || !['started', 'settled', 'failed'].includes(source.phase as string)) return undefined;
   const result: TtsObservation = { operation: source.operation as TtsObservation['operation'], phase: source.phase as TtsObservation['phase'] };
+  if (source.operation === 'completion' && source.phase === 'settled') {
+    const termination = sanitizeTtsTerminationDiagnostics(source.termination);
+    if (termination) result.termination = termination;
+  }
   if (isTtsFailureStage(source.failureStage)) result.failureStage = source.failureStage;
   if (source.operation === 'first_failure' && source.phase === 'failed' && source.failureStage === 'completion'
     && source.failureReason === 'grammar_parse_failed') result.failureReason = 'grammar_parse_failed';

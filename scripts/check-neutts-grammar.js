@@ -43,6 +43,23 @@ try {
     ? ['/nologo', '/EHsc', '/std:c++17', '/Od', '/I' + cpp, source, '/Fe:' + output]
     : ['-std=c++17', '-O0', '-I', cpp, source, '-o', output]);
   run(output, []);
+  // Exercise the exact diagnostic statements with controlled sampling/vocab inputs.
+  // This does not replace the actual parser/sampler coverage above or an app build.
+  const completion = pinned('cpp/rn-completion.cpp');
+  const sampleStart = completion.indexOf('        llama_token new_token_id = common_sampler_sample(ctx_sampling, parent_ctx->ctx, -1);');
+  const sampleEnd = completion.indexOf('        const int32_t n_probs =', sampleStart);
+  const reset = completion.match(/    num_tokens_predicted = 0;\n    tts_sampled_tokens = 0;\n    tts_stop_token_kind = 0;/u)?.[0];
+  if (sampleStart < 0 || sampleEnd <= sampleStart || !reset) throw new Error('Neu receipt extraction boundary missing');
+  const receipt = fs.readFileSync(path.join(root, '__tests__/fixtures/neutts-receipt-main.cpp'), 'utf8')
+    .replace('// NATIVE_SAMPLE_BLOCK', completion.slice(sampleStart, sampleEnd))
+    .replace('// NATIVE_RESET_BLOCK', reset);
+  const receiptSource = path.join(temp, 'receipt.cpp');
+  const receiptOutput = path.join(temp, process.platform === 'win32' ? 'receipt.exe' : 'receipt');
+  fs.writeFileSync(receiptSource, receipt);
+  run(compiler, /(^|[/\\])cl(?:\.exe)?$/iu.test(compiler)
+    ? ['/nologo', '/EHsc', '/std:c++17', '/Od', receiptSource, '/Fe:' + receiptOutput]
+    : ['-std=c++17', '-O0', receiptSource, '-o', receiptOutput]);
+  run(receiptOutput, []);
 } finally {
   // Exact uniquely allocated test directory only; includes compiler object/executable.
   fs.rmSync(temp, { recursive: true, force: true });

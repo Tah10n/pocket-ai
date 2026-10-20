@@ -893,3 +893,18 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(before.entries.some((entry) => entry.path === relative)).toBe(true);
   });
 });
+
+describe('Neu termination receipt exact native migrations', () => {
+  it.each(['cpp/rn-completion.cpp', 'cpp/rn-completion.h', 'cpp/jsi/JSICompletion.h'])('retains pristine and every accepted migration for %s', relative => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === relative);
+    const final = fs.readFileSync(path.resolve(__dirname, '../../node_modules/llama.rn', relative), 'utf8').replace(/\r\n/gu, '\n');
+    expect(hashSource(final)).toBe(patch.afterSha256);
+    for (const route of [{ sha256: patch.beforeSha256, replacements: patch.replacements }, ...(patch.intermediates || [])]) {
+      let before = final;
+      for (const [old, updated] of [...route.replacements].reverse()) before = applyReplacements(before, [[updated, old]]);
+      expect(hashSource(before)).toBe(route.sha256);
+      expect(hashSource(applyReplacements(before, route.replacements))).toBe(patch.afterSha256);
+    }
+    if (relative === COMPLETION_SOURCE) expect(patch.afterSha256).toBe(COMPLETION_AFTER_SHA256);
+  });
+});

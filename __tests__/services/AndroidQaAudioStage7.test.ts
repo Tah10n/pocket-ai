@@ -543,3 +543,18 @@ it('bounds device-side failed-attempt storage and starts the next run without st
   await runAndroidQaStage7Voices('phonemizer');
   expect(getAndroidQaAudioStage7Evidence().failedAttempt).toBeUndefined();
 });
+
+it('retains only closed Neu termination diagnostics in successful QA evidence and host sanitization', async () => {
+  const original = mockTtsStart.getMockImplementation()!;
+  const termination = { schemaVersion: 1, sampledTokenCount: 50, audioTokenCount: 49, stopTokenKind: 'other_eog' };
+  mockTtsStart.mockImplementation(async (request: TtsRequest) => original({ ...request, observe: (event: import('../../src/types/tts').TtsObservation) => {
+    request.observe?.({ ...event, ...(event.operation === 'completion' && event.phase === 'settled'
+      ? { termination: { ...termination, text: 'private', tokenId: 128009 } } : {}) } as never);
+  } }));
+  const work = runAndroidQaStage7Voices('phonemizer'); await until('awaiting_clip_copy');
+  expect(getAndroidQaAudioStage7Evidence().steps[0].termination).toEqual(termination);
+  continueAndroidQaAudioStage7(); await work;
+  const safe = sanitizeAudioStage7Evidence(getAndroidQaAudioStage7Evidence()) as { steps: { termination?: unknown }[] };
+  expect(safe.steps[0].termination).toEqual(termination);
+  expect(JSON.stringify(safe)).not.toContain('private'); expect(safe.steps[0].termination).not.toHaveProperty('tokenId');
+});

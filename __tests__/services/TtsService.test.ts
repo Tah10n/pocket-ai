@@ -1248,3 +1248,17 @@ it('separates validation, native prefill and generation from restore and manual 
   expect(service.getState().latency?.runKind).toBe('repeat_in_process');
   expect(service.getState().latency?.nativeGenerationMs).toBeUndefined();
 });
+
+it('retains sanitized termination in the existing playback marker state and clears it for the next request', async () => {
+  choose();
+  const termination = { schemaVersion: 1 as const, sampledTokenCount: 5, audioTokenCount: 4, stopTokenKind: 'other_eog' as const };
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    options.observe?.({ operation: 'completion', phase: 'started' });
+    options.observe?.({ operation: 'completion', phase: 'settled', termination });
+    return pcm();
+  });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().nativeCompletion?.termination).toEqual(termination);
+  await service.start({ text: 'Hello again.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().nativeCompletion).toBeUndefined();
+});

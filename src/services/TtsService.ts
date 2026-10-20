@@ -292,7 +292,7 @@ export class TtsService {
         if (event.phase === 'started' && completionStartedAt === undefined) completionStartedAt = Date.now();
         else if (event.phase === 'settled' && completionStartedAt !== undefined) {
           completionSettled = true;
-          const nativeCompletion = sanitizeTtsNativeCompletion({ tokensPredicted: event.tokensPredicted,
+          const nativeCompletion = sanitizeTtsNativeCompletion({ termination: event.termination, tokensPredicted: event.tokensPredicted,
             tokensEvaluated: event.tokensEvaluated, elapsedMs: Date.now() - completionStartedAt });
           this.publish({ ...this.state, nativeCompletion });
         }

@@ -156,7 +156,7 @@ const CLOCK_PRIVACY_REPLACEMENTS = [
 ];
 const COMPLETION_SOURCE = 'cpp/rn-completion.cpp';
 const COMPLETION_BEFORE_SHA256 = '4563b4a65e98e7022d4ae38014f12acd2241a0911fc2201f5da465679df82087';
-const COMPLETION_AFTER_SHA256 = 'b65be79e6cd665a482e82c4a4b27eb2f067a35907ca485d3aa68435f76625d12';
+const COMPLETION_AFTER_SHA256 = 'ad864b7de08544ea75a9bbd40ad17d1d7735ffac62035a08d5920e9d8c5a968b';
 const COMPLETION_REPLACEMENTS = [
   [
     `    if (ctx_sampling != nullptr) {
@@ -663,6 +663,45 @@ const AUDIO_INPUT_BOUNDS_REPLACEMENTS = [
 
     size_t n_read = fread(buf.data(), 1, file_size, f);`],
 ];
+const NEU_DIAGNOSTIC_PATCHES = [
+  {
+    "source": "cpp/rn-completion.h",
+    "beforeSha256": "bdc0fe895be630ab6cb301d08f66bae4287dd3b9d3417662d270e86bcf280588",
+    "afterSha256": "0fbd27893dec7f77640e38b95a4210329507a39eef93b4887930b001e3c91c2c",
+    "replacements": [
+      [
+        "    size_t num_tokens_predicted = 0;",
+        "    size_t num_tokens_predicted = 0;\n    // Neu diagnostic only; never fed back into sampling or completion decisions.\n    size_t tts_sampled_tokens = 0;\n    int tts_stop_token_kind = 0; // 0: no EOG, 1: model EOS, 2: other EOG"
+      ]
+    ]
+  },
+  {
+    "source": "cpp/rn-completion.cpp",
+    "beforeSha256": "b65be79e6cd665a482e82c4a4b27eb2f067a35907ca485d3aa68435f76625d12",
+    "afterSha256": "ad864b7de08544ea75a9bbd40ad17d1d7735ffac62035a08d5920e9d8c5a968b",
+    "replacements": [
+      [
+        "    num_tokens_predicted = 0;",
+        "    num_tokens_predicted = 0;\n    tts_sampled_tokens = 0;\n    tts_stop_token_kind = 0;"
+      ],
+      [
+        "        llama_token new_token_id = common_sampler_sample(ctx_sampling, parent_ctx->ctx, -1);",
+        "        llama_token new_token_id = common_sampler_sample(ctx_sampling, parent_ctx->ctx, -1);\n        if (parent_ctx->isVocoderEnabled() && parent_ctx->tts_wrapper != nullptr\n            && parent_ctx->tts_wrapper->getTTSType(parent_ctx) == NEUTTS_NANO) {\n            if (tts_sampled_tokens < 1000000) ++tts_sampled_tokens;\n            if (llama_vocab_is_eog(vocab, new_token_id)) {\n                tts_stop_token_kind = new_token_id == llama_vocab_eos(vocab) ? 1 : 2;\n            }\n        }"
+      ]
+    ]
+  },
+  {
+    "source": "cpp/jsi/JSICompletion.h",
+    "beforeSha256": "521cd22f28f4905e197be995747d2aeba4bf4b364e5f3f06d2f620adea573e39",
+    "afterSha256": "21a5bdbc6854a45758f9fe6fc37754ff437124fad21300436f1bffaa16bee1d5",
+    "replacements": [
+      [
+        "        if (ctx->isVocoderEnabled() && ctx->tts_wrapper != nullptr && !ctx->tts_wrapper->audio_tokens.empty()) {",
+        "        // Additive, closed Neu receipt. Generic/chat and parallel result contracts are unchanged.\n        if (ctx->isVocoderEnabled() && ctx->tts_wrapper != nullptr\n            && ctx->tts_wrapper->getTTSType(ctx) == rnllama::NEUTTS_NANO\n            && ctx->completion->tts_sampled_tokens > 0) {\n            jsi::Object diagnostic(runtime);\n            diagnostic.setProperty(runtime, \"schemaVersion\", 1);\n            diagnostic.setProperty(runtime, \"sampledTokenCount\", (double)ctx->completion->tts_sampled_tokens);\n            const size_t audio_count = ctx->tts_wrapper->audio_tokens.size();\n            diagnostic.setProperty(runtime, \"audioTokenCount\", (double)std::min(audio_count, (size_t)1000000));\n            if (ctx->completion->stopped_eos && ctx->completion->tts_stop_token_kind != 0) {\n                diagnostic.setProperty(runtime, \"stopTokenKind\", jsi::String::createFromUtf8(runtime,\n                    ctx->completion->tts_stop_token_kind == 1 ? \"expected_speech_end\" : \"other_eog\"));\n            }\n            res.setProperty(runtime, \"tts_diagnostics\", diagnostic);\n        }\n\n        if (ctx->isVocoderEnabled() && ctx->tts_wrapper != nullptr && !ctx->tts_wrapper->audio_tokens.empty()) {"
+      ]
+    ]
+  }
+];
 const SOURCE_PATCHES = [
   { source: 'cpp/tools/mtmd/mtmd-helper.cpp',
     beforeSha256: '323d595dfb719edb53c8720105f2da18abc76dade2dc3e7f38ecdf94200886d2',
@@ -672,7 +711,7 @@ const SOURCE_PATCHES = [
     intermediates: [{ sha256: SPEAKER_RECEIPT_PREVIOUS_SHA256, replacements: SPEAKER_RECEIPT_REPLACEMENTS }] },
   { source: PARAMS_SOURCE, beforeSha256: PARAMS_BEFORE_SHA256, afterSha256: PARAMS_AFTER_SHA256, replacements: PARAMS_REPLACEMENTS },
   { source: CLOCK_SOURCE, beforeSha256: CLOCK_BEFORE_SHA256, afterSha256: CLOCK_AFTER_SHA256, replacements: [[CLOCK_BEFORE, CLOCK_AFTER], ...CLOCK_PRIVACY_REPLACEMENTS], intermediates: [{ sha256: CLOCK_PREVIOUS_SHA256, replacements: CLOCK_PRIVACY_REPLACEMENTS }] },
-  { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, intermediates: [{ sha256: '014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc', replacements: CHATTERBOX_PRIVACY_REPLACEMENTS }, { sha256: 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d', replacements: COMPLETION_PRIVACY_REPLACEMENTS }, { sha256: 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058', replacements: [...PROMPT_TOKEN_PRIVACY_REPLACEMENTS, ...CHATTERBOX_PRIVACY_REPLACEMENTS] }], replacements: [...COMPLETION_REPLACEMENTS, ...COMPLETION_PRIVACY_REPLACEMENTS] },
+  { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: 'b65be79e6cd665a482e82c4a4b27eb2f067a35907ca485d3aa68435f76625d12', intermediates: [{ sha256: '014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc', replacements: CHATTERBOX_PRIVACY_REPLACEMENTS }, { sha256: 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d', replacements: COMPLETION_PRIVACY_REPLACEMENTS }, { sha256: 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058', replacements: [...PROMPT_TOKEN_PRIVACY_REPLACEMENTS, ...CHATTERBOX_PRIVACY_REPLACEMENTS] }], replacements: [...COMPLETION_REPLACEMENTS, ...COMPLETION_PRIVACY_REPLACEMENTS] },
   { source: SAMPLING_SOURCE, beforeSha256: SAMPLING_BEFORE_SHA256, afterSha256: SAMPLING_AFTER_SHA256, intermediates: [{ sha256: SAMPLING_PREVIOUS_SHA256, replacements: [...LLGUIDANCE_REPLACEMENTS, ...SAMPLING_PRIVACY_REPLACEMENTS] }, { sha256: 'd68916d80be1f3e3b1dd8ec238ab77cc23b8056394f3db49991eb2739fd0a1c2', replacements: SAMPLING_PRIVACY_REPLACEMENTS }], replacements: [...SAMPLING_REPLACEMENTS, ...SAMPLING_PRIVACY_REPLACEMENTS] },
   { source: GRAMMAR_SOURCE, beforeSha256: GRAMMAR_BEFORE_SHA256, afterSha256: GRAMMAR_AFTER_SHA256, replacements: GRAMMAR_REPLACEMENTS },
   {"source": "cpp/llama-batch.cpp", "beforeSha256": "88f7b462c41fda25c1767880c0d0a70550bfd816a1477663de06de8d5f5ca2fe", "afterSha256": "941ede2131208b75ce936979e9822934c88bc34f4d8760df736fb0c4eb0d2e96", "replacements": [["                    LLAMA_LOG_DEBUG(\"%s:  %4d: id = %6d (%16s), pos = %4d, n_seq_id = %2d, seq_id = [%s], output = %d\\n\",\n                            __func__, i, ubatch.token[i], vocab->token_to_piece(ubatch.token[i]).c_str(),\n                            ubatch.pos[i], ubatch.n_seq_id[i], ss.str().c_str(), ubatch.output[i]);", "                    LLAMA_LOG_DEBUG(\"%s:  %4d: [token], pos = %4d, n_seq_id = %2d, seq_id = [%s], output = %d\\n\",\n                            __func__, i, ubatch.pos[i], ubatch.n_seq_id[i], ss.str().c_str(), ubatch.output[i]);"]]},
@@ -728,6 +767,20 @@ const BUILD_FILES = Object.freeze({
   'cpp/common/chat-auto-parser.h': 'c774fcc02980529671793e110118ecfccb1e3c48eac52c852ce354922f599b52',
   'cpp/common/chat.h': 'e6d106744146668453d38fa3db725b630a438eb982c74effd094f30cd3ed4d65',
 });
+
+
+// Each extension is anchored to the previously accepted exact installed source.
+for (const extension of NEU_DIAGNOSTIC_PATCHES) {
+  const previous = SOURCE_PATCHES.find(entry => entry.source === extension.source);
+  if (previous) {
+    if (previous.afterSha256 !== extension.beforeSha256) throw new Error('Neu diagnostic source identity mismatch.');
+    previous.intermediates = [...(previous.intermediates || []).map(entry => ({
+      ...entry, replacements: [...entry.replacements, ...extension.replacements],
+    })), { sha256: extension.beforeSha256, replacements: extension.replacements }];
+    previous.replacements = [...previous.replacements, ...extension.replacements];
+    previous.afterSha256 = extension.afterSha256;
+  } else SOURCE_PATCHES.push(extension);
+}
 
 function hashSource(text) {
   return crypto.createHash('sha256').update(text.replace(/\r\n/gu, '\n')).digest('hex');

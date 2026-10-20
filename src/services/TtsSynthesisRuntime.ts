@@ -1,5 +1,5 @@
 import type { CompletionParams, LlamaContext, LlamaSpeaker, SpeakerPayload } from 'llama.rn';
-import { TTS_LIMITS, boundedTtsLatencyMs, TtsError, TtsCleanupError, type TtsFlow, type TtsObservation, type TtsOperation, type TtsFailureStage, type TtsPhase, type TtsVoiceSelection } from '../types/tts';
+import { TTS_LIMITS, sanitizeTtsTerminationDiagnostics, boundedTtsLatencyMs, TtsError, TtsCleanupError, type TtsFlow, type TtsObservation, type TtsOperation, type TtsFailureStage, type TtsPhase, type TtsVoiceSelection } from '../types/tts';
 import type { TtsExecutionProfile } from './TtsExecutionProfiles';
 import { requireLlamaModule } from './llamaRnModule';
 import { getCompletionPromptTokenCount } from './LlamaPromptTokenCount';
@@ -245,7 +245,9 @@ export async function synthesizeTtsOnContext(
     observe({ operation: 'completion', phase: 'started', flow, promptTokens, grammarPresent: Boolean(formatted.grammar) });
     try {
       result = await runCompletionOnContext({ context, params });
-      observe({ operation: 'completion', phase: 'settled', flow,
+      const termination = profile.family === 'neutts'
+        ? sanitizeTtsTerminationDiagnostics((result as unknown as { tts_diagnostics?: unknown }).tts_diagnostics) : undefined;
+      observe({ operation: 'completion', phase: 'settled', flow, termination,
         elementCount: flow === 'continuous_embd' ? result.embeddings?.length : result.audio_tokens?.length,
         tokensPredicted: result.tokens_predicted, tokensEvaluated: result.tokens_evaluated,
         nativePrefillMs: boundedTtsLatencyMs(result.timings?.prompt_ms),

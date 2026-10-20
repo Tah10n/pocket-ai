@@ -39,6 +39,19 @@ const FAILURE_STAGES = ['adapter_prepare', 'base_lora_load', 'tts_fixture_prepar
   'tts_backbone_init', 'vocoder_init', 'getTTSCapabilities', 'builtin_voice_lookup', 'phonemizer', 'speaker_create',
   'speaker_bake', 'formatter', 'prompt_prepare', 'completion', 'completion_stop', 'decode', 'speaker_release',
   'vocoder_release', 'context_release', 'restore', 'wav_encode', 'qa_voice_sequence'];
+function sanitizeTtsTerminationDiagnostics(value) {
+  if (!value || typeof value !== 'object') return undefined;
+  const source = value;
+  if (source.schemaVersion !== 1 || !['sampledTokenCount', 'audioTokenCount'].every(key =>
+    Number.isSafeInteger(source[key]) && (source[key]) >= 0 && (source[key]) <= 1_000_000)
+    || (source.audioTokenCount) > (source.sampledTokenCount)) return undefined;
+  const stopTokenKind = source.stopTokenKind === 'expected_speech_end' || source.stopTokenKind === 'other_eog'
+    ? source.stopTokenKind : undefined;
+  return Object.freeze({ schemaVersion: 1, sampledTokenCount: source.sampledTokenCount,
+    audioTokenCount: source.audioTokenCount, ...(stopTokenKind ? { stopTokenKind } : {}) });
+}
+
+
 function sanitizeAudioStage7Evidence(value) {
   const source = value && typeof value === 'object' ? value : {};
   const result = { schemaVersion: source.schemaVersion === 1 ? 1 : null,
@@ -68,6 +81,10 @@ function sanitizeAudioStage7Evidence(value) {
     for (const key of BOOLEANS) if (typeof step[key] === 'boolean') safe[key] = step[key];
     if (/^[a-f0-9]{64}$/u.test(step.sourceSha256 ?? '')) safe.sourceSha256 = step.sourceSha256;
     if (PROFILES.includes(step.profileId)) safe.profileId = step.profileId;
+    if (step.profileId === 'neutts-nano-q4_k_m-neucodec-q8_0') {
+      const termination = sanitizeTtsTerminationDiagnostics(step.termination);
+      if (termination) safe.termination = termination;
+    }
     if (['recorded', 'imported'].includes(step.fixtureKind)) safe.fixtureKind = step.fixtureKind;
     if (step.handlesPersisted === false) safe.handlesPersisted = false;
     if (Array.isArray(step.operations)) safe.operations = step.operations.filter(item => OPERATIONS.includes(item)).slice(0, 16);
@@ -79,6 +96,10 @@ function sanitizeAudioStage7Evidence(value) {
       if (!event || ![...OPERATIONS, 'first_failure'].includes(event.operation)
         || !['started', 'settled', 'failed'].includes(event.phase)) return [];
       const safe = { operation: event.operation, phase: event.phase };
+      if (event.operation === 'completion' && event.phase === 'settled') {
+        const termination = sanitizeTtsTerminationDiagnostics(event.termination);
+        if (termination) safe.termination = termination;
+      }
       if (FAILURE_STAGES.includes(event.failureStage)) safe.failureStage = event.failureStage;
       if (event.operation === 'first_failure' && event.phase === 'failed' && event.failureStage === 'completion'
         && event.failureReason === 'grammar_parse_failed') safe.failureReason = 'grammar_parse_failed';

@@ -155,3 +155,16 @@ it('bounds failed-attempt retention and strips untrusted fields, nonfinite count
   expect(sanitizeAudioStage7Evidence({ ...receipt, status: 'native_passed' }).failedAttempt).toBeUndefined();
   expect(() => validateAudioStage7Evidence(safe, 'phonemizer')).toThrow();
 });
+
+it('independently bounds closed termination telemetry in passed and failed native QA receipts', () => {
+  const termination = { schemaVersion: 1, sampledTokenCount: 50, audioTokenCount: 49, stopTokenKind: 'expected_speech_end', text: 'private', tokenId: 128261 };
+  const expected = { schemaVersion: 1, sampledTokenCount: 50, audioTokenCount: 49, stopTokenKind: 'expected_speech_end' };
+  const source = { ...initial('phonemizer'), steps: [step('neu-jo', { profileId: 'neutts-nano-q4_k_m-neucodec-q8_0', termination })] };
+  expect(sanitizeAudioStage7Evidence(source).steps[0].termination).toEqual(expected);
+  const failed = { ...source, status: 'failed', failedAttempt: { id: 'neu-jo', observations: [{ operation: 'completion', phase: 'settled', termination }] } };
+  expect(sanitizeAudioStage7Evidence(failed).failedAttempt.observations[0].termination).toEqual(expected);
+  for (const invalid of [{ schemaVersion: 2 }, { sampledTokenCount: Infinity }, { audioTokenCount: 51 }, { audioTokenCount: -1 }]) {
+    expect(sanitizeAudioStage7Evidence({ ...source, steps: [step('neu-jo', { profileId: 'neutts-nano-q4_k_m-neucodec-q8_0', termination: { ...termination, ...invalid } })] }).steps[0].termination).toBeUndefined();
+  }
+  expect(JSON.stringify(sanitizeAudioStage7Evidence(failed))).not.toContain('private');
+});

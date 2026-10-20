@@ -1,5 +1,21 @@
 # Stage 7 audio and reference-voice acceptance
 
+## Follow-up frontend diagnostic
+
+The [Neu comparison on source `3b0e67e`](neu-frontend-diagnostic-3b0e67e.json) records
+two actual x86 CPU synthesis runs with the same model, codec, Jo codes, seed and bounds.
+The production frontend emitted 0.98 seconds and failed fixed-target ASR (WER 0.75).
+Replacing both reference and target phonemes with the recorded canonical inputs emitted
+2.72 seconds and passed that content check (WER 0). Both runs ended on the expected
+speech-end token, decoded successfully and restored chat; the next chat completion passed.
+
+This is diagnostic evidence, not production phonemizer acceptance. It does not isolate
+reference versus target phonemes or establish a specific upstream defect. Stage 7 remains
+incomplete. The record binds the exact tested source, APK, fixture and audio identities.
+The phone results below retain their original identities and scope.
+
+## Historical phone acceptance
+
 The subsequent [audio interface handoff](ui-handoff.md) records the refreshed physical-device UI,
 its separate APK and manual verification. It does not supersede the native limits below.
 

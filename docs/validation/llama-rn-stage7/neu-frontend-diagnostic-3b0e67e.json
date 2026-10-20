@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "status": "diagnostic_complete",
+  "diagnosticOnly": true,
+  "productionAcceptance": "failed",
+  "stageComplete": false,
+  "reportIdentity": "The report commit is resolved from Git history and is distinct from the tested source.",
+  "testedBuild": {
+    "publicSourceSha": "3b0e67e458e219a94bc57e0e41f07f0d33a922c0",
+    "publicAppTree": "330c268a1ebe0aca1e7a083cfec8172602074b29",
+    "abi": "x86_64",
+    "deviceClass": "Android emulator",
+    "runtime": "llama.rn 0.13.0-rc.3",
+    "backend": "cpu",
+    "apkSha256": "90f033d387d502a34aa5f7cfcd2d9327fcf5a495fd429ea84ca628a04363417d",
+    "apkBytes": 92328522,
+    "installedApkHashMatched": true,
+    "buildInputDigest": "e24e175a1d6673d1765b88ba8ed668820052c9092cda6eb5e3f5626bc583e70e",
+    "compile": "passed",
+    "install": "passed",
+    "smoke": "passed",
+    "normalizedRuntimePatchSha256": "3e9f1d1f7098e46a8d92b5d3592a3d67ba1330a501137b42915c8c3ddc27391e"
+  },
+  "configuration": {
+    "profileId": "neutts-nano-q4_k_m-neucodec-q8_0",
+    "modelAndCodecPins": "tts-fixtures.json",
+    "repository": "BricksDisplay/NeuTTS-Nano-GGUF",
+    "revision": "857e272b903daf826606567c9ceaef574bfa793b",
+    "backbone": {
+      "filename": "neutts-nano-q4_k_m.gguf",
+      "bytes": 209571776,
+      "sha256": "14049f27cd9fac6bc703d06bbfd2580ec6fdc2b23780533bb416ddaf236d993f"
+    },
+    "codec": {
+      "filename": "codec-q8_0.gguf",
+      "bytes": 341719168,
+      "sha256": "9972d7cabd38582f0425ba898abffc6f92166154ce046a4f392654dbdad5fafa"
+    },
+    "frontendFixture": "neu-canonical-frontend-diagnostic.json",
+    "frontendFixtureSha256": "94017f55d9679de62837621afd7e9367660708e34cf9d4d9e1435fd5cbb97e58",
+    "voice": "jo",
+    "target": "The quiet river flows beside the old bridge.",
+    "cpuThreads": 4,
+    "seed": 42,
+    "sampleRate": 24000,
+    "maximumAudioSeconds": 16,
+    "builtinCodeCount": 653,
+    "samplerAndOutputBoundsChanged": false,
+    "memoryAdmissionWaived": false
+  },
+  "comparison": [
+    {
+      "id": "neu-jo-production",
+      "frontend": "production_js",
+      "productionG2POutputUsed": true,
+      "sampleCount": 23520,
+      "durationMs": 980.0,
+      "wavBytes": 47084,
+      "wavSha256": "42095c4eebf8975694e6a98e5f91210bb49c60bd9f94747c61bbd139222b56b2",
+      "termination": {
+        "schemaVersion": 1,
+        "sampledTokenCount": 50,
+        "audioTokenCount": 49,
+        "stopTokenKind": "expected_speech_end"
+      },
+      "contentPass": false,
+      "normalizedWordErrorRate": 0.75,
+      "transcript": "the quiet roof.",
+      "fullAudioHashesVerifiedBeforeAndAfter": true,
+      "nativeLifecycle": {
+        "operations": [
+          "vocoder_init",
+          "phonemizer_module_init",
+          "phonemizer_conversion",
+          "phonemizer",
+          "formatter",
+          "prompt_prepare",
+          "completion",
+          "decode",
+          "vocoder_release"
+        ],
+        "profileRestored": true,
+        "chatUnchanged": true,
+        "status": "passed"
+      },
+      "phonemizerTimingsMs": {
+        "phonemizerElapsedMs": 111,
+        "phonemizerModuleInitMs": 103,
+        "phonemizerConversionMs": 3
+      },
+      "contentEvaluator": {
+        "model": "Systran/faster-whisper-tiny.en",
+        "revision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+        "modelSha256": "1a5afae06a4db91c975c9a9d78be5cc110ee4ea022ad57d55492e4550e936b2a",
+        "maximumNormalizedWordErrorRate": 0.2
+      }
+    },
+    {
+      "id": "neu-jo-canonical",
+      "frontend": "canonical_fixture",
+      "productionG2POutputUsed": false,
+      "sampleCount": 65280,
+      "durationMs": 2720.0,
+      "wavBytes": 130604,
+      "wavSha256": "d38de3275c197d833ca7252d26f910715eedce60fcbd32a672b529e3e4157c92",
+      "termination": {
+        "schemaVersion": 1,
+        "sampledTokenCount": 137,
+        "audioTokenCount": 136,
+        "stopTokenKind": "expected_speech_end"
+      },
+      "contentPass": true,
+      "normalizedWordErrorRate": 0.0,
+      "transcript": "The quiet river flows beside the old bridge.",
+      "fullAudioHashesVerifiedBeforeAndAfter": true,
+      "nativeLifecycle": {
+        "operations": [
+          "vocoder_init",
+          "formatter",
+          "prompt_prepare",
+          "completion",
+          "decode",
+          "vocoder_release"
+        ],
+        "profileRestored": true,
+        "chatUnchanged": true,
+        "status": "passed"
+      },
+      "phonemizerTimingsMs": {},
+      "contentEvaluator": {
+        "model": "Systran/faster-whisper-tiny.en",
+        "revision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+        "modelSha256": "1a5afae06a4db91c975c9a9d78be5cc110ee4ea022ad57d55492e4550e936b2a",
+        "maximumNormalizedWordErrorRate": 0.2
+      }
+    }
+  ],
+  "chatAfter": {
+    "id": "chat_after",
+    "callbacks": 30,
+    "profileRestored": true,
+    "chatUnchanged": true,
+    "status": "passed"
+  },
+  "localVerification": {
+    "command": "npm run verify:release",
+    "status": "passed",
+    "jestSuites": 303,
+    "jestTests": 7080,
+    "rustUnitTests": 68,
+    "rustIntegrationTests": 3,
+    "otherChecks": [
+      "TypeScript",
+      "lint",
+      "native configuration"
+    ]
+  },
+  "interpretation": {
+    "productionMatchesHistoricalF7x86": true,
+    "conclusion": "Combined recorded canonical reference+target phonemes were sufficient for correct fixed-target ASR content with unchanged Neu/Jo codes/seed/bounds; production JS output still failed. This does not isolate reference versus target changes or establish general/frontend production acceptance.",
+    "knownBoundary": "Both arms ended on expected speech-end and decoded successfully. The fixed target failed with production frontend inputs and passed after jointly replacing reference and target phonemes. This does not isolate the individual contribution of either replacement.",
+    "upstreamDefectEstablished": false,
+    "limitations": [
+      "One fixed English target and one builtin voice on x86 CPU.",
+      "The canonical arm uses recorded phonemes and does not exercise the production G2P conversion.",
+      "ASR checks word content, not naturalness or speaker similarity.",
+      "No physical-phone inference, recording, playback latency or general frontend acceptance is established by this comparison."
+    ]
+  }
+}

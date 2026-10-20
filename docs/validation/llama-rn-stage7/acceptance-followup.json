@@ -7,12 +7,13 @@
   "scope": "Source-bound follow-up results. Earlier results are not inherited by newer source or a different device.",
   "latestLocalVerification": {
     "status": "passed",
-    "publicSourceSha": "88125ab30b76cffa7bbe659669c63f5e0f18c93b",
-    "publicAppTree": "19ac782db57b4b43452a1616b913e5419d59e4fb",
+    "publicSourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+    "sourcePublication": "confirmed",
+    "publicAppTree": "d2c2e1fdef636dc5bfcbe4bdf5f1f049524d37d6",
     "command": "npm run verify:release",
     "jestSuites": 303,
-    "jestTests": 7088,
-    "jestSeconds": 263.424,
+    "jestTests": 7095,
+    "jestSeconds": 301.047,
     "rustUnitTests": 68,
     "rustIntegrationTests": 3,
     "otherChecks": [
@@ -20,7 +21,7 @@
       "lint",
       "native configuration"
     ],
-    "scope": "Local release gate on this exact source; hosted CI and native acceptance are separate."
+    "scope": "Exact published decoder-repair source tree. Local verification does not establish model inference or the original-file device retry."
   },
   "focusedVerification": {
     "publicSourceSha": "88125ab30b76cffa7bbe659669c63f5e0f18c93b",
@@ -84,6 +85,103 @@
       "compile": "passed",
       "install": "passed",
       "normalizedRuntimePatchSha256": "3e9f1d1f7098e46a8d92b5d3592a3d67ba1330a501137b42915c8c3ddc27391e"
+    },
+    {
+      "id": "arm-dac-2456272",
+      "publicSourceSha": "2456272ed9f805efca71fbed85be82ca9272dff3",
+      "publicAppTree": "eac6256e2c2e14082ce0c34ace5500951c29acb4",
+      "abi": "arm64-v8a",
+      "deviceClass": "physical phone",
+      "apkSha256": "6b8c7f5ad0b082b0f50d1b37eeb5e8c645a2588d1b0a0a1c78cdca27e07781ad",
+      "apkBytes": 145823733,
+      "installedApkSha256": "6b8c7f5ad0b082b0f50d1b37eeb5e8c645a2588d1b0a0a1c78cdca27e07781ad",
+      "buildInputDigest": "91a260187f37beb6abda1b3606bf5f46aefc2cb676adf2969a52a828c0a71361",
+      "normalizedRuntimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+      "compile": "passed",
+      "install": "passed",
+      "smoke": "passed"
+    },
+    {
+      "id": "x86-input-2456272",
+      "publicSourceSha": "2456272ed9f805efca71fbed85be82ca9272dff3",
+      "publicAppTree": "eac6256e2c2e14082ce0c34ace5500951c29acb4",
+      "abi": "x86_64",
+      "deviceClass": "16 GiB emulator, Android API 36",
+      "apkSha256": "e2b4e1641540dd7e1976724ac11a99d202988aaa0d1c82301f9d0bc399df26bf",
+      "apkBytes": 92328974,
+      "buildInputDigest": "c385f441323a527988e98524dcc68ea1d663e3cfbfe3a698a270d4bbc35dfd72",
+      "normalizedRuntimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+      "compile": "passed",
+      "install": "passed",
+      "initialAutomatedSmoke": "failed_after_install_launcher_status",
+      "laterIndependentStartupInspection": "healthy_QA_home_and_loaded_SmolLM",
+      "reusedScenarioSmoke": "passed"
+    },
+    {
+      "id": "x86-ui-9fc7f4b",
+      "publicSourceSha": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+      "publicAppTree": "4a945ac23904091cb9ff3b3d9dc53c0d8592347e",
+      "abi": "x86_64",
+      "deviceClass": "16 GiB emulator, Android API 36",
+      "apkSha256": "e3b7e2dd1f793b691143a6ce4190d6c1574996a9696bc856cb74e2565af0a4ea",
+      "apkBytes": 92329018,
+      "installedApkSha256": "e3b7e2dd1f793b691143a6ce4190d6c1574996a9696bc856cb74e2565af0a4ea",
+      "buildInputDigest": "8a4ed4306b751404439f37188cd79b0ab1fccf22dd09c0b4e360a34d462458ee",
+      "normalizedRuntimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+      "compile": "passed",
+      "install": "passed",
+      "smoke": "passed"
+    },
+    {
+      "id": "arm64-ui-9fc7f4b",
+      "publicSourceSha": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+      "publicAppTree": "4a945ac23904091cb9ff3b3d9dc53c0d8592347e",
+      "abi": "arm64-v8a",
+      "deviceClass": "physical phone",
+      "apkSha256": "293b44d0a3288b907b8f3ea51e1a147d8ad3987a137223de6ea12efa6ab0d3ff",
+      "apkBytes": 145823777,
+      "installedApkSha256": "293b44d0a3288b907b8f3ea51e1a147d8ad3987a137223de6ea12efa6ab0d3ff",
+      "buildInputDigest": "83ef03a91df5ec3cdf994f4a5a658b0e87259a00ddcb084b3fd5db06711197e8",
+      "normalizedRuntimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+      "compile": "passed",
+      "install": "passed",
+      "smoke": "passed"
+    },
+    {
+      "id": "arm64-decoder-2ce8cbc",
+      "publicSourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+      "publicAppTree": "d2c2e1fdef636dc5bfcbe4bdf5f1f049524d37d6",
+      "abi": "arm64-v8a",
+      "deviceClass": "physical phone",
+      "apkSha256": "9227af2e57941fb68410290e4af9b9254948cca13bbfa936b05176e44953a913",
+      "apkBytes": 145823813,
+      "installedApkSha256": "9227af2e57941fb68410290e4af9b9254948cca13bbfa936b05176e44953a913",
+      "buildInputDigest": "cd7ef6e8fc79f33547ce368a50b011c0092106523cd8f536bf1cc04537d7341f",
+      "normalizedRuntimePatchSha256": "ab861eed195b755aa6dccb5e8efaf394cc13514155ffa3b7dae202a37af8e183",
+      "compile": "passed",
+      "install": "passed",
+      "smoke": "passed",
+      "buildSeconds": 766,
+      "inferenceAfterRepair": "not_run",
+      "scope": "Build/install/launch smoke only; no new physical audio Send, recording or model-inference acceptance."
+    },
+    {
+      "id": "x86-decoder-2ce8cbc",
+      "publicSourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+      "publicAppTree": "d2c2e1fdef636dc5bfcbe4bdf5f1f049524d37d6",
+      "abi": "x86_64",
+      "deviceClass": "16 GiB emulator, Android API 36",
+      "apkSha256": "bd514de680ff52318d3d3dde5618220dda8f92776ed40d000ca7ed0b329b298e",
+      "apkBytes": 92329054,
+      "installedApkSha256": "bd514de680ff52318d3d3dde5618220dda8f92776ed40d000ca7ed0b329b298e",
+      "buildInputDigest": "355bde25d29e0d585b6ac75686ebb121708a94b2ffa51541f76035f3a3c04784",
+      "normalizedRuntimePatchSha256": "ab861eed195b755aa6dccb5e8efaf394cc13514155ffa3b7dae202a37af8e183",
+      "compile": "passed",
+      "install": "passed",
+      "smoke": "passed",
+      "buildSeconds": 285,
+      "inferenceAfterRepair": "naturally_completed_fixed_target_present_strict_answer_format_failed",
+      "scope": "Build/install/launch smoke and one original-file ordinary Send/cold verified; fixed color/number present, strict answer format failed."
     }
   ],
   "cases": [
@@ -578,7 +676,67 @@
           "persistenceVerification": "pending"
         }
       },
-      "ordinaryImportPickerAttachSend": "not_run"
+      "ordinaryImportPickerAttachSend": "not_run",
+      "evidenceScope": "initial_setup_before_resumed_acceptance",
+      "supersededByCaseId": "physical-phone-3b0e67e-resumed"
+    },
+    {
+      "id": "physical-phone-3b0e67e-resumed",
+      "buildId": "arm64-3b0e67e",
+      "status": "partial",
+      "scope": "Ordinary speakerless TTS playback/content/timing and restored chat; physical recording/import/preparation/cleanup; successful physical audio input inference not established.",
+      "evidence": "acceptance-resumed-20261020.json",
+      "supersedesScope": "Initial not-run setup snapshot only; earlier failures and source identities retained."
+    },
+    {
+      "id": "ordinary-oute-2456272",
+      "buildId": "arm-dac-2456272",
+      "status": "scoped_ordinary_tts_passed",
+      "scope": "Ordinary TTS playback/content/timing and restored chat; no audio-input inference claim.",
+      "evidence": "acceptance-resumed-20261020.json"
+    },
+    {
+      "id": "native-audio-input-2456272",
+      "buildId": "x86-input-2456272",
+      "status": "passed",
+      "scope": "Two fixed native input steps: imported controlled audio and actual physical-phone microphone WAV, executed on API 36 x86 CPU. Completion/content/drain passed; no physical Send or ordinary picker/cold claim.",
+      "evidence": "acceptance-resumed-20261020.json",
+      "ordinaryPickerSendCold": "Separate recorded245, recorded-message upgrade9fc and ordinaryImports9fc7f4b records contain the actual ordinary UI results; fixed native steps alone do not cover them."
+    },
+    {
+      "id": "ordinary-recorded-2456272",
+      "buildId": "x86-input-2456272",
+      "status": "partial_original_name_rendering_failed",
+      "scope": "Actual phone recording imported through ordinary emulator picker: Orange 7 completion and cold message/file retention passed; original filename rendering failed. Stored displayName not independently inspected.",
+      "evidence": "acceptance-resumed-20261020.json"
+    },
+    {
+      "id": "recorded-message-upgrade-9fc7f4b",
+      "buildId": "x86-ui-9fc7f4b",
+      "status": "passed",
+      "scope": "Original recorded.wav text/accessibility restored from same retained message after upgrade and cold launch; same file bytes/hash/inode. No new inference run; original completion belongs to 2456272.",
+      "evidence": "acceptance-resumed-20261020.json"
+    },
+    {
+      "id": "physical-filename-upgrade-9fc7f4b",
+      "buildId": "arm64-ui-9fc7f4b",
+      "status": "passed",
+      "scope": "Existing forty-seconds.wav message visible/accessibility filename and same bytes/hash/inode after cold launch. Initial disconnected partial retained separately; no new Send, inference, TTS or microphone capture. Earlier physical memory-admission refusal unchanged.",
+      "evidence": "acceptance-resumed-20261020.json"
+    },
+    {
+      "id": "ordinary-three-imports-9fc7f4b",
+      "buildId": "x86-ui-9fc7f4b",
+      "status": "completed_with_explicit_failures",
+      "scope": "All three original names and stored bytes retained across cold reopen. WAV40 completion passed but full answer content unverified; MP3 completion/content passed; large stereo WAV Send failed unsupported format, error-message cold retention passed.",
+      "evidence": "acceptance-resumed-20261020.json"
+    },
+    {
+      "id": "ordinary-large-repair-2ce8cbc",
+      "buildId": "x86-decoder-2ce8cbc",
+      "status": "completed_with_answer_format_failure",
+      "scope": "One ordinary 48 kHz stereo WAV Send naturally completed without Stop, retry, timeout or admission waiver. Cold original filename/4608044 bytes/SHA/inode passed. Answer Orange 7  The  The  The contains the fixed target but fails strict format; no general quality acceptance. Original 9fc error case preserved.",
+      "evidence": "acceptance-resumed-20261020.json"
     }
   ],
   "frontendDiagnostics": {
@@ -636,82 +794,98 @@
     "scope": "Windows path staging and CMake object path budget; no inference claim from compilation."
   },
   "remainingUnverified": [
-    "Physical-phone ordinary imported WAV/MP3 picker, Attach, Send, inference and cold persistence on the follow-up APK.",
-    "Physical-phone ordinary microphone recording, Stop/Attach, cancellation, 30-second cap, Send and cold persistence.",
-    "Follow-up Oute first/repeat synthesis, automatic playback, stage latency and independent content checks.",
-    "Production Neu frontend conversion for arbitrary text; canonical target diagnostics do not close this gap.",
-    "Fresh application-scoped privacy observation for the outstanding physical audio flows."
+    "Successful physical recorded/imported Send and inference, including cold lifecycle following successful inference, remain unverified. Cold name/byte retention of the existing error-message attachment passed separately on 9fc7f4b.",
+    "Production canonical Neu frontend integration and resulting speech quality.",
+    "Android/iOS native eSpeak lifecycle, asset, memory and timing validation.",
+    "The bounded post-run ARM TTS privacy snapshot is recorded separately; coverage of the resumed physical audio-input flows and all run stages remains unverified.",
+    "Strict answer-format success for the repaired large 48 kHz stereo WAV: the single 2ce8cbc x86 Send naturally completed and cold name/bytes passed, but the answer contained extra repeated words. General speech/transcription quality is not accepted.",
+    "Full expected color-and-number content for the forty-second WAV response; terminal completion passed, but the collapsed Markdown list prevented full verification."
   ],
   "limitations": [
     "Reference conditioning is a two-synthetic-voice, one-text paired comparison; no calibrated identity or naturalness claim.",
     "The reference harness proves synthesis/export and native lifecycle, not observed audible playback.",
     "Stop/drain/Delete is distinct from deleting a native speaker while synthesis is active.",
-    "The installed phone build is 3b0e67e; the crossed diagnostic build is 88125ab on x86.",
+    "The resumed physical audio baseline is 3b0e67e; the physical DAC comparison is 2456272; the crossed frontend diagnostic is 88125ab on x86. Each retains its own source/APK identity.",
     "No current hosted CI success is inferred from a local release gate."
   ],
   "hostedCi": {
     "currentSnapshot": {
-      "publicSourceSha": "88125ab30b76cffa7bbe659669c63f5e0f18c93b",
-      "observedAt": "2026-10-20T17:09:00.695Z",
-      "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39460352492",
+      "sourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+      "repository": "Tah10n/pocket-ai",
+      "status": "passed",
+      "runId": 39505971231,
+      "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231",
+      "scope": "Exact published decoder-repair source CI completed successfully: native scope, deterministic, iOS, Android API32–35 and aggregate verification passed. Optional Android QA was skipped. PR Title and Dependency Review also completed successfully. A later report-only source requires its own CI observation.",
+      "prTitle": {
+        "status": "passed",
+        "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971223",
+        "conclusion": "success"
+      },
+      "dependencyReview": {
+        "status": "passed",
+        "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971228",
+        "conclusion": "success"
+      },
+      "observedAtUtc": "2026-10-20T23:14:00Z",
       "jobs": [
         {
           "name": "native scope",
-          "status": "completed",
-          "conclusion": "success"
+          "jobId": 118914851139,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118914851139"
         },
         {
           "name": "deterministic",
-          "status": "completed",
-          "conclusion": "success"
+          "jobId": 118914851632,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118914851632"
         },
         {
           "name": "ios native release",
-          "status": "in_progress",
-          "conclusion": null
+          "jobId": 118919435431,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435431"
         },
         {
           "name": "android native release (API 32)",
-          "status": "in_progress",
-          "conclusion": null
-        },
-        {
-          "name": "android native release (API 34)",
-          "status": "in_progress",
-          "conclusion": null
+          "jobId": 118919435623,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435623"
         },
         {
           "name": "android native release (API 33)",
-          "status": "in_progress",
-          "conclusion": null
+          "jobId": 118919435710,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435710"
+        },
+        {
+          "name": "android native release (API 34)",
+          "jobId": 118919435636,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435636"
         },
         {
           "name": "android native release (API 35)",
-          "status": "in_progress",
-          "conclusion": null
+          "jobId": 118919435863,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435863"
         },
         {
-          "name": "android (qa)",
-          "status": "completed",
-          "conclusion": "skipped"
-        }
-      ],
-      "otherChecksObservedAt": "2026-10-20T17:03:37.031Z",
-      "otherChecks": [
-        {
-          "name": "Dependency Review",
-          "status": "completed",
-          "conclusion": "success",
-          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39460352644"
+          "name": "optional Android QA",
+          "jobId": 118919437589,
+          "status": "skipped",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919437589"
         },
         {
-          "name": "PR Title",
-          "status": "completed",
-          "conclusion": "success",
-          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39460352455"
+          "name": "verify",
+          "jobId": 118939865086,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118939865086"
         }
       ],
-      "scope": "Snapshot only; the current native jobs had not completed at observation."
+      "observationTimePrecision": "minute",
+      "workflowConclusion": "success",
+      "requiredJobs": "all_passed"
     },
     "completedHistorical": [
       {
@@ -738,6 +912,395 @@
       ],
       "filteredResults": "empty",
       "interpretation": "Unavailable through the current GitHub API lookup; this does not establish that runs never executed or passed."
+    },
+    "historicalSnapshots": [
+      {
+        "publicSourceSha": "88125ab30b76cffa7bbe659669c63f5e0f18c93b",
+        "observedAt": "2026-10-20T17:09:00.695Z",
+        "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39460352492",
+        "jobs": [
+          {
+            "name": "native scope",
+            "status": "completed",
+            "conclusion": "success"
+          },
+          {
+            "name": "deterministic",
+            "status": "completed",
+            "conclusion": "success"
+          },
+          {
+            "name": "ios native release",
+            "status": "in_progress",
+            "conclusion": null
+          },
+          {
+            "name": "android native release (API 32)",
+            "status": "in_progress",
+            "conclusion": null
+          },
+          {
+            "name": "android native release (API 34)",
+            "status": "in_progress",
+            "conclusion": null
+          },
+          {
+            "name": "android native release (API 33)",
+            "status": "in_progress",
+            "conclusion": null
+          },
+          {
+            "name": "android native release (API 35)",
+            "status": "in_progress",
+            "conclusion": null
+          },
+          {
+            "name": "android (qa)",
+            "status": "completed",
+            "conclusion": "skipped"
+          }
+        ],
+        "otherChecksObservedAt": "2026-10-20T17:03:37.031Z",
+        "otherChecks": [
+          {
+            "name": "Dependency Review",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39460352644"
+          },
+          {
+            "name": "PR Title",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39460352455"
+          }
+        ],
+        "scope": "Snapshot only; the current native jobs had not completed at observation."
+      },
+      {
+        "observedAt": "2026-10-20T19:59:24.235Z",
+        "repository": "Tah10n/pocket-ai",
+        "sourceSha": "2456272ed9f805efca71fbed85be82ca9272dff3",
+        "status": "passed",
+        "eventScope": "pull_request (connector endpoint filter)",
+        "runs": [
+          {
+            "id": 39479310750,
+            "name": "PR Title",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310750"
+          },
+          {
+            "id": 39479310648,
+            "name": "Dependency Review",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310648"
+          },
+          {
+            "id": 39479310782,
+            "name": "CI",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782"
+          }
+        ],
+        "jobs": [
+          {
+            "id": 118823395591,
+            "name": "native scope",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118823395591"
+          },
+          {
+            "id": 118823395837,
+            "name": "deterministic",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118823395837"
+          },
+          {
+            "id": 118828614106,
+            "name": "android native release (API 32)",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828614106"
+          },
+          {
+            "id": 118828614144,
+            "name": "android native release (API 34)",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828614144"
+          },
+          {
+            "id": 118828614178,
+            "name": "android native release (API 35)",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828614178"
+          },
+          {
+            "id": 118828614216,
+            "name": "ios native release",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828614216"
+          },
+          {
+            "id": 118828614363,
+            "name": "android native release (API 33)",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828614363"
+          },
+          {
+            "id": 118828617366,
+            "name": "android (qa)",
+            "status": "completed",
+            "conclusion": "skipped",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828617366"
+          },
+          {
+            "id": 118852982076,
+            "name": "verify",
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118852982076"
+          }
+        ],
+        "limitation": "Exact source head snapshot. A later report-only head must be checked independently; optional android (qa) was skipped."
+      },
+      {
+        "sourceSha": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+        "repository": "Tah10n/pocket-ai",
+        "status": "passed",
+        "scope": "Historical source 9fc7f4b: all required jobs passed after the addressed API33 SDK-installation retry; optional Android QA was skipped. Original failure remains preserved. This is not CI for current decoder-repair source 2ce8cbc.",
+        "runId": 39494077396,
+        "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077396",
+        "attemptObservations": [
+          {
+            "attempt": 1,
+            "status": "completed_failure",
+            "checkoutMergeSha": "4a5b638bc6a04257e7db0c221b9263ed3c05bf85",
+            "sourceIncluded": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+            "deterministic": "passed",
+            "failedJob": {
+              "id": 118879595992,
+              "name": "android native release (API 33)",
+              "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077396/job/118879595992",
+              "classification": "sdk_archive_installation_failure_before_app_build",
+              "stage": "sdkmanager platform android-33 installation",
+              "failureAtUtc": "2026-10-20T20:52:54Z",
+              "error": "Error on ZipFile unknown archive",
+              "shellExitCode": 1,
+              "appBuildStarted": false,
+              "emulatorStarted": false,
+              "cleanupConnectionRefused": "Secondary cleanup output after the emulator had not started; not an application launch failure."
+            },
+            "rerunStatus": "targeted_API33_retry_requested",
+            "observedAt": "2026-10-20T20:55:50.149Z",
+            "conclusion": "failure",
+            "aggregate": "failure",
+            "originalSuccessfulJobs": [
+              "native scope",
+              "deterministic",
+              "ios native release",
+              "android native release (API 32)",
+              "android native release (API 34)",
+              "android native release (API 35)"
+            ]
+          }
+        ],
+        "targetedRetry": {
+          "requestedAtUtc": "2026-10-20T21:46:00Z",
+          "apiSuccess": true,
+          "outcome": "passed",
+          "kind": "single_job",
+          "jobId": 118879595992,
+          "timePrecision": "approximate_minute",
+          "latestJobId": 118904612492,
+          "latestJobUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077396/job/118904612492",
+          "otherLatestJobs": "Carried successful jobs from the original attempt; not fresh reruns.",
+          "latestJobStatus": "completed_success"
+        },
+        "relationshipToLatestLocalGate": "Historical published 9fc7f4b CI; current published decoder-repair source 2ce8cbc has its own pending CI run.",
+        "observedAtUtc": "2026-10-20T22:39:30Z",
+        "aggregate": {
+          "jobId": 118925681592,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077396/job/118925681592"
+        },
+        "requiredJobs": "all_passed",
+        "optionalAndroidQa": "skipped",
+        "retryHistoryNote": "The earlier retry request while the workflow was still running was refused; the later addressed API33 retry completed successfully. Original SDK archive failure remains retained.",
+        "workflowConclusion": "success",
+        "prTitle": {
+          "status": "passed",
+          "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077296"
+        },
+        "dependencyReview": {
+          "status": "passed",
+          "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077347"
+        }
+      },
+      {
+        "sourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+        "repository": "Tah10n/pocket-ai",
+        "status": "pending",
+        "runId": 39505971231,
+        "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231",
+        "scope": "Exact decoder-repair source CI: native scope, deterministic, iOS and Android API34 passed; Android API32, API33 and API35 are still running at this observation. Optional Android QA skipped. No overall CI pass is claimed.",
+        "prTitle": {
+          "status": "passed",
+          "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971223"
+        },
+        "dependencyReview": {
+          "status": "passed",
+          "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971228"
+        },
+        "observedAtUtc": "2026-10-20T23:01:19Z",
+        "jobs": [
+          {
+            "name": "native scope",
+            "jobId": 118914851139,
+            "status": "passed",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118914851139"
+          },
+          {
+            "name": "deterministic",
+            "jobId": 118914851632,
+            "status": "passed",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118914851632"
+          },
+          {
+            "name": "ios native release",
+            "jobId": 118919435431,
+            "status": "passed",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435431"
+          },
+          {
+            "name": "android native release (API 32)",
+            "jobId": 118919435623,
+            "status": "running",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435623"
+          },
+          {
+            "name": "android native release (API 33)",
+            "jobId": 118919435710,
+            "status": "running",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435710"
+          },
+          {
+            "name": "android native release (API 34)",
+            "jobId": 118919435636,
+            "status": "passed",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435636"
+          },
+          {
+            "name": "android native release (API 35)",
+            "jobId": 118919435863,
+            "status": "running",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435863"
+          },
+          {
+            "name": "optional Android QA",
+            "jobId": 118919437589,
+            "status": "skipped",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919437589"
+          }
+        ]
+      }
+    ]
+  },
+  "historicalLocalVerification": [
+    {
+      "status": "passed",
+      "publicSourceSha": "88125ab30b76cffa7bbe659669c63f5e0f18c93b",
+      "publicAppTree": "19ac782db57b4b43452a1616b913e5419d59e4fb",
+      "command": "npm run verify:release",
+      "jestSuites": 303,
+      "jestTests": 7088,
+      "jestSeconds": 263.424,
+      "rustUnitTests": 68,
+      "rustIntegrationTests": 3,
+      "otherChecks": [
+        "TypeScript",
+        "lint",
+        "native configuration"
+      ],
+      "scope": "Local release gate on this exact source; hosted CI and native acceptance are separate."
+    },
+    {
+      "status": "passed",
+      "publicSourceSha": "2456272ed9f805efca71fbed85be82ca9272dff3",
+      "publicAppTree": "eac6256e2c2e14082ce0c34ace5500951c29acb4",
+      "command": "npm run verify:release",
+      "jestSuites": 303,
+      "jestTests": 7091,
+      "jestSeconds": 297.653,
+      "rustUnitTests": 68,
+      "rustIntegrationTests": 3,
+      "otherChecks": [
+        "TypeScript",
+        "lint",
+        "native configuration"
+      ],
+      "scope": "Local release gate on the exact source tree used by both 2456272 APKs; hosted CI and native acceptance are separate."
+    },
+    {
+      "status": "passed",
+      "command": "npm run verify:release",
+      "jestSuites": 303,
+      "jestTests": 7094,
+      "jestSeconds": 314.668,
+      "rustUnitTests": 68,
+      "rustIntegrationTests": 3,
+      "otherChecks": [
+        "TypeScript",
+        "lint",
+        "native configuration"
+      ],
+      "publicSourceSha": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+      "publicAppTree": "4a945ac23904091cb9ff3b3d9dc53c0d8592347e",
+      "scope": "Local release gate on exact published renderer-fix source; native acceptance and hosted CI remain separate."
     }
+  ],
+  "integrationPreparation": {
+    "status": "host_prototype_verified_not_integrated",
+    "evidence": "acceptance-resumed-20261020.json",
+    "parity": "17/17",
+    "nativeMobileAcceptance": "not_run",
+    "licenseDecisionApplied": false
+  },
+  "finalUiNameRepair": {
+    "status": "filename_upgrade_verified_ordinary_imports_completed_with_explicit_failures",
+    "publicSource": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+    "evidence": "acceptance-resumed-20261020.json",
+    "nativeUpgradeVerification": "passed_same_retained_recorded_message_name_accessibility_and_cold_file_retention"
+  },
+  "nativeDecoderRepair": {
+    "status": "native_send_and_cold_passed_answer_format_failed",
+    "evidence": "acceptance-resumed-20261020.json",
+    "normalizedPatchSha256": "ab861eed195b755aa6dccb5e8efaf394cc13514155ffa3b7dae202a37af8e183",
+    "fullVerification": "passed_303_suites_7095_tests",
+    "deviceAfterRepair": "native_send_completion_and_cold_passed_strict_answer_format_failed",
+    "publicSourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+    "armBuild": "passed_build_install_smoke_only",
+    "x86Build": "passed_build_install_smoke_only"
+  },
+  "resourceCleanup": {
+    "status": "completed_verified",
+    "scopedTargetsRemoved": 27,
+    "logicalBytesAtVerifiedPreDeletionSnapshots": 46229035455,
+    "physicalFreedBytes": "not_measured",
+    "evidence": "acceptance-resumed-20261020.json",
+    "scope": "Exact task-owned outputs only; source, final APKs, eSpeak preparation and small proof retained."
+  },
+  "reportHeadCi": {
+    "status": "not_run",
+    "reason": "At report preparation, the report-only commit was not yet published. Its CI must be observed separately after publication; successful source 2ce8cbc CI does not cover that later report head."
   }
 }

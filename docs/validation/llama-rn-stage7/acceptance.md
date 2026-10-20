@@ -3,8 +3,23 @@
 ## Current follow-up status
 
 The [follow-up record](acceptance-followup.json) separates each source/APK and verification
-scope. The local release gate on `88125ab` passed 303 Jest suites / 7,088 tests,
+scope. The committed decoder-repair tree passed 303 Jest suites / 7,095 tests,
 Rust 68 unit plus 3 integration tests, TypeScript, lint and native configuration.
+Published decoder-repair source `2ce8cbc` retains that exact gate; the 9fc7f4b gate
+is historical. [Current source CI](https://github.com/Tah10n/pocket-ai/actions/runs/39505971231)
+completed successfully: native scope, deterministic, iOS, Android API 32–35 and
+aggregate verification passed; optional Android QA was skipped. PR Title and
+Dependency Review also passed. Previous pending observations are retained. Historical
+[9fc7f4b CI](https://github.com/Tah10n/pocket-ai/actions/runs/39494077396)
+completed successfully after the addressed API 33 retry; all required jobs passed and
+optional Android QA was skipped. Its first SDK archive-installation failure, before
+app build or emulator startup, and the refused early retry remain historical.
+This historical result remains separate from the successful current 2ce8cbc run. The earlier
+`88125ab` and `2456272` gates retain their own source identities. Historical
+[CI for `2456272`](https://github.com/Tah10n/pocket-ai/actions/runs/39479310782)
+completed successfully, including Android API 32–35, iOS and final verification;
+optional Android QA was skipped. Its Dependency Review and PR Title also passed.
+A later report-only head needs its own CI check.
 Stage 7 remains incomplete; memory admission and runtime limits were not waived.
 Import remains bounded at 25 MiB; microphone preparation keeps 4 MiB/30 seconds,
 and reference preparation keeps 2 MiB/8 seconds with native admission retained.
@@ -18,12 +33,132 @@ identity or naturalness threshold. On `5e926cd`, ordinary reference import retai
 editor, consent and Save worked, and Stop → drain → Delete followed by a cold launch
 confirmed that the deleted voice did not return. These remain distinct tested builds.
 
-The `3b0e67e` ARM64 build and hash-matched installation passed. Initial automated smoke
-failed after installation; subsequent manual home inspection and a verified cold launch
-passed. Ordinary setup downloaded recommended Oute assets and accepted the 44-character
-target, but USB disconnected before synthesis or microphone capture. New physical Oute
-latency/playback/content, microphone flows and imported-audio Send/cold checks are
-**not run**. Setup and build success do not establish those outcomes.
+The [resumed physical results](acceptance-resumed-20261020.json) retain source
+`3b0e67e`, ARM64 APK SHA-256
+`1fa2d0ac30794bd6a228e832f93a0e8685689199862382591b8c9aa01146583e`
+and runtime patch SHA-256
+`3e9f1d1f7098e46a8d92b5d3592a3d67ba1330a501137b42915c8c3ddc27391e`.
+The original automated smoke command failed after successful installation; later
+ordinary UI results do not rewrite that command's outcome.
+
+Ordinary speakerless Oute TTS reached confirmed playback in 39.338 seconds on the
+first in-process run and 38.604 seconds on repeat. Native generation took
+16.274/16.356 seconds and decode 19.459/19.327 seconds. Both 3.306333-second WAVs
+had identical bytes and independent fixed-target ASR WER 0. These are app-side
+measurements, excluding host polling and ASR time. First-in-process is not OS cold
+cache, and both runs initialized backbone and vocoder. Stop settled after native
+completion during the post-completion/decode interval, with cancellation and no
+resulting WAV; native generation/decoder preemption is not established. A fresh
+retry took 38.671 seconds and matched the verified WAV hash. Ordinary chat A then
+completed a response. These are baseline results, not timings for a later DAC change.
+
+The ordinary microphone captured a controlled external synthetic phrase. Explicit
+Stop produced 15.8824375 seconds of 16 kHz mono PCM16; Attach and exact-byte cold
+retention passed. ASR had raw WER 1/9 (`7` versus `seven`) and numeric-normalized
+WER 0. The automatic-cap case stopped at 29.35 seconds and passed preparation,
+Attach and draft cleanup; its external playback was prevented by a UI XML error,
+so it provides no acoustic-content evidence. Three ordinary WAV/MP3 imports
+preserved their original filenames and bytes, including a 4,608,044-byte WAV.
+MP3 and large-WAV draft removal preserved existing message-owned attachments.
+Recorded audio and the 40-second imported WAV reached Send but failed with the
+memory error; the other two Send cases were not repeated after that blocker.
+Successful physical audio Send/inference and cold lifecycle following successful
+inference remain unverified. The existing error-message attachment later passed
+cold filename/byte retention on `9fc7f4b`, as recorded separately below. The later OS free-memory observation is not the exact app admission
+snapshot. No admission limit was waived.
+
+On source `2456272`, a fresh ARM64 build/install/smoke passed. Ordinary Oute first/repeat
+playback latency was 28.457/28.670 seconds versus the 3b baseline's 39.338/38.604;
+decode was 8.859/9.211 versus 19.459/19.327 seconds. First/repeat/retry WAV bytes exactly
+matched the baseline ASR-checked output; no new ASR run is claimed. Stop settled with
+no WAV; native completion had already finished, so preemptive interruption is not proven.
+Fresh retry took 28.443 seconds and ordinary chat A then completed. Three OS memory
+samples are reported as samples, not peaks or proof of memory reduction. Thermal state
+and OS cache were uncontrolled. The post-run QA-only log snapshot had zero configured
+candidates, with raw logs discarded; this is bounded screening, not universal privacy
+acceptance. See [the exact-source comparison](acceptance-resumed-20261020.json).
+
+On the separate `2456272` x86 APK, the fixed native audio-input scenario passed
+on Android API 36 with 16 GiB RAM, CPU execution and unchanged admission policy.
+Both the imported controlled fixture and the actual 15.8824375-second physical-phone
+recording produced the expected bounded content, streamed callbacks and drained;
+the prior chat profile was restored. The recording was captured on the phone, not
+through an emulator microphone. The scenario took 616.237 seconds overall; per-input
+native latency was not measured. These explicit input-step results are separate from
+the generic TTS content-verification field, which remains not run.
+
+Compilation and installation passed. The initial launcher-status smoke failed; later
+independent inspection found a healthy QA Home, and the reused scenario smoke passed.
+The original launch stdout was not retained, so no timeout cause is asserted. The separate ordinary emulator recording case completed an “Orange 7” response.
+After a guarded cold reopen, the same messages and attachment bytes/hash/inode remained;
+the displayed filename was still the managed basename instead of `recorded.wav`. The
+encrypted store’s displayName was not directly read. This is an original-name rendering
+failure alongside successful scoped inference and cold byte retention. After upgrading to `9fc7f4b` and another guarded cold launch, that same retained
+message displayed `recorded.wav` in text and accessibility, with unchanged file
+bytes/hash/inode. This recovers the stored original name through the fixed renderer
+without raw encrypted-store extraction. No new inference was run; “Orange 7” remains
+the `2456272` completion. The other three ordinary imports are reported below.
+Neither emulator case establishes physical-phone Send.
+
+The resumed record also identifies the shared Oute backbone, DAC codec and chat A
+pins. Successful guarded application validation supports those identities; no separate
+exported model-file hash receipt is claimed for these physical TTS attempts.
+
+The renderer-only repair is published as `9fc7f4b`. Its three regressions failed
+before the fix and the two focused suites passed 59 tests afterwards. The separate
+x86 and ARM64 APKs built, installed with matching hashes and passed smoke. The x86
+retained-recording name and cold check passed. On the phone, the existing
+`forty-seconds.wav` message retained its full visible/accessibility name and identical
+file bytes/hash/inode after cold launch. The initial post-cold observation was
+interrupted by USB disconnect; a later reconnect completed the checks, while the
+partial observation and screenshot/foreground errors remain recorded. No new Send,
+inference, TTS or recording was run on the phone, and its earlier memory refusal
+is unchanged. The existing DAC and native-input results retain their `2456272`
+source/APK identities.
+
+The three ordinary imports on `9fc7f4b` preserved their original names and complete
+file bytes through Send and cold reopen. The 40-second mono WAV and MP3 completed
+naturally. The MP3 answer matched orange/seven; the WAV answer appeared as a collapsed
+Markdown list, so its full content remains unverified despite terminal completion.
+The 4,608,044-byte, 24-second 48 kHz stereo WAV was accepted by the picker/storage but
+Send failed with an unsupported-format alert. Its same error-message pair, attachment
+name and bytes survived cold reopen. A host reproduction using the exact production decoder and pinned miniaudio found
+that 48 kHz stereo to 16 kHz mono conversion estimated 384,001 output frames but
+returned 384,000 at clean EOF, after consuming all source frames. The strict equality
+check rejected valid output. The same investigation exposed a separate malformed-WAV
+gap: removing four bytes without updating headers was accepted because the backend
+clamped the input length. A bounded repair now passes 12 real host decoder cases,
+after four relevant failures on the original implementation; two focused Jest suites
+passed 128 tests, with TypeScript, scoped lint and independent review also passing.
+The new patch identity and passing full release gate are recorded separately.
+The published `2ce8cbc` ARM64 build, matching install and launch smoke passed
+(12 minutes 46 seconds). APK SHA-256 is
+`9227af2e57941fb68410290e4af9b9254948cca13bbfa936b05176e44953a913`
+(145,823,813 bytes); build provenance digest is
+`cd7ef6e8fc79f33547ce368a50b011c0092106523cd8f536bf1cc04537d7341f`.
+This is not new physical inference. The x86 build/install/smoke also passed
+(4 minutes 45 seconds), with APK SHA-256
+`bd514de680ff52318d3d3dde5618220dda8f92776ed40d000ca7ed0b329b298e`
+(92,329,054 bytes) and provenance digest
+`355bde25d29e0d585b6ac75686ebb121708a94b2ffa51541f76035f3a3c04784`.
+A single fresh ordinary Send of the unchanged large WAV then completed naturally,
+without Stop, retry, observer timeout or admission waiver. The exact answer was
+`Orange 7  The  The  The`: the fixed color and number were present, but extra
+repeated words failed the strict answer format. Cold launch retained the original
+filename, 4,608,044 bytes, SHA-256 and managed-file inode. UI TTFT was 458.274 seconds;
+this is not native phase timing or TTS latency. No general speech or transcription
+quality acceptance is claimed. The original 9fc device failure is retained; merely
+relaxing the output comparison was insufficient. No fixture truncation or admission
+waiver was used in these device cases. These results do
+not constitute an overall four-case pass.
+
+Cleanup verified removal of 27 exact task-owned output/cache targets after their
+consumers stopped. Their pre-deletion logical sizes totalled 46,229,035,455 bytes;
+this is not a physical disk-space saving measurement because the emulator image was
+sparse. Source, both final APK/provenance archives, eSpeak preparation and small
+verification evidence were retained; borrowed resources were preserved. At report
+preparation the report-only commit was not yet published, so its CI was **not run**.
+That later head requires its own check, separate from successful `2ce8cbc` source CI.
 
 ## Follow-up frontend diagnostic
 
@@ -56,6 +191,26 @@ Stage 7 remains incomplete.
 The machine record includes reproduction through the existing isolated QA build and
 **QA Stage 7 → QA diagnostic frontend A/B (not acceptance)** controls, including
 the two clip-copy/continue gates and independent content checks.
+
+## eSpeak integration preparation
+
+A separate Windows host prototype compared the pinned eSpeak C API and canonical
+frontend processing against bootphon 3.3.0/Neu's phonemes path. All 17 parity cases
+passed, including punctuation, digits, Unicode, language-flag handling and the
+240-unit boundary: 16 cases used the real API (41 calls), while punctuation-only
+input required no C call. Scheduler tests used a blocking callback to verify
+single-job ownership, cancellation/deadline settlement after drain, disposal and
+bounded input/output. These scopes are distinct. The [resumed record](acceptance-resumed-20261020.json)
+contains the pins and limitations.
+
+This is host preparation only: no JNI/iOS implementation, mobile memory evidence
+or Neu speech acceptance follows from text parity. The Windows binary is hash-pinned;
+its independently reproducible relation to the separately pinned source was not
+verified. The proposed native worker and source/data build remain future integration.
+Existing MIT notices remain unchanged. A GPL-enabled combination, its Corresponding
+Source/notices and distribution channel require a separate decision; bundled Neu/Jo
+materials need their own rights/compatibility review. The licensing proposal has
+not been applied to the product.
 
 ## Historical phone acceptance
 
@@ -159,7 +314,7 @@ Russian speech, Bluetooth/USB audio routes, iOS, GPU/NPU execution, generated sp
 reference conditioning, restore proof and saved-reference cold reuse remain outside the demonstrated
 scope. Existing Stage 6 observations retain their original scope and do not establish these cases.
 
-## Current source verification
+## Historical source verification
 
 The final local release verification passed 293 Jest suites and 6,738 tests, 68 Rust unit tests and
 3 integration tests, TypeScript, lint and native configuration checks. The first broad C15 attempt

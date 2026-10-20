@@ -1,0 +1,2046 @@
+{
+  "schemaVersion": 1,
+  "status": "partial",
+  "stageComplete": false,
+  "limitsWaived": false,
+  "scope": "Source-bound physical ARM64 results on 3b0e67e, ARM DAC and x86 native-input results on 2456272, and filename repair plus ordinary import outcomes on 9fc7f4b. Host-only eSpeak preparation remains separate. Large stereo WAV Send failed, WAV40 full response content is unverified, and no overall Stage7 acceptance is claimed. Published 2ce8cbc adds host decoder verification and ARM and x86 build/install/smoke proof and one x86 large-WAV native completion/cold result; fixed target present but strict answer format failed.",
+  "reportIdentity": "The Git commit introducing this record; distinct from every tested source/APK.",
+  "physicalAudio": {
+    "schemaVersion": 1,
+    "date": "2026-10-20",
+    "scope": "Physical Android recording and ordinary audio import follow-up; partial acceptance",
+    "identity": {
+      "publicSource": "3b0e67e458e219a94bc57e0e41f07f0d33a922c0",
+      "appTree": "330c268a1ebe0aca1e7a083cfec8172602074b29",
+      "apkSha256": "1fa2d0ac30794bd6a228e832f93a0e8685689199862382591b8c9aa01146583e",
+      "apkSizeBytes": 145823281,
+      "buildProvenanceDigest": "dc28d7fd121fb9e2e5932d214355908b6d8cad8b84a7ec1079b0a3d1f0b60dd5",
+      "abi": "arm64-v8a",
+      "runtimeVersion": "0.13.0-rc.3",
+      "backend": "cpu",
+      "deviceClass": "OnePlus 9 Pro",
+      "packageName": "com.github.tah10n.pocketai.qa"
+    },
+    "manualStopRecording": {
+      "status": "passed_capture_preparation_and_content",
+      "input": "Controlled synthetic phrase played by an external PC loudspeaker while the ordinary microphone recorder was active",
+      "stop": "Explicit Stop control",
+      "displayedDuration": "00:16",
+      "durationMs": 15882.4375,
+      "sampleRate": 16000,
+      "sampleCount": 254119,
+      "channels": 1,
+      "bitsPerSample": 16,
+      "sizeBytes": 508282,
+      "sha256": "2d22d7055c971a60395c25b553d7c332a6abde93a35dfc2fe9cbfb39d45f0a0f",
+      "expected": "The parcel is orange, and the code is seven.",
+      "independentAsrTranscript": "The parcel is orange, and the code is 7.",
+      "rawWordErrors": 1,
+      "referenceWords": 9,
+      "rawWordErrorRate": 0.1111111111111111,
+      "numericNormalizedWordErrorRate": 0.0,
+      "numericNormalizedContentMatch": true,
+      "attach": "passed",
+      "coldFileHashRetention": "passed",
+      "coldBoundary": "The same owned recording bytes and existing error conversation survived a new process. Successful audio inference was not demonstrated.",
+      "send": "rejected_memory",
+      "evaluationSha256": "32705758fca8766b3c0a84a8b54b9930a36f2175ce3d157075c714f4a5b35229"
+    },
+    "automaticCap": {
+      "status": "passed_automatic_stop_native_preparation_and_cleanup",
+      "manualStopSent": false,
+      "uiTimer": "00:29",
+      "durationMs": 29350,
+      "sampleRate": 16000,
+      "sampleCount": 469600,
+      "channels": 1,
+      "bitsPerSample": 16,
+      "sizeBytes": 939244,
+      "sha256": "d6b34c2e9c2562af1f552de4d3caa64f04a982ba219ed236faca106f99eb1996",
+      "syntheticPlayback": "not_started_due_to_test_harness_UI_XML_ParseError",
+      "contentAcceptance": "not_run",
+      "attach": "passed",
+      "ordinaryDraftRemoval": "passed",
+      "cleanup": "Cap recording absent; two pre-existing message-owned audio files unchanged",
+      "boundary": "Only automatic-stop, format, duration and cleanup bounds were verified. This is not an acoustic content acceptance result."
+    },
+    "ordinaryImports": [
+      {
+        "fileName": "forty-seconds.wav",
+        "sizeBytes": 1280044,
+        "sha256": "a2933ba8091e217fdb57a52610755a774508a6a0eefd002347832777b22f8780",
+        "ordinaryPickerToDraft": "passed",
+        "originalDisplayNamePreserved": true,
+        "send": "rejected_memory",
+        "cleanup": "retained_after_message_materialization",
+        "coldPersistence": "not_run"
+      },
+      {
+        "fileName": "legacy-import.mp3",
+        "sizeBytes": 641664,
+        "sha256": "eeaa46287d6563749b1a0c46149836b9552900fc9c32c8f326535c817309fc49",
+        "ordinaryPickerToDraft": "passed",
+        "originalDisplayNamePreserved": true,
+        "send": "not_run_after_same_memory_block",
+        "cleanup": "removed_via_ordinary_draft_remove",
+        "coldPersistence": "not_run"
+      },
+      {
+        "fileName": "over-four-MiB.wav",
+        "sizeBytes": 4608044,
+        "sha256": "b448e010e4db15f1a493b2b5089821becf924176ef25b400f8ec3167b74715b8",
+        "ordinaryPickerToDraft": "passed",
+        "originalDisplayNamePreserved": true,
+        "send": "not_run_after_same_memory_block",
+        "cleanup": "removed_via_ordinary_draft_remove",
+        "coldPersistence": "not_run"
+      }
+    ],
+    "sendFailure": {
+      "recordedAudio": "rejected_memory",
+      "fortySecondImportedWav": "rejected_memory",
+      "otherTwoImports": "not_run_after_same_memory_block",
+      "visibleTitle": "Cannot send message",
+      "visibleMessage": "Not enough memory to load this model. Choose a smaller model or close other apps.",
+      "normalProfileAction": "Context reduced from 4096 to 2048 through ordinary controls; no admission threshold or memory override",
+      "exactInternalFailureSnapshot": "not_captured",
+      "laterMemoryObservation": {
+        "memFreeBytes": 246542336,
+        "audioDecoderReservePerInputBytes": 325058560,
+        "limitation": "Later OS observation is not the exact earlier app admission snapshot."
+      },
+      "ownership": "Failed Send materialized a user/error pair. Retained draft-named files are message-owned; unsent MP3 and large-WAV drafts were removed without deleting those files."
+    },
+    "harnessBoundaries": [
+      "Initial permission-foreground and inactive-Recording guards prevented playback; these were test precondition refusals, not failed product recordings.",
+      "A malformed UI XML snapshot prevented synthetic playback in the cap case.",
+      "Unstable picker-return foreground snapshots and guarded selector failures were retried using fresh UI state; they are not product import failures.",
+      "Indexed Downloads appeared empty; the ordinary device-storage root exposed the exact files. No MIME-filter cause was established."
+    ],
+    "remaining": [
+      "Successful recorded/imported audio inference on this phone",
+      "Cold lifecycle for successful imported audio messages",
+      "New native DAC build measurements and emulator results have separate source identities and must not be inherited by this report"
+    ]
+  },
+  "speakerlessTts": {
+    "buildId": "arm64-3b0e67e",
+    "publicSourceSha": "3b0e67e458e219a94bc57e0e41f07f0d33a922c0",
+    "apkSha256": "1fa2d0ac30794bd6a228e832f93a0e8685689199862382591b8c9aa01146583e",
+    "normalizedRuntimePatchSha256": "3e9f1d1f7098e46a8d92b5d3592a3d67ba1330a501137b42915c8c3ddc27391e",
+    "target": "The quiet river flows beside the old bridge.",
+    "first": {
+      "phase": "stopped",
+      "position": 3.3063333333333333,
+      "duration": 3.3063333333333333,
+      "sampleCount": 79352,
+      "sampleRate": 24000,
+      "memoryAdmission": {
+        "availableBytes": 3021430784,
+        "freeBytes": 138813440,
+        "thresholdBytes": 452984832,
+        "budgetBytes": 2568445952,
+        "requiredBytes": 2275477600,
+        "lowMemory": false,
+        "pressureLevel": "normal"
+      },
+      "pcmNormalization": {
+        "sourcePeakAbs": 0.5263545513153076,
+        "outOfRangeSamples": 0,
+        "gain": 1
+      },
+      "nativeCompletion": {
+        "tokensPredicted": 579,
+        "tokensEvaluated": 16,
+        "elapsedMs": 16476
+      },
+      "latency": {
+        "runKind": "first_in_process",
+        "stagesMs": {
+          "file_validation": 1025,
+          "release_chat": 106,
+          "backbone_init": 613,
+          "vocoder_init": 164,
+          "formatter": 9,
+          "prompt_prepare": 5,
+          "completion": 16476,
+          "decode": 19459,
+          "vocoder_release": 10,
+          "context_release": 91,
+          "restore_chat": 554,
+          "wav_player_prepare": 471
+        },
+        "nativePrefillMs": 153,
+        "nativeGenerationMs": 16274,
+        "audioDurationMs": 3306,
+        "playToPlayingMs": 95,
+        "actionToFirstPlaybackMs": 39338
+      },
+      "errorCode": null
+    },
+    "repeat": {
+      "phase": "stopped",
+      "position": 3.3063333333333333,
+      "duration": 3.3063333333333333,
+      "sampleCount": 79352,
+      "sampleRate": 24000,
+      "memoryAdmission": {
+        "availableBytes": 3150233600,
+        "freeBytes": 819486720,
+        "thresholdBytes": 452984832,
+        "budgetBytes": 2697248768,
+        "requiredBytes": 2275477600,
+        "lowMemory": false,
+        "pressureLevel": "normal"
+      },
+      "pcmNormalization": {
+        "sourcePeakAbs": 0.5263545513153076,
+        "outOfRangeSamples": 0,
+        "gain": 1
+      },
+      "nativeCompletion": {
+        "tokensPredicted": 579,
+        "tokensEvaluated": 16,
+        "elapsedMs": 16549
+      },
+      "latency": {
+        "runKind": "repeat_in_process",
+        "stagesMs": {
+          "file_validation": 896,
+          "release_chat": 81,
+          "backbone_init": 477,
+          "vocoder_init": 161,
+          "formatter": 11,
+          "prompt_prepare": 10,
+          "completion": 16549,
+          "decode": 19327,
+          "vocoder_release": 9,
+          "context_release": 65,
+          "restore_chat": 403,
+          "wav_player_prepare": 154
+        },
+        "nativePrefillMs": 149,
+        "nativeGenerationMs": 16356,
+        "audioDurationMs": 3306,
+        "playToPlayingMs": 89,
+        "actionToFirstPlaybackMs": 38604
+      },
+      "errorCode": null
+    },
+    "cancelled": {
+      "phase": "stopped",
+      "position": 0,
+      "duration": 0,
+      "memoryAdmission": {
+        "availableBytes": 3163504640,
+        "freeBytes": 811810816,
+        "thresholdBytes": 452984832,
+        "budgetBytes": 2710519808,
+        "requiredBytes": 2275477600,
+        "lowMemory": false,
+        "pressureLevel": "normal"
+      },
+      "nativeCompletion": {
+        "tokensPredicted": 579,
+        "tokensEvaluated": 16,
+        "elapsedMs": 16596
+      },
+      "latency": {
+        "runKind": "repeat_in_process",
+        "stagesMs": {
+          "file_validation": 853,
+          "release_chat": 71,
+          "backbone_init": 521,
+          "vocoder_init": 158,
+          "formatter": 8,
+          "prompt_prepare": 7,
+          "completion": 16596
+        },
+        "nativePrefillMs": 169,
+        "nativeGenerationMs": 16380
+      },
+      "errorCode": "cancelled"
+    },
+    "retry": {
+      "phase": "stopped",
+      "position": 3.3063333333333333,
+      "duration": 3.3063333333333333,
+      "sampleCount": 79352,
+      "sampleRate": 24000,
+      "memoryAdmission": {
+        "availableBytes": 3327524864,
+        "freeBytes": 879919104,
+        "thresholdBytes": 452984832,
+        "budgetBytes": 2874540032,
+        "requiredBytes": 2275477600,
+        "lowMemory": false,
+        "pressureLevel": "normal"
+      },
+      "pcmNormalization": {
+        "sourcePeakAbs": 0.5263545513153076,
+        "outOfRangeSamples": 0,
+        "gain": 1
+      },
+      "nativeCompletion": {
+        "tokensPredicted": 579,
+        "tokensEvaluated": 16,
+        "elapsedMs": 16765
+      },
+      "latency": {
+        "runKind": "repeat_in_process",
+        "stagesMs": {
+          "file_validation": 846,
+          "release_chat": 76,
+          "backbone_init": 481,
+          "vocoder_init": 152,
+          "formatter": 12,
+          "prompt_prepare": 8,
+          "completion": 16766,
+          "decode": 19342,
+          "vocoder_release": 18,
+          "context_release": 58,
+          "restore_chat": 370,
+          "wav_player_prepare": 156
+        },
+        "nativePrefillMs": 147,
+        "nativeGenerationMs": 16579,
+        "audioDurationMs": 3306,
+        "playToPlayingMs": 68,
+        "actionToFirstPlaybackMs": 38671
+      },
+      "errorCode": null
+    },
+    "selectedContent": [
+      {
+        "clipId": "oute-first",
+        "sha256": "7a6668e6184eba856b5f324f5388cdf03e9fd76cd9d7b06b27948da98ea8aa70",
+        "fileBytes": 158748,
+        "sampleRate": 24000,
+        "sampleCount": 79352,
+        "channels": 1,
+        "bitsPerSample": 16,
+        "durationMs": 3306.3333333333335,
+        "rms": 0.054670870304107666,
+        "nonzeroPcm": true,
+        "expected": "The quiet river flows beside the old bridge.",
+        "transcript": "The quiet river flows beside the old bridge.",
+        "wordErrors": 0,
+        "referenceWords": 8,
+        "wordErrorRate": 0.0,
+        "normalizedWordErrors": 0,
+        "normalizedWordErrorRate": 0.0,
+        "exactNormalizedMatch": true,
+        "normalizedNumericMatch": true,
+        "contentPass": true,
+        "evidence": "independent local ASR words; not listening or speaker identity"
+      },
+      {
+        "clipId": "oute-repeat",
+        "sha256": "7a6668e6184eba856b5f324f5388cdf03e9fd76cd9d7b06b27948da98ea8aa70",
+        "fileBytes": 158748,
+        "sampleRate": 24000,
+        "sampleCount": 79352,
+        "channels": 1,
+        "bitsPerSample": 16,
+        "durationMs": 3306.3333333333335,
+        "rms": 0.054670870304107666,
+        "nonzeroPcm": true,
+        "expected": "The quiet river flows beside the old bridge.",
+        "transcript": "The quiet river flows beside the old bridge.",
+        "wordErrors": 0,
+        "referenceWords": 8,
+        "wordErrorRate": 0.0,
+        "normalizedWordErrors": 0,
+        "normalizedWordErrorRate": 0.0,
+        "exactNormalizedMatch": true,
+        "normalizedNumericMatch": true,
+        "contentPass": true,
+        "evidence": "independent local ASR words; not listening or speaker identity"
+      }
+    ],
+    "cancelledClipAbsent": true,
+    "retryWavSha256": "7a6668e6184eba856b5f324f5388cdf03e9fd76cd9d7b06b27948da98ea8aa70",
+    "ordinaryChatAfterTts": {
+      "status": "passed",
+      "model": "android-qa-smollm2-135m-instruct-q8",
+      "evidence": "Ordinary chat selected restored A and displayed an assistant-message-state-complete response."
+    },
+    "measurementScope": "App-side latency counters gated by owned native player playing confirmation; retained after EOF. Host polling and ASR time excluded.",
+    "limits": [
+      "first_in_process is not OS cold cache. Both first and repeat initialize backbone and vocoder; repeat is not proof of warm native contexts.",
+      "Stop settled after native completion during the post-completion/decode interval. Native generation or decoder preemption is not established.",
+      "ASR covers first/repeat; retry has identical verified WAV bytes. Content is not naturalness or identity evidence.",
+      "No performance result for source 2456272 or a later DAC change is inferred. The original automated smoke command still failed after successful installation."
+    ]
+  },
+  "espeakPreparation": {
+    "status": "host_prototype_verified_not_integrated",
+    "productSourceChanged": false,
+    "productLicenseChanged": false,
+    "bundledDistributionDecisionApplied": false,
+    "engineSourceCommit": "69bfd1efde0236654ccc117a28d04aef27673a30",
+    "engineSourceArchiveSha256": "0d36c8e81e972805d343e2b93d77baf3b57dd6c7a18a12df6782c80fe9f11d15",
+    "hostSourceDataLockSha256": "91855ebe40a1daf4bb68549742bc25bd4f8309e3bfe4f6bba0ad498e019463d1",
+    "hostOracleWheel": {
+      "name": "Neu 1.4.1 Windows CPython312",
+      "sha256": "44d0f4d9b5357396bcfc2b4911b2a1460367cfad3ac3d05d8780649c6b139b4b"
+    },
+    "binarySourceRelation": "upstream declared source pin; binary pinned by wheel SHA; independent rebuild/attestation not verified",
+    "frontendOracle": "bootphon phonemizer 3.3.0 EspeakBackend with Neu phonemes-branch preprocessing and final whitespace normalization",
+    "parity": {
+      "passed": 17,
+      "total": 17,
+      "realApiCases": 16,
+      "punctuationOnlyNoApiCases": 1,
+      "realApiCalls": 41,
+      "offCallerThread": true,
+      "corpus": "Fixed target; punctuation, literal parentheses/flags, digits, curly/straight quotes, accented/combining Unicode, NFKC-distinct inputs, whitespace, hyphens and 240-unit input."
+    },
+    "hostTiming": {
+      "platform": "Windows",
+      "coldInitMs": 25.3931,
+      "maxRecordedCaseConversionMs": 0.2185,
+      "scope": "One host run, not a mobile deadline or worst-case bound."
+    },
+    "lifecycleProof": {
+      "status": "passed",
+      "actualSchedulerWithBlockingFakeCallback": true,
+      "cancelWaitedForDrain": true,
+      "deadlineWaitedForDrain": true,
+      "busyRejected": true,
+      "ownerReload": true,
+      "inputOutputBounds": true,
+      "closedErrors": true,
+      "missingData": "data_missing",
+      "corruptData": "init_failed"
+    },
+    "integrationProposal": "Pinned C core and data, process-global single-job worker, thin JNI/ObjC++ adapters and attributed canonical frontend. No silent fallback to the current JS frontend.",
+    "licenseProposal": "Preserve MIT notices on existing app code. Any GPL-enabled combined distribution requires an explicit distribution-scope and channel decision, appropriate Corresponding Source and notices. Existing bundled Neu/Jo-derived materials require separate compatibility/rights review. No project relicense or distribution approval was applied.",
+    "limits": [
+      "No JNI, Android or iOS implementation/build acceptance; no Neu speech inference.",
+      "No measured mobile memory or hard native heap cap. Bridge input/output and single-job limits do not bound all upstream allocations.",
+      "C calls are not preemptible. Cancellation/deadline invalidates results but waits for actual C return and drain.",
+      "The Windows binary is hash-pinned; an independent rebuild/attestation connecting it to the separately pinned source was not verified.",
+      "Mobile builds must generate and lock data from the pinned source, enforce asset hashes natively, then repeat lifecycle/parity and actual Neu content validation."
+    ],
+    "primaryReferences": [
+      "https://github.com/neuphonic/neutts/blob/ac69851f28fc63a487917e7c2e27f0d75c759cba/CMakeLists.txt",
+      "https://github.com/espeak-ng/espeak-ng/tree/69bfd1efde0236654ccc117a28d04aef27673a30",
+      "https://github.com/bootphon/phonemizer/tree/v3.3.0",
+      "https://www.gnu.org/licenses/gpl-faq.en.html#IfLibraryIsGPL",
+      "https://github.com/neuphonic/neutts/blob/ac69851f28fc63a487917e7c2e27f0d75c759cba/LICENSE"
+    ]
+  },
+  "pendingResults": {
+    "nativeDecoderRepairAndRetest": {
+      "status": "completed_with_answer_format_failure",
+      "scope": "Both ABI builds/install/smoke passed. The single fresh large-WAV x86 Send naturally completed; cold original-name/byte/hash retention passed. Fixed color/number present; strict answer format failed with extra repeated words. Historical 9fc rejection remains preserved."
+    }
+  },
+  "remainingUnverified": [
+    "Successful physical recorded/imported Send and inference, including cold lifecycle following successful inference, remain unverified. Cold name/byte retention of the existing error-message attachment passed separately on 9fc7f4b.",
+    "Production canonical Neu frontend integration and resulting speech quality.",
+    "Android/iOS native eSpeak lifecycle, asset, memory and timing validation.",
+    "The bounded post-run ARM TTS privacy snapshot is recorded separately; coverage of the resumed physical audio-input flows and all run stages remains unverified.",
+    "Strict answer-format success for the repaired large 48 kHz stereo WAV: the single 2ce8cbc x86 Send naturally completed and cold name/bytes passed, but the answer contained extra repeated words. General speech/transcription quality is not accepted.",
+    "Full expected color-and-number content for the forty-second WAV response; terminal completion passed, but the collapsed Markdown list prevented full verification."
+  ],
+  "armDacComparison": {
+    "schemaVersion": 1,
+    "observedAt": "2026-10-20T19:50:06.7685489Z",
+    "status": "scoped_ordinary_tts_passed",
+    "stageComplete": false,
+    "currentIdentity": {
+      "publicSource": "2456272ed9f805efca71fbed85be82ca9272dff3",
+      "appTree": "eac6256e2c2e14082ce0c34ace5500951c29acb4",
+      "apkSha256": "6b8c7f5ad0b082b0f50d1b37eeb5e8c645a2588d1b0a0a1c78cdca27e07781ad",
+      "apkBytes": 145823733,
+      "runtimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+      "buildProvenanceDigest": "91a260187f37beb6abda1b3606bf5f46aefc2cb676adf2969a52a828c0a71361",
+      "abi": "arm64-v8a",
+      "backend": "cpu",
+      "deviceClass": "OnePlus 9 Pro",
+      "installedApkHashIndependentlyChecked": "6b8c7f5ad0b082b0f50d1b37eeb5e8c645a2588d1b0a0a1c78cdca27e07781ad"
+    },
+    "baselineIdentity": {
+      "publicSource": "3b0e67e458e219a94bc57e0e41f07f0d33a922c0",
+      "apkSha256": "1fa2d0ac30794bd6a228e832f93a0e8685689199862382591b8c9aa01146583e",
+      "runtimePatchSha256": "3e9f1d1f7098e46a8d92b5d3592a3d67ba1330a501137b42915c8c3ddc27391e"
+    },
+    "request": {
+      "text": "The quiet river flows beside the old bridge.",
+      "characters": 44,
+      "voice": "Default",
+      "profile": "OuteTTS 1.0 (0.6B)",
+      "chatA": "android-qa-smollm2-135m-instruct-q8",
+      "nThreads": 4,
+      "seed": 42,
+      "parametersEvidence": "Frozen runtime source and ordinary default profile; no parameter or admission overrides",
+      "firstState": "TTS phase null before any synthesis in current app process",
+      "firstRunKind": "first_in_process"
+    },
+    "first": {
+      "phase": "stopped",
+      "position": 3.3063333333333333,
+      "duration": 3.3063333333333333,
+      "sampleCount": 79352,
+      "sampleRate": 24000,
+      "memoryAdmission": {
+        "availableBytes": 4283084800,
+        "freeBytes": 647479296,
+        "thresholdBytes": 452984832,
+        "budgetBytes": 3830099968,
+        "requiredBytes": 2275477600,
+        "lowMemory": false,
+        "pressureLevel": "normal"
+      },
+      "pcmNormalization": {
+        "sourcePeakAbs": 0.5263545513153076,
+        "outOfRangeSamples": 0,
+        "gain": 1
+      },
+      "nativeCompletion": {
+        "tokensPredicted": 579,
+        "tokensEvaluated": 16,
+        "elapsedMs": 16362
+      },
+      "latency": {
+        "runKind": "first_in_process",
+        "stagesMs": {
+          "file_validation": 1183,
+          "release_chat": 83,
+          "backbone_init": 481,
+          "vocoder_init": 152,
+          "formatter": 9,
+          "prompt_prepare": 6,
+          "completion": 16362,
+          "decode": 8859,
+          "vocoder_release": 18,
+          "context_release": 82,
+          "restore_chat": 407,
+          "wav_player_prepare": 410
+        },
+        "nativePrefillMs": 154,
+        "nativeGenerationMs": 16164,
+        "audioDurationMs": 3306,
+        "playToPlayingMs": 76,
+        "actionToFirstPlaybackMs": 28457
+      },
+      "errorCode": null
+    },
+    "repeat": {
+      "phase": "stopped",
+      "position": 3.3063333333333333,
+      "duration": 3.3063333333333333,
+      "sampleCount": 79352,
+      "sampleRate": 24000,
+      "memoryAdmission": {
+        "availableBytes": 3966005248,
+        "freeBytes": 812814336,
+        "thresholdBytes": 452984832,
+        "budgetBytes": 3513020416,
+        "requiredBytes": 2275477600,
+        "lowMemory": false,
+        "pressureLevel": "normal"
+      },
+      "pcmNormalization": {
+        "sourcePeakAbs": 0.5263545513153076,
+        "outOfRangeSamples": 0,
+        "gain": 1
+      },
+      "nativeCompletion": {
+        "tokensPredicted": 579,
+        "tokensEvaluated": 16,
+        "elapsedMs": 16625
+      },
+      "latency": {
+        "runKind": "repeat_in_process",
+        "stagesMs": {
+          "file_validation": 917,
+          "release_chat": 80,
+          "backbone_init": 488,
+          "vocoder_init": 136,
+          "formatter": 11,
+          "prompt_prepare": 8,
+          "completion": 16625,
+          "decode": 9211,
+          "vocoder_release": 18,
+          "context_release": 54,
+          "restore_chat": 446,
+          "wav_player_prepare": 209
+        },
+        "nativePrefillMs": 167,
+        "nativeGenerationMs": 16413,
+        "audioDurationMs": 3306,
+        "playToPlayingMs": 60,
+        "actionToFirstPlaybackMs": 28670
+      },
+      "errorCode": null
+    },
+    "cancelled": {
+      "phase": "stopped",
+      "position": 0,
+      "duration": 0,
+      "memoryAdmission": {
+        "availableBytes": 4276662272,
+        "freeBytes": 1116557312,
+        "thresholdBytes": 452984832,
+        "budgetBytes": 3823677440,
+        "requiredBytes": 2275477600,
+        "lowMemory": false,
+        "pressureLevel": "normal"
+      },
+      "nativeCompletion": {
+        "tokensPredicted": 579,
+        "tokensEvaluated": 16,
+        "elapsedMs": 17095
+      },
+      "latency": {
+        "runKind": "repeat_in_process",
+        "stagesMs": {
+          "file_validation": 845,
+          "release_chat": 89,
+          "backbone_init": 482,
+          "vocoder_init": 169,
+          "formatter": 12,
+          "prompt_prepare": 9,
+          "completion": 17094
+        },
+        "nativePrefillMs": 159,
+        "nativeGenerationMs": 16891
+      },
+      "errorCode": "cancelled"
+    },
+    "retry": {
+      "phase": "stopped",
+      "position": 3.3063333333333333,
+      "duration": 3.3063333333333333,
+      "sampleCount": 79352,
+      "sampleRate": 24000,
+      "memoryAdmission": {
+        "availableBytes": 3791425536,
+        "freeBytes": 737738752,
+        "thresholdBytes": 452984832,
+        "budgetBytes": 3338440704,
+        "requiredBytes": 2275477600,
+        "lowMemory": false,
+        "pressureLevel": "normal"
+      },
+      "pcmNormalization": {
+        "sourcePeakAbs": 0.5263545513153076,
+        "outOfRangeSamples": 0,
+        "gain": 1
+      },
+      "nativeCompletion": {
+        "tokensPredicted": 579,
+        "tokensEvaluated": 16,
+        "elapsedMs": 16741
+      },
+      "latency": {
+        "runKind": "repeat_in_process",
+        "stagesMs": {
+          "file_validation": 824,
+          "release_chat": 74,
+          "backbone_init": 484,
+          "vocoder_init": 152,
+          "formatter": 10,
+          "prompt_prepare": 9,
+          "completion": 16741,
+          "decode": 9066,
+          "vocoder_release": 12,
+          "context_release": 68,
+          "restore_chat": 395,
+          "wav_player_prepare": 148
+        },
+        "nativePrefillMs": 151,
+        "nativeGenerationMs": 16549,
+        "audioDurationMs": 3306,
+        "playToPlayingMs": 68,
+        "actionToFirstPlaybackMs": 28443
+      },
+      "errorCode": null
+    },
+    "comparison": [
+      {
+        "run": "first",
+        "baselineActionMs": 39338,
+        "currentActionMs": 28457,
+        "actionReductionMs": 10881,
+        "actionReductionPercent": 27.66,
+        "baselineDecodeMs": 19459,
+        "currentDecodeMs": 8859,
+        "decodeReductionPercent": 54.474,
+        "baselineNativeGenerationMs": 16274,
+        "currentNativeGenerationMs": 16164
+      },
+      {
+        "run": "repeat",
+        "baselineActionMs": 38604,
+        "currentActionMs": 28670,
+        "actionReductionMs": 9934,
+        "actionReductionPercent": 25.733,
+        "baselineDecodeMs": 19327,
+        "currentDecodeMs": 9211,
+        "decodeReductionPercent": 52.341,
+        "baselineNativeGenerationMs": 16356,
+        "currentNativeGenerationMs": 16413
+      },
+      {
+        "run": "retry",
+        "baselineActionMs": 38671,
+        "currentActionMs": 28443,
+        "actionReductionMs": 10228,
+        "actionReductionPercent": 26.449,
+        "baselineDecodeMs": 19342,
+        "currentDecodeMs": 9066,
+        "decodeReductionPercent": 53.128,
+        "baselineNativeGenerationMs": 16579,
+        "currentNativeGenerationMs": 16549
+      }
+    ],
+    "wavExports": [
+      {
+        "clipId": "oute-first",
+        "sha256": "7a6668e6184eba856b5f324f5388cdf03e9fd76cd9d7b06b27948da98ea8aa70",
+        "bytes": 158748,
+        "sampleRate": 24000,
+        "sampleCount": 79352,
+        "channels": 1,
+        "bitsPerSample": 16,
+        "durationSeconds": 3.3063333333333333,
+        "baselineBytesIdentical": true
+      },
+      {
+        "clipId": "oute-repeat",
+        "sha256": "7a6668e6184eba856b5f324f5388cdf03e9fd76cd9d7b06b27948da98ea8aa70",
+        "bytes": 158748,
+        "sampleRate": 24000,
+        "sampleCount": 79352,
+        "channels": 1,
+        "bitsPerSample": 16,
+        "durationSeconds": 3.3063333333333333,
+        "baselineBytesIdentical": true
+      },
+      {
+        "clipId": "oute-retry",
+        "sha256": "7a6668e6184eba856b5f324f5388cdf03e9fd76cd9d7b06b27948da98ea8aa70",
+        "bytes": 158748,
+        "sampleRate": 24000,
+        "sampleCount": 79352,
+        "channels": 1,
+        "bitsPerSample": 16,
+        "durationSeconds": 3.3063333333333333,
+        "baselineBytesIdentical": true
+      }
+    ],
+    "stop": {
+      "beforePhase": "synthesizing",
+      "settledCancelled": true,
+      "cancelledClipAbsent": true,
+      "noPlayback": true,
+      "nativeCompletionFinished": true,
+      "interruptionEvidence": "Native completion finished before final cancellation; native generation/decoder preemption not proven."
+    },
+    "content": {
+      "status": "passed_by_exact_byte_identity",
+      "newAsrRun": false,
+      "baselineAsrReceiptSha256": "90d308a6d2d002c3b9eeedfe739889b88bd04f4112e8575be515f499828bd6fd",
+      "baselineWordErrorRate": 0,
+      "baselineNormalizedWordErrorRate": 0,
+      "referenceWords": 8,
+      "allThreeExactBaselineSha": true,
+      "limitation": "No separate new ASR run. Independent baseline ASR applies through verified identical WAV bytes, not listening or voice identity."
+    },
+    "memory": {
+      "snapshots": [
+        {
+          "label": "before_retry",
+          "observedAtUnixNs": 1792525493673900600,
+          "processTotalsBytes": {
+            "TOTAL PSS": 823973888,
+            "TOTAL RSS": 969166848
+          },
+          "system": {
+            "MemTotalBytes": 7618306048,
+            "MemFreeBytes": 744312832,
+            "MemAvailableBytes": 3243249664,
+            "BuffersBytes": 1990656,
+            "CachedBytes": 2878697472,
+            "SReclaimableBytes": 129105920,
+            "ShmemBytes": 34410496
+          },
+          "swapPssBytes": null,
+          "swapPssStatus": "not_captured_by_existing_helper",
+          "stageLimitation": "Settled stopped TTS; ordinary chat model A retained."
+        },
+        {
+          "label": "during_retry_transition",
+          "observedAtUnixNs": 1792525528426839900,
+          "processTotalsBytes": {
+            "TOTAL PSS": 1204827136,
+            "TOTAL RSS": 1350270976
+          },
+          "system": {
+            "MemTotalBytes": 7618306048,
+            "MemFreeBytes": 605593600,
+            "MemAvailableBytes": 3104837632,
+            "BuffersBytes": 1990656,
+            "CachedBytes": 2878930944,
+            "SReclaimableBytes": 129286144,
+            "ShmemBytes": 34541568
+          },
+          "swapPssBytes": null,
+          "swapPssStatus": "not_captured_by_existing_helper",
+          "stageLimitation": "Bracketed by synthesizing before and stopped after; exact memory sample stage is not established."
+        },
+        {
+          "label": "after_retry",
+          "observedAtUnixNs": 1792525580358492200,
+          "processTotalsBytes": {
+            "TOTAL PSS": 789654528,
+            "TOTAL RSS": 935112704
+          },
+          "system": {
+            "MemTotalBytes": 7618306048,
+            "MemFreeBytes": 857186304,
+            "MemAvailableBytes": 3288457216,
+            "BuffersBytes": 1916928,
+            "CachedBytes": 2809917440,
+            "SReclaimableBytes": 128667648,
+            "ShmemBytes": 33128448
+          },
+          "swapPssBytes": null,
+          "swapPssStatus": "not_captured_by_existing_helper",
+          "stageLimitation": "Settled stopped TTS; ordinary chat model A retained."
+        }
+      ],
+      "processIdentityStable": true,
+      "peakMeasured": false,
+      "baselineComparablePssAvailable": false,
+      "memoryReductionClaimed": false,
+      "interpretation": "Android summary TOTAL PSS is not a resident-only measure and may include SwapPSS; TOTAL RSS is recorded separately. SwapPSS not captured is not zero. OS/free/admission values vary and are not interchangeable."
+    },
+    "ordinaryChatAfterTts": {
+      "status": "passed",
+      "userComplete": true,
+      "assistantComplete": true,
+      "modelASelected": true,
+      "scope": "Ordinary response completion after restoration; not general quality acceptance."
+    },
+    "privacySnapshot": {
+      "status": "no_candidates_in_snapshot",
+      "lines": 350,
+      "bytes": 40573,
+      "sha256": "e0e5b15ea4173d0d37f3458be19bea4f4cf150bc304ad871705485aae32d8d06",
+      "firstDeviceTimestamp": "10-20 21:37:15.590",
+      "lastDeviceTimestamp": "10-20 21:48:38.674",
+      "candidateCounts": {
+        "synthetic_target": 0,
+        "prompt_payload": 0,
+        "audio_or_speaker_payload": 0,
+        "app_private_audio_path": 0,
+        "long_base64_candidate": 0
+      },
+      "rawLogsRetained": false,
+      "limitation": "Post-run bounded current-QA-PID log snapshot only. May not cover all run stages; pattern screening is not universal privacy proof."
+    },
+    "screenshot": {
+      "sha256": "2400c278f4cfaff26c7bf59446e1f736acc87fd8f40905a41b1e1d5cb8aaa513",
+      "visuallyReviewed": true,
+      "visible": "Default Oute target, stopped 3.3/3.3 seconds, restored SmolLM A"
+    },
+    "limitations": [
+      "Single physical-device paired observations, not a statistical benchmark; thermal state and OS cache/free memory were uncontrolled.",
+      "First-in-process is not OS cold cache; all successful attempts reinitialize backbone and vocoder.",
+      "Product action-to-first-playback uses owned player playing confirmation. Host polling, host CPU load and ASR wall time are not substituted for product counters.",
+      "Host memory sampling occurred only on retry and may perturb timing; no peak or memory reduction is claimed.",
+      "Only ordinary TTS and restored chat are covered; this does not pass physical audio-input Send, Neu production frontend or all Stage7 acceptance."
+    ],
+    "cleanup": {
+      "ownedLedgerEntries": 272,
+      "allOwnedHelpersExited": true,
+      "newModelsDownloaded": false,
+      "newMicrophoneCapture": false,
+      "rawPrivacyLogsRetained": false,
+      "sourceEdits": false
+    }
+  },
+  "localVerification": {
+    "status": "passed",
+    "publicSourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+    "sourcePublication": "confirmed",
+    "publicAppTree": "d2c2e1fdef636dc5bfcbe4bdf5f1f049524d37d6",
+    "command": "npm run verify:release",
+    "jestSuites": 303,
+    "jestTests": 7095,
+    "jestSeconds": 301.047,
+    "rustUnitTests": 68,
+    "rustIntegrationTests": 3,
+    "otherChecks": [
+      "TypeScript",
+      "lint",
+      "native configuration"
+    ],
+    "scope": "Exact published decoder-repair source tree. Local verification does not establish model inference or the original-file device retry."
+  },
+  "hostedCiSource": {
+    "sourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+    "repository": "Tah10n/pocket-ai",
+    "status": "passed",
+    "runId": 39505971231,
+    "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231",
+    "scope": "Exact published decoder-repair source CI completed successfully: native scope, deterministic, iOS, Android API32–35 and aggregate verification passed. Optional Android QA was skipped. PR Title and Dependency Review also completed successfully. A later report-only source requires its own CI observation.",
+    "prTitle": {
+      "status": "passed",
+      "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971223",
+      "conclusion": "success"
+    },
+    "dependencyReview": {
+      "status": "passed",
+      "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971228",
+      "conclusion": "success"
+    },
+    "observedAtUtc": "2026-10-20T23:14:00Z",
+    "jobs": [
+      {
+        "name": "native scope",
+        "jobId": 118914851139,
+        "status": "passed",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118914851139"
+      },
+      {
+        "name": "deterministic",
+        "jobId": 118914851632,
+        "status": "passed",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118914851632"
+      },
+      {
+        "name": "ios native release",
+        "jobId": 118919435431,
+        "status": "passed",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435431"
+      },
+      {
+        "name": "android native release (API 32)",
+        "jobId": 118919435623,
+        "status": "passed",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435623"
+      },
+      {
+        "name": "android native release (API 33)",
+        "jobId": 118919435710,
+        "status": "passed",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435710"
+      },
+      {
+        "name": "android native release (API 34)",
+        "jobId": 118919435636,
+        "status": "passed",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435636"
+      },
+      {
+        "name": "android native release (API 35)",
+        "jobId": 118919435863,
+        "status": "passed",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435863"
+      },
+      {
+        "name": "optional Android QA",
+        "jobId": 118919437589,
+        "status": "skipped",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919437589"
+      },
+      {
+        "name": "verify",
+        "jobId": 118939865086,
+        "status": "passed",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118939865086"
+      }
+    ],
+    "observationTimePrecision": "minute",
+    "workflowConclusion": "success",
+    "requiredJobs": "all_passed"
+  },
+  "nativeAudioInput": {
+    "schemaVersion": 1,
+    "source": "2456272ed9f805efca71fbed85be82ca9272dff3",
+    "appTree": "eac6256e2c2e14082ce0c34ace5500951c29acb4",
+    "apkSha256": "e2b4e1641540dd7e1976724ac11a99d202988aaa0d1c82301f9d0bc399df26bf",
+    "apkBytes": 92328974,
+    "runtimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+    "buildProvenanceDigest": "c385f441323a527988e98524dcc68ea1d663e3cfbfe3a698a270d4bbc35dfd72",
+    "abi": "x86_64",
+    "environment": {
+      "memoryGiB": 16,
+      "backend": "cpu",
+      "androidApi": 36,
+      "admissionOverrides": false,
+      "cpuThreads": 4,
+      "contextTokens": 2048
+    },
+    "modelPins": {
+      "repository": "ggml-org/ultravox-v0_5-llama-3_2-1b-GGUF",
+      "revision": "5390c7c41cbd6f261f7f205fc0c5ae61bbdca650",
+      "backbone": {
+        "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "bytes": 807694464,
+        "sha256": "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83"
+      },
+      "projector": {
+        "filename": "mmproj-ultravox-v0_5-llama-3_2-1b-f16.gguf",
+        "bytes": 1371123616,
+        "sha256": "b34dde1835752949d6b960528269af93c92fec91c61ea0534fcc73f96c1ed8b2"
+      },
+      "sourceCard": "https://huggingface.co/fixie-ai/ultravox-v0_5-llama-3_2-1b",
+      "licenseNotice": "Conversion and Ultravox cards declare MIT; the underlying Llama 3.2 model retains its separate community license. Weights are local evaluation fixtures and are not redistributed.",
+      "input": {
+        "format": "wav",
+        "sampleRate": 16000,
+        "channels": 1,
+        "bitsPerSample": 16,
+        "scope": "Format of the two fixed input fixtures; this is not a decoder duration limit or coverage of longer ordinary imports."
+      },
+      "backend": "cpu",
+      "uniqueWeightBytes": 2178818080,
+      "memoryPolicy": "Use the existing model/projector memory admission and validate actual runtime audio support. Weight size is not a peak-memory estimate or device-fit receipt."
+    },
+    "scenario": "runtime-stage7-audio-input",
+    "status": "passed",
+    "scenarioWallTimeMs": 616237,
+    "perInputNativeLatency": "not_measured",
+    "recordedOrigin": "Actual physical phone microphone capture; no emulator microphone capture",
+    "steps": [
+      {
+        "id": "input_imported",
+        "status": "passed",
+        "sampleRate": 16000,
+        "sampleCount": 57280,
+        "callbacks": 3,
+        "outputCharacters": 8,
+        "headerValidated": true,
+        "contentMatched": true,
+        "completionDrained": true,
+        "sourceSha256": "dad094e335ce919ca55e169e192295a1ca1bccacb5a36243427a5e3927955e78",
+        "fixtureKind": "imported"
+      },
+      {
+        "id": "input_recorded",
+        "status": "passed",
+        "sampleRate": 16000,
+        "sampleCount": 254119,
+        "callbacks": 3,
+        "outputCharacters": 8,
+        "headerValidated": true,
+        "contentMatched": true,
+        "completionDrained": true,
+        "sourceSha256": "2d22d7055c971a60395c25b553d7c332a6abde93a35dfc2fe9cbfb39d45f0a0f",
+        "fixtureKind": "recorded"
+      }
+    ],
+    "genericSchemaContentVerification": "not_run",
+    "inputContentVerification": "passed for both explicit input steps",
+    "lifecycle": {
+      "requiresForceStop": false,
+      "profileRestored": true,
+      "completionDrainedBoth": true,
+      "runnerExitCode": 0,
+      "ownedProcessCleanupVerified": true
+    },
+    "ordinaryPickerSendCold": "Separate recorded245, recorded-message upgrade9fc and ordinaryImports9fc7f4b records contain the actual ordinary UI results; fixed native steps alone do not cover them.",
+    "scope": "Fixed imported and actual phone-recorded audio input native completion/content; not TTS or overall Stage7 acceptance",
+    "buildAndLaunch": {
+      "compile": "passed",
+      "install": "passed",
+      "initialAutomatedSmoke": "failed_after_install_launcher_status",
+      "initialFailureLimitation": "The original am start stdout was not retained; no timeout cause is established.",
+      "laterIndependentStartupInspection": "healthy_QA_home_and_loaded_SmolLM",
+      "reusedScenarioSmoke": "passed",
+      "scope": "The later startup inspection and scenario smoke do not rewrite the original smoke failure."
+    }
+  },
+  "physicalTtsModelIdentities": {
+    "schemaVersion": 1,
+    "appliesToPublicSources": [
+      "3b0e67e458e219a94bc57e0e41f07f0d33a922c0",
+      "2456272ed9f805efca71fbed85be82ca9272dff3"
+    ],
+    "profileId": "outetts-1.0-0.6b-q4_k_m-dac-speech-f16",
+    "backbone": {
+      "repository": "OuteAI/OuteTTS-1.0-0.6B-GGUF",
+      "revision": "7e8de3b4d95e100812fd7e6f4372510d0830a798",
+      "filename": "OuteTTS-1.0-0.6B-Q4_K_M.gguf",
+      "bytes": 401741952,
+      "sha256": "a0e2afa131b8a5029de0c653d55b71aab99744226234fcf1d80c55dade21020b"
+    },
+    "codec": {
+      "repository": "BricksDisplay/codec.cpp-gguf",
+      "revision": "4cd6ecf17367ebc03bba4b2ce8186268a6ce7436",
+      "filename": "ibm-research--DAC.speech.gguf",
+      "bytes": 147786400,
+      "sha256": "f58e57eabef8d574f4d08828f0116d93341bd91a26413390b780c6f1e8491337"
+    },
+    "chatA": {
+      "modelId": "pocket-ai/android-qa-smollm2-135m-instruct-q8",
+      "repository": "Mungert/SmolLM2-135M-Instruct-GGUF",
+      "revision": "980b4318b34b2f20e60c89d8f8a98283ec83cbd6",
+      "filename": "SmolLM2-135M-Instruct-q8_0.gguf",
+      "bytes": 144811552,
+      "sha256": "bc64cce8e1c11e4ed870633b557e04af718249c817c4cf8a6784116144ec3e28"
+    },
+    "verification": {
+      "identityValues": "Pinned source identities; both TTS source commits contain the same backbone/codec pins.",
+      "ttsDeviceVerification": "Successful ordinary synthesis passed application-side file validation before native initialization: backbone and codec exact sizes and local SHA-256 compared with the selected pinned profile. Evidence is the completed guarded execution, not an independent exported file-hash receipt.",
+      "chatDeviceVerification": "Ordinary UI selected QA SmolLM2 and completed chat after TTS. The QA bootstrap verifies local SHA-256 against the pinned base before registering it; no separate fresh chat-model hash measurement is claimed for these TTS attempts.",
+      "independentDeviceHashReceiptForTheseModelFiles": "not_recorded_in_the_reviewed_baseline_or_current_tts_receipts",
+      "newDeviceQueriesPerformedForThisIdentityAddendum": false,
+      "publicSourceReferences": [
+        "src/services/TtsExecutionProfiles.ts",
+        "src/services/TtsService.ts",
+        "src/services/AuxiliaryModelService.ts",
+        "src/services/AndroidQaDocumentModelBootstrap.ts",
+        "docs/validation/llama-rn-stage3/lora-fixture.json",
+        "docs/validation/llama-rn-stage7/acceptance-default-v6.json"
+      ]
+    }
+  },
+  "ordinaryRecorded2456272": {
+    "schemaVersion": 1,
+    "source": "2456272ed9f805efca71fbed85be82ca9272dff3",
+    "appTree": "eac6256e2c2e14082ce0c34ace5500951c29acb4",
+    "apkSha256": "e2b4e1641540dd7e1976724ac11a99d202988aaa0d1c82301f9d0bc399df26bf",
+    "apkBytes": 92328974,
+    "runtimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+    "buildProvenanceDigest": "c385f441323a527988e98524dcc68ea1d663e3cfbfe3a698a270d4bbc35dfd72",
+    "abi": "x86_64",
+    "case": "actual_phone_recording_imported_through_ordinary_picker_send_cold",
+    "file": {
+      "sampleRate": 16000,
+      "sampleCount": 254119,
+      "originalName": "recorded.wav",
+      "sha256": "2d22d7055c971a60395c25b553d7c332a6abde93a35dfc2fe9cbfb39d45f0a0f",
+      "sizeBytes": 508282,
+      "format": "PCM16 mono WAV",
+      "origin": "Actual physical phone microphone capture; emulator only imported the resulting file"
+    },
+    "model": {
+      "actualGpuLayers": 0,
+      "requestedCpuThreads": "Auto",
+      "observedNativeCpuThreads": 2,
+      "admissionOverrides": false,
+      "id": "pocket-ai/android-qa-ultravox-1b",
+      "contextTokens": 2048
+    },
+    "ordinaryUi": {
+      "assistantText": "Orange 7",
+      "draftManagedBytesAndSha": "passed",
+      "stopControlAbsent": true,
+      "persistedDisplayName": "not directly inspected in encrypted store; verification pending fixed renderer on same retained message",
+      "picker": "passed via DocumentsUI device storage Download folder",
+      "contentMatched": true,
+      "draftAbsentAfterSend": true,
+      "assistantState": "complete",
+      "displayNameRendering": "failed: managed draft basename shown instead of recorded.wav",
+      "preparedInputAudioMarker": "observed",
+      "send": "completed"
+    },
+    "cold": {
+      "sameAttachmentId": true,
+      "sameUserAndAssistantIds": true,
+      "sameFileBytesShaAndInode": true,
+      "assistantText": "Orange 7",
+      "launchState": "COLD",
+      "temporaryPreparedFiles": 0,
+      "launchStatus": "ok",
+      "processAbsenceVerified": true
+    },
+    "timing": {
+      "scope": "Observed ordinary Auto-2-thread UI metrics only; not a controlled comparison with the separate 4-thread native harness",
+      "uiTtftMs": 492011,
+      "uiTokensPerSecond": 10.3
+    },
+    "screenshot": {
+      "sizeBytes": 187647,
+      "visuallyInspected": true,
+      "sha256": "b37872d649f0d9541db0c3152b6f9d752115f1d6dee53dc321804c4e85ed1b94",
+      "name": "emulator-recorded-cold-2456272.png"
+    },
+    "remaining": {
+      "sameMessageOriginalNameAfterUpgrade": "pending",
+      "threeLegacyImports": "deferred until renderer fix and new APK"
+    },
+    "harnessBoundaries": {
+      "noEmulatorMicrophoneCapture": true,
+      "ownedHelperProcesses": "exited and cleanup verified",
+      "initialUnfocusedInputGuard": "refused before typing; focused input succeeded",
+      "networkPrivacyCapture": "not_run",
+      "initialDocumentsUiDownloadsNoItems": "Device-storage route succeeded after exact task-file media scan request; no proven MIME-filter cause"
+    },
+    "status": "partial_original_name_rendering_failed",
+    "evidenceScope": "Historical pre-fix snapshot; same-message upgrade verification recorded separately in recordedMessageUpgrade."
+  },
+  "historicalLocalVerification": [
+    {
+      "status": "passed",
+      "publicSourceSha": "2456272ed9f805efca71fbed85be82ca9272dff3",
+      "publicAppTree": "eac6256e2c2e14082ce0c34ace5500951c29acb4",
+      "command": "npm run verify:release",
+      "jestSuites": 303,
+      "jestTests": 7091,
+      "jestSeconds": 297.653,
+      "rustUnitTests": 68,
+      "rustIntegrationTests": 3,
+      "otherChecks": [
+        "TypeScript",
+        "lint",
+        "native configuration"
+      ],
+      "scope": "Local release gate on the exact source tree used by both 2456272 APKs; hosted CI and native acceptance are separate."
+    },
+    {
+      "status": "passed",
+      "command": "npm run verify:release",
+      "jestSuites": 303,
+      "jestTests": 7094,
+      "jestSeconds": 314.668,
+      "rustUnitTests": 68,
+      "rustIntegrationTests": 3,
+      "otherChecks": [
+        "TypeScript",
+        "lint",
+        "native configuration"
+      ],
+      "publicSourceSha": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+      "publicAppTree": "4a945ac23904091cb9ff3b3d9dc53c0d8592347e",
+      "scope": "Local release gate on exact published renderer-fix source; native acceptance and hosted CI remain separate."
+    }
+  ],
+  "historicalHostedCiSources": [
+    {
+      "observedAt": "2026-10-20T19:59:24.235Z",
+      "repository": "Tah10n/pocket-ai",
+      "sourceSha": "2456272ed9f805efca71fbed85be82ca9272dff3",
+      "status": "passed",
+      "eventScope": "pull_request (connector endpoint filter)",
+      "runs": [
+        {
+          "id": 39479310750,
+          "name": "PR Title",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310750"
+        },
+        {
+          "id": 39479310648,
+          "name": "Dependency Review",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310648"
+        },
+        {
+          "id": 39479310782,
+          "name": "CI",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782"
+        }
+      ],
+      "jobs": [
+        {
+          "id": 118823395591,
+          "name": "native scope",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118823395591"
+        },
+        {
+          "id": 118823395837,
+          "name": "deterministic",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118823395837"
+        },
+        {
+          "id": 118828614106,
+          "name": "android native release (API 32)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828614106"
+        },
+        {
+          "id": 118828614144,
+          "name": "android native release (API 34)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828614144"
+        },
+        {
+          "id": 118828614178,
+          "name": "android native release (API 35)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828614178"
+        },
+        {
+          "id": 118828614216,
+          "name": "ios native release",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828614216"
+        },
+        {
+          "id": 118828614363,
+          "name": "android native release (API 33)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828614363"
+        },
+        {
+          "id": 118828617366,
+          "name": "android (qa)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118828617366"
+        },
+        {
+          "id": 118852982076,
+          "name": "verify",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39479310782/job/118852982076"
+        }
+      ],
+      "limitation": "Exact source head snapshot. A later report-only head must be checked independently; optional android (qa) was skipped."
+    },
+    {
+      "sourceSha": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+      "repository": "Tah10n/pocket-ai",
+      "status": "passed",
+      "scope": "Historical source 9fc7f4b: all required jobs passed after the addressed API33 SDK-installation retry; optional Android QA was skipped. Original failure remains preserved. This is not CI for current decoder-repair source 2ce8cbc.",
+      "runId": 39494077396,
+      "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077396",
+      "attemptObservations": [
+        {
+          "attempt": 1,
+          "status": "completed_failure",
+          "checkoutMergeSha": "4a5b638bc6a04257e7db0c221b9263ed3c05bf85",
+          "sourceIncluded": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+          "deterministic": "passed",
+          "failedJob": {
+            "id": 118879595992,
+            "name": "android native release (API 33)",
+            "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077396/job/118879595992",
+            "classification": "sdk_archive_installation_failure_before_app_build",
+            "stage": "sdkmanager platform android-33 installation",
+            "failureAtUtc": "2026-10-20T20:52:54Z",
+            "error": "Error on ZipFile unknown archive",
+            "shellExitCode": 1,
+            "appBuildStarted": false,
+            "emulatorStarted": false,
+            "cleanupConnectionRefused": "Secondary cleanup output after the emulator had not started; not an application launch failure."
+          },
+          "rerunStatus": "targeted_API33_retry_requested",
+          "observedAt": "2026-10-20T20:55:50.149Z",
+          "conclusion": "failure",
+          "aggregate": "failure",
+          "originalSuccessfulJobs": [
+            "native scope",
+            "deterministic",
+            "ios native release",
+            "android native release (API 32)",
+            "android native release (API 34)",
+            "android native release (API 35)"
+          ]
+        }
+      ],
+      "targetedRetry": {
+        "requestedAtUtc": "2026-10-20T21:46:00Z",
+        "apiSuccess": true,
+        "outcome": "passed",
+        "kind": "single_job",
+        "jobId": 118879595992,
+        "timePrecision": "approximate_minute",
+        "latestJobId": 118904612492,
+        "latestJobUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077396/job/118904612492",
+        "otherLatestJobs": "Carried successful jobs from the original attempt; not fresh reruns.",
+        "latestJobStatus": "completed_success"
+      },
+      "relationshipToLatestLocalGate": "Historical published 9fc7f4b CI; current published decoder-repair source 2ce8cbc has its own pending CI run.",
+      "observedAtUtc": "2026-10-20T22:39:30Z",
+      "aggregate": {
+        "jobId": 118925681592,
+        "status": "passed",
+        "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077396/job/118925681592"
+      },
+      "requiredJobs": "all_passed",
+      "optionalAndroidQa": "skipped",
+      "retryHistoryNote": "The earlier retry request while the workflow was still running was refused; the later addressed API33 retry completed successfully. Original SDK archive failure remains retained.",
+      "workflowConclusion": "success",
+      "prTitle": {
+        "status": "passed",
+        "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077296"
+      },
+      "dependencyReview": {
+        "status": "passed",
+        "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39494077347"
+      }
+    },
+    {
+      "sourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+      "repository": "Tah10n/pocket-ai",
+      "status": "pending",
+      "runId": 39505971231,
+      "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231",
+      "scope": "Exact decoder-repair source CI: native scope, deterministic, iOS and Android API34 passed; Android API32, API33 and API35 are still running at this observation. Optional Android QA skipped. No overall CI pass is claimed.",
+      "prTitle": {
+        "status": "passed",
+        "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971223"
+      },
+      "dependencyReview": {
+        "status": "passed",
+        "runUrl": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971228"
+      },
+      "observedAtUtc": "2026-10-20T23:01:19Z",
+      "jobs": [
+        {
+          "name": "native scope",
+          "jobId": 118914851139,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118914851139"
+        },
+        {
+          "name": "deterministic",
+          "jobId": 118914851632,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118914851632"
+        },
+        {
+          "name": "ios native release",
+          "jobId": 118919435431,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435431"
+        },
+        {
+          "name": "android native release (API 32)",
+          "jobId": 118919435623,
+          "status": "running",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435623"
+        },
+        {
+          "name": "android native release (API 33)",
+          "jobId": 118919435710,
+          "status": "running",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435710"
+        },
+        {
+          "name": "android native release (API 34)",
+          "jobId": 118919435636,
+          "status": "passed",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435636"
+        },
+        {
+          "name": "android native release (API 35)",
+          "jobId": 118919435863,
+          "status": "running",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919435863"
+        },
+        {
+          "name": "optional Android QA",
+          "jobId": 118919437589,
+          "status": "skipped",
+          "url": "https://github.com/Tah10n/pocket-ai/actions/runs/39505971231/job/118919437589"
+        }
+      ]
+    }
+  ],
+  "finalUiNameRepair": {
+    "status": "filename_upgrade_verified_ordinary_imports_completed_with_explicit_failures",
+    "appTree": "4a945ac23904091cb9ff3b3d9dc53c0d8592347e",
+    "scope": "Renderer-only original attachment name and memo update; storage and native pipeline unchanged. New APK UI acceptance remains separate from the older 2456272 native cases.",
+    "regression": {
+      "red": {
+        "failed": 3,
+        "passed": 46
+      },
+      "focusedGreen": {
+        "suites": 2,
+        "tests": 59
+      },
+      "scope": "Original audio/document names, accessibility and memoized name-only update; storage compatibility suite included."
+    },
+    "localVerification": {
+      "status": "passed",
+      "command": "npm run verify:release",
+      "jestSuites": 303,
+      "jestTests": 7094,
+      "jestSeconds": 314.668,
+      "rustUnitTests": 68,
+      "rustIntegrationTests": 3,
+      "otherChecks": [
+        "TypeScript",
+        "lint",
+        "native configuration"
+      ]
+    },
+    "nativeUpgradeVerification": "passed_same_retained_recorded_message_name_accessibility_and_cold_file_retention",
+    "hostedCi": "pending",
+    "limitation": "The recorded-message upgrade does not rerun inference; its Orange 7 completion remains bound to 2456272. Ordinary import lifecycle/name checks are distinct from content and native format acceptance; no overall four-case pass is claimed.",
+    "publicSource": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+    "sourcePublication": "verified",
+    "testedBuilds": [
+      {
+        "id": "x86-ui-9fc7f4b",
+        "publicSourceSha": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+        "publicAppTree": "4a945ac23904091cb9ff3b3d9dc53c0d8592347e",
+        "abi": "x86_64",
+        "deviceClass": "16 GiB emulator, Android API 36",
+        "apkSha256": "e3b7e2dd1f793b691143a6ce4190d6c1574996a9696bc856cb74e2565af0a4ea",
+        "apkBytes": 92329018,
+        "installedApkSha256": "e3b7e2dd1f793b691143a6ce4190d6c1574996a9696bc856cb74e2565af0a4ea",
+        "buildInputDigest": "8a4ed4306b751404439f37188cd79b0ab1fccf22dd09c0b4e360a34d462458ee",
+        "normalizedRuntimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+        "compile": "passed",
+        "install": "passed",
+        "smoke": "passed"
+      },
+      {
+        "id": "arm64-ui-9fc7f4b",
+        "publicSourceSha": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+        "publicAppTree": "4a945ac23904091cb9ff3b3d9dc53c0d8592347e",
+        "abi": "arm64-v8a",
+        "deviceClass": "physical phone",
+        "apkSha256": "293b44d0a3288b907b8f3ea51e1a147d8ad3987a137223de6ea12efa6ab0d3ff",
+        "apkBytes": 145823777,
+        "installedApkSha256": "293b44d0a3288b907b8f3ea51e1a147d8ad3987a137223de6ea12efa6ab0d3ff",
+        "buildInputDigest": "83ef03a91df5ec3cdf994f4a5a658b0e87259a00ddcb084b3fd5db06711197e8",
+        "normalizedRuntimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+        "compile": "passed",
+        "install": "passed",
+        "smoke": "passed"
+      }
+    ],
+    "arm64Build": "passed",
+    "physicalPhoneNameAndColdVerification": "passed_existing_forty_second_message_only_no_new_inference",
+    "ordinaryImportResults": "On 9fc7f4b, all three picker/name/file-retention checks completed; WAV40 and MP3 completed naturally, only MP3 full expected content verified, and large stereo WAV Send failed unsupported format. Separate 2ce8cbc repair and naturally completed Send/cold proof are recorded in ordinaryLargeRepair2ce8cbc, with strict answer-format failure retained."
+  },
+  "recordedMessageUpgrade": {
+    "schemaVersion": 1,
+    "source": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+    "appTree": "4a945ac23904091cb9ff3b3d9dc53c0d8592347e",
+    "abi": "x86_64",
+    "apkSha256": "e3b7e2dd1f793b691143a6ce4190d6c1574996a9696bc856cb74e2565af0a4ea",
+    "apkBytes": 92329018,
+    "runtimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+    "buildProvenanceDigest": "8a4ed4306b751404439f37188cd79b0ab1fccf22dd09c0b4e360a34d462458ee",
+    "case": "same_persisted_recorded_message_original_name_after_upgrade_and_cold",
+    "originalInferenceSource": "2456272ed9f805efca71fbed85be82ca9272dff3",
+    "newInferenceRun": false,
+    "nameAndAccessibility": "recorded.wav",
+    "sameUserAndAssistantIds": true,
+    "sameAttachmentId": true,
+    "assistantText": "Orange 7",
+    "cold": {
+      "startMs": 2451,
+      "launchState": "COLD",
+      "status": "ok",
+      "priorProcessAbsent": true
+    },
+    "file": {
+      "bytes": 508282,
+      "sha256": "2d22d7055c971a60395c25b553d7c332a6abde93a35dfc2fe9cbfb39d45f0a0f",
+      "sameInode": true
+    },
+    "displayNamePersistenceProof": "Original name recovered by the corrected renderer from the same retained message after upgrade and cold launch; no raw encrypted store extraction",
+    "screenshot": {
+      "bytes": 186531,
+      "sha256": "a640721a4a11c856b33292544200ee4424a02fb1479d66e1e156077cffe5b94a",
+      "name": "emulator-recorded-cold-9fc7f4b.png",
+      "visuallyInspected": true
+    },
+    "status": "passed",
+    "remainingThreeImportsAtObservation": "pending; no ordinary Send/cold outcome yet",
+    "subsequentOrdinaryImportResults": "See ordinaryImports9fc7f4b; all three attempts completed with explicit failures and content limitations."
+  },
+  "physicalFilenameUpgrade": {
+    "schemaVersion": 1,
+    "status": "passed",
+    "source": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+    "appTree": "4a945ac23904091cb9ff3b3d9dc53c0d8592347e",
+    "abi": "arm64-v8a",
+    "apk": {
+      "sha256": "293b44d0a3288b907b8f3ea51e1a147d8ad3987a137223de6ea12efa6ab0d3ff",
+      "bytes": 145823777,
+      "buildProvenanceDigest": "83ef03a91df5ec3cdf994f4a5a658b0e87259a00ddcb084b3fd5db06711197e8"
+    },
+    "runtimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+    "scope": "Existing persisted forty-second synthetic audio message; renderer filename validation only",
+    "beforeCold": {
+      "attachmentSha256": "a2933ba8091e217fdb57a52610755a774508a6a0eefd002347832777b22f8780",
+      "accessibilityLabel": "Message Audio attachment 1 of 1: forty-seconds.wav",
+      "status": "passed",
+      "installedApkHashVerified": true,
+      "visibleText": "forty-seconds.wav",
+      "attachmentBytes": 1280044,
+      "originalFilename": "forty-seconds.wav",
+      "screenshotSha256": "fc2c5145c3b73a2a1c6e42c3b1101a6997ad979991e19505f80c041ecd843da3"
+    },
+    "coldRestart": {
+      "processAbsentBeforeStart": true,
+      "status": "passed",
+      "launchState": "COLD"
+    },
+    "afterCold": {
+      "status": "passed",
+      "sameKnownConversationAndAttachment": true,
+      "visibleText": "forty-seconds.wav",
+      "accessibilityLabel": "Message Audio attachment 1 of 1: forty-seconds.wav",
+      "attachmentBytes": 1280044,
+      "attachmentSha256": "a2933ba8091e217fdb57a52610755a774508a6a0eefd002347832777b22f8780",
+      "sizeHashAndInodeUnchanged": true,
+      "newQaProcessIdentityVerified": true,
+      "installedApkHashVerified": true,
+      "screenshotSha256": "8e747f37647c6a04e4553bdeb53a74dd107e7bde2255c5693b57b6777598cbc3",
+      "screenshotBytes": 158322,
+      "observedAfterUsbReconnect": true
+    },
+    "limitations": [
+      "Earlier USB disconnect interrupted the first post-cold observation; that partial record and screenshot/foreground errors are preserved separately.",
+      "No audio inference, Send, TTS or microphone capture was repeated.",
+      "No comparison screenshot of the old filename label is claimed.",
+      "This verifies the existing imported forty-second attachment only; it does not change earlier physical memory-admission failures."
+    ],
+    "newSendOrTtsOrRecording": false,
+    "attempts": [
+      {
+        "id": "initial_post_cold_interrupted",
+        "status": "partial",
+        "result": {
+          "schemaVersion": 1,
+          "status": "partial",
+          "source": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+          "appTree": "4a945ac23904091cb9ff3b3d9dc53c0d8592347e",
+          "abi": "arm64-v8a",
+          "apk": {
+            "sha256": "293b44d0a3288b907b8f3ea51e1a147d8ad3987a137223de6ea12efa6ab0d3ff",
+            "bytes": 145823777,
+            "buildProvenanceDigest": "83ef03a91df5ec3cdf994f4a5a658b0e87259a00ddcb084b3fd5db06711197e8"
+          },
+          "runtimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+          "scope": "Existing persisted forty-second synthetic audio message; renderer filename validation only",
+          "beforeCold": {
+            "attachmentSha256": "a2933ba8091e217fdb57a52610755a774508a6a0eefd002347832777b22f8780",
+            "accessibilityLabel": "Message Audio attachment 1 of 1: forty-seconds.wav",
+            "status": "passed",
+            "installedApkHashVerified": true,
+            "visibleText": "forty-seconds.wav",
+            "attachmentBytes": 1280044,
+            "originalFilename": "forty-seconds.wav",
+            "screenshotSha256": "fc2c5145c3b73a2a1c6e42c3b1101a6997ad979991e19505f80c041ecd843da3"
+          },
+          "coldRestart": {
+            "processAbsentBeforeStart": true,
+            "status": "passed",
+            "launchState": "COLD"
+          },
+          "afterCold": {
+            "reason": "Physical device disconnected from ADB before completing post-restart verification",
+            "attachmentHash": "not_verified",
+            "filenameAndAccessibility": "not_verified",
+            "sameKnownConversationOpened": true
+          },
+          "limitations": [
+            "This check does not repeat audio inference or content evaluation.",
+            "No comparison screenshot of the old filename label is claimed.",
+            "Post-restart attachment persistence is not accepted from successful launch alone."
+          ],
+          "newSendOrTtsOrRecording": false
+        },
+        "observationLimitations": [
+          "USB disconnect prevented completion of the first post-cold observation.",
+          "Earlier screenshot/foreground observation errors remain preserved; they do not establish an application failure."
+        ]
+      },
+      {
+        "id": "post_reconnect_continuation",
+        "status": "passed",
+        "scope": "Completed post-cold filename/accessibility and same-file identity checks on the same installed APK; earlier partial outcome is not rewritten."
+      }
+    ]
+  },
+  "ordinaryImports9fc7f4b": {
+    "schemaVersion": 1,
+    "status": "completed_with_explicit_failures",
+    "source": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+    "appTree": "4a945ac23904091cb9ff3b3d9dc53c0d8592347e",
+    "apkSha256": "e3b7e2dd1f793b691143a6ce4190d6c1574996a9696bc856cb74e2565af0a4ea",
+    "apkBytes": 92329018,
+    "runtimePatchSha256": "3f2795a8ec08b2e40fa1bc7ee2fa52b0ab21fab097578bfcdbbab654c9de20a7",
+    "buildProvenanceDigest": "8a4ed4306b751404439f37188cd79b0ab1fccf22dd09c0b4e360a34d462458ee",
+    "abi": "x86_64",
+    "profile": {
+      "admissionOverrides": false,
+      "productTimeoutUnchanged": true,
+      "contextTokens": 2048,
+      "cpuThreads": "ordinary Auto; previous runtime observation2",
+      "actualGpuLayers": 0
+    },
+    "timingScope": "Ordinary audio-input UI timing is not comparable to TTS synthesis/decode latency or the separate4-thread QA input harness. Observation polling does not provide native stage timings.",
+    "cases": [
+      {
+        "managedBytesAndSha": "passed",
+        "originalNameInDraftAndMessage": "passed",
+        "terminalCompletion": "passed",
+        "name": "forty-seconds.wav",
+        "sourceSha256": "a2933ba8091e217fdb57a52610755a774508a6a0eefd002347832777b22f8780",
+        "send": "accepted",
+        "pickerAndDraft": "passed",
+        "content": "not_verified_collapsed_markdown_list",
+        "sourceBytes": 1280044,
+        "durationSeconds": 40,
+        "format": "PCM16 mono WAV,16000Hz",
+        "cold": "passed_same_message_attachment_name_bytes_sha",
+        "uiTiming": {
+          "tokensPerSecond": 8.1,
+          "scope": "UI counter and polling observation, not native stage latency or TTS comparison",
+          "ttftMs": 482464,
+          "sendToTerminalObservationUpperBoundMs": 566181
+        },
+        "visibleFailure": "Assistant Markdown list collapsed to a narrow bubble; XML exposes Orange but complete color-and-number answer is not verified.",
+        "screenshot": {
+          "bytes": 182838,
+          "file": "emulator-forty-cold-9fc7f4b.png",
+          "pixelsReviewed": true,
+          "sha256": "53795eac891d4b0e4ae6632c0bf162b51fa20a8cf8034ac62c000e94d3cf5968"
+        }
+      },
+      {
+        "name": "legacy-import.mp3",
+        "status": "completed_and_cold_verified",
+        "sourceBytes": 641664,
+        "sourceSha256": "eeaa46287d6563749b1a0c46149836b9552900fc9c32c8f326535c817309fc49",
+        "durationSeconds": 40,
+        "pickerAndDraft": "passed",
+        "originalNameInDraftAndMessage": "passed",
+        "managedBytesAndSha": "passed",
+        "terminalCompletion": "passed_naturally_no_stop_or_timeout",
+        "content": "passed_orange_and_seven",
+        "cold": "passed_same_message_name_answer_bytes_sha",
+        "answer": "The color is Orange, and the number is seven.",
+        "uiTiming": {
+          "scope": "UI counters, not native stage or TTS timing",
+          "tokensPerSecond": 9.6,
+          "ttftMs": 879390
+        },
+        "screenshot": {
+          "sha256": "990b6a0f2d9af984e3b1f686c287ad7b6a2fccc2fd2c97cc0f5deab3110cf595",
+          "file": "emulator-mp3-cold-9fc7f4b.png",
+          "bytes": 194228,
+          "pixelsReviewed": true
+        }
+      },
+      {
+        "name": "over-four-MiB.wav",
+        "sourceBytes": 4608044,
+        "sourceSha256": "b448e010e4db15f1a493b2b5089821becf924176ef25b400f8ec3167b74715b8",
+        "durationSeconds": 24,
+        "format": "PCM16 stereo WAV,48000Hz",
+        "pickerAndDraft": "passed",
+        "managedBytesAndSha": "passed",
+        "originalNameInDraftAndMessage": "passed",
+        "send": "failed_unsupported_format",
+        "alertTitle": "Cannot send message",
+        "alertMessage": "This document format is not supported.",
+        "terminalCompletion": "assistant_error",
+        "content": "not_run",
+        "cold": "passed_same_error_pair_name_bytes_sha",
+        "cause": "confirmed_host_reproduction_estimated_vs_actual_resampled_frame_count; see largeStereoWavDiagnosis; repair pending",
+        "retry": false,
+        "screenshot": {
+          "file": "emulator-large-cold-9fc7f4b.png",
+          "sha256": "150b1e2c4dedf9ecdfbd19fcea48759be7808346bf7d16a68d4069bcc5ad9416",
+          "pixelsReviewed": true,
+          "bytes": 173081
+        },
+        "errorScreenshot": {
+          "file": "emulator-large-send-error-9fc7f4b.png",
+          "sha256": "693603b8a8f4f98f6e8452bf94fe71303666478e77a473c4f559ffd4beba62fd",
+          "pixelsReviewed": true,
+          "bytes": 154674
+        }
+      }
+    ],
+    "qaBoundary": "No new microphone capture, profile waiver, model sweep, truncation or text-only substitute. Each imported file is sent in its own new chat.",
+    "contentScope": "The fixed fixture contains a spoken color/number followed by silence. MP3 content match does not prove general transcription or semantic coverage throughout the duration. Exact full-file hash proves storage preserved all bytes.",
+    "completionBoundary": "One Send per file. WAV40 and MP3 completed naturally; no observer timeout, Stop or repeat Send occurred. LargeWAV failed immediately and remained message-owned after cold restart. No active consumer or unsent draft remains."
+  },
+  "largeStereoWavDiagnosis": {
+    "status": "confirmed_host_reproduction_repair_pending",
+    "source": "9fc7f4b522b7777aefecba629f2f4cee068c362a",
+    "observedAt": "2026-10-20T21:49:45.1671956Z",
+    "scope": "Real pinned miniaudio with the production decoder function extracted verbatim; host diagnostic, not a repaired APK acceptance result.",
+    "input": {
+      "sha256": "b448e010e4db15f1a493b2b5089821becf924176ef25b400f8ec3167b74715b8",
+      "bytes": 4608044
+    },
+    "miniaudioSha256": "ac7af4de748b7e26b777f37e01cee313a308a7296a3eb080e2906b320cc55c89",
+    "nativeHelperSha256": "c9a29e969cbba13599e169f99b7c5a340008e11a963030f6004d67d4efac934d",
+    "validResampling": {
+      "followingReadFrames": 0,
+      "sourceFrames": 1152000,
+      "channels": 2,
+      "productionStatus": "audio_decoder_invalid_format",
+      "outputRate": 16000,
+      "reportedOutputFrames": 384001,
+      "readResult": 0,
+      "followingReadResult": -17,
+      "backendCursor": 1152000,
+      "actualOutputFrames": 384000,
+      "backendLength": 1152000,
+      "inputRate": 48000
+    },
+    "sameRateControl": {
+      "outputRate": 48000,
+      "frames": 1152000,
+      "productionStatus": "passed"
+    },
+    "rootCause": "For the valid 48 kHz stereo WAV converted to 16 kHz mono, miniaudio estimated 384001 output frames but returned 384000 with clean EOF and all 1152000 source frames consumed. The production exact output-length equality rejected that valid conversion.",
+    "separateMalformedInputGap": {
+      "reportedOutputFrames": 384000,
+      "reason": "WAV backend clamps declared length to available payload; this is a distinct previously untested malformed-input gap",
+      "productionStatus": "passed",
+      "actualOutputFrames": 384000,
+      "backendLength": 1151999,
+      "backendCursor": 1151999,
+      "case": "last4bytes removed without updating RIFF/data headers"
+    },
+    "repairBoundary": "A proposed relaxed read-count check alone also accepted a WAV truncated by four bytes with unchanged RIFF/data extents. Container validation and safe output-length handling require a separate verified fix; repair is not yet claimed.",
+    "safeFixVerified": false,
+    "newApkRetest": "not_run",
+    "subsequentEvidence": "Focused host repair checks are recorded separately in nativeDecoderRepair; this diagnosis snapshot predates that repair.",
+    "observationScope": "Historical pre-repair diagnosis snapshot. Its repair_pending and newApkRetest not_run fields describe that observation, not the latest outcome; see nativeDecoderRepair and ordinaryLargeRepair2ce8cbc."
+  },
+  "nativeDecoderRepair": {
+    "status": "native_send_and_cold_passed_answer_format_failed",
+    "scope": "Bounded native audio resampling and WAV integrity repair. Host RED/GREEN checks do not themselves establish inference; the repaired x86 ordinary Send/cold result is recorded separately in ordinaryLargeRepair2ce8cbc. No new physical inference or general speech-quality acceptance is claimed.",
+    "sourcePublication": "confirmed",
+    "identities": {
+      "decoderSha256": "7977edcac38005046c3630488de4da59fab6298824bfc34ea94a3540836b2b8f",
+      "miniaudioSha256": "ac7af4de748b7e26b777f37e01cee313a308a7296a3eb080e2906b320cc55c89",
+      "normalizedPatchSha256": "ab861eed195b755aa6dccb5e8efaf394cc13514155ffa3b7dae202a37af8e183",
+      "previousDecoderSha256": "c9a29e969cbba13599e169f99b7c5a340008e11a963030f6004d67d4efac934d"
+    },
+    "nativeRed": {
+      "passedCases": 6,
+      "failedCases": [
+        "48k-stereo-over-4MiB-to-16k",
+        "truncated-aligned-PCM",
+        "unaligned-PCM-data",
+        "forged-chunk-length"
+      ],
+      "exitCode": 1
+    },
+    "nativeGreen": {
+      "passedCases": 12,
+      "externalFixtures": [
+        {
+          "sha256": "b448e010e4db15f1a493b2b5089821becf924176ef25b400f8ec3167b74715b8",
+          "name": "over-four-MiB.wav",
+          "outputFrames": 384000,
+          "bytes": 4608044
+        },
+        {
+          "sha256": "eeaa46287d6563749b1a0c46149836b9552900fc9c32c8f326535c817309fc49",
+          "name": "legacy-import.mp3",
+          "outputFrames": 641664,
+          "bytes": 641664
+        }
+      ],
+      "exitCode": 0
+    },
+    "compiler": "MSVC cl, C++17, /Od; executable and compiler bounded at 60 seconds",
+    "jest": {
+      "suites": 2,
+      "tests": 128,
+      "seconds": 148.595,
+      "exitCode": 0
+    },
+    "typecheck": "passed",
+    "scopedLint": "passed",
+    "independentReview": "no_actionable_findings",
+    "fullVerification": {
+      "status": "passed",
+      "publicSourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+      "sourcePublication": "confirmed",
+      "publicAppTree": "d2c2e1fdef636dc5bfcbe4bdf5f1f049524d37d6",
+      "command": "npm run verify:release",
+      "jestSuites": 303,
+      "jestTests": 7095,
+      "jestSeconds": 301.047,
+      "rustUnitTests": 68,
+      "rustIntegrationTests": 3,
+      "otherChecks": [
+        "TypeScript",
+        "lint",
+        "native configuration"
+      ],
+      "scope": "Exact published decoder-repair source tree. Local verification does not establish model inference or the original-file device retry."
+    },
+    "deviceAfterRepair": "native_send_completion_and_cold_passed_strict_answer_format_failed",
+    "limitations": [
+      "Real host decoder regressions passed; ARM and x86 builds, matching installs and launch smoke passed separately.",
+      "The large-WAV device failure remains bound to source 9fc7f4b.",
+      "One repaired x86 ordinary Send naturally completed and retained original name/bytes across cold launch. Extra repeated words failed strict answer format; no general quality acceptance or new physical inference is claimed."
+    ],
+    "appTree": "d2c2e1fdef636dc5bfcbe4bdf5f1f049524d37d6",
+    "publicSourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+    "armBuild": {
+      "id": "arm64-decoder-2ce8cbc",
+      "publicSourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+      "publicAppTree": "d2c2e1fdef636dc5bfcbe4bdf5f1f049524d37d6",
+      "abi": "arm64-v8a",
+      "deviceClass": "physical phone",
+      "apkSha256": "9227af2e57941fb68410290e4af9b9254948cca13bbfa936b05176e44953a913",
+      "apkBytes": 145823813,
+      "installedApkSha256": "9227af2e57941fb68410290e4af9b9254948cca13bbfa936b05176e44953a913",
+      "buildInputDigest": "cd7ef6e8fc79f33547ce368a50b011c0092106523cd8f536bf1cc04537d7341f",
+      "normalizedRuntimePatchSha256": "ab861eed195b755aa6dccb5e8efaf394cc13514155ffa3b7dae202a37af8e183",
+      "compile": "passed",
+      "install": "passed",
+      "smoke": "passed",
+      "buildSeconds": 766,
+      "inferenceAfterRepair": "not_run",
+      "scope": "Build/install/launch smoke only; no new physical audio Send, recording or model-inference acceptance."
+    },
+    "x86Build": {
+      "id": "x86-decoder-2ce8cbc",
+      "publicSourceSha": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+      "publicAppTree": "d2c2e1fdef636dc5bfcbe4bdf5f1f049524d37d6",
+      "abi": "x86_64",
+      "deviceClass": "16 GiB emulator, Android API 36",
+      "apkSha256": "bd514de680ff52318d3d3dde5618220dda8f92776ed40d000ca7ed0b329b298e",
+      "apkBytes": 92329054,
+      "installedApkSha256": "bd514de680ff52318d3d3dde5618220dda8f92776ed40d000ca7ed0b329b298e",
+      "buildInputDigest": "355bde25d29e0d585b6ac75686ebb121708a94b2ffa51541f76035f3a3c04784",
+      "normalizedRuntimePatchSha256": "ab861eed195b755aa6dccb5e8efaf394cc13514155ffa3b7dae202a37af8e183",
+      "compile": "passed",
+      "install": "passed",
+      "smoke": "passed",
+      "buildSeconds": 285,
+      "inferenceAfterRepair": "naturally_completed_fixed_target_present_strict_answer_format_failed",
+      "scope": "Build/install/launch smoke and one original-file ordinary Send/cold verified; fixed color/number present, strict answer format failed."
+    },
+    "deviceEvidence": "ordinaryLargeRepair2ce8cbc in this record"
+  },
+  "ordinaryLargeRepair2ce8cbc": {
+    "schemaVersion": 1,
+    "status": "completed_with_answer_format_failure",
+    "source": "2ce8cbcfb832083b31d0a5f38bf2d4b92e4b6d4c",
+    "appTree": "d2c2e1fdef636dc5bfcbe4bdf5f1f049524d37d6",
+    "apkSha256": "bd514de680ff52318d3d3dde5618220dda8f92776ed40d000ca7ed0b329b298e",
+    "apkBytes": 92329054,
+    "buildProvenanceDigest": "355bde25d29e0d585b6ac75686ebb121708a94b2ffa51541f76035f3a3c04784",
+    "runtimePatchSha256": "ab861eed195b755aa6dccb5e8efaf394cc13514155ffa3b7dae202a37af8e183",
+    "abi": "x86_64",
+    "fixture": {
+      "format": "PCM16 stereo WAV",
+      "sampleRate": 48000,
+      "bytes": 4608044,
+      "durationSeconds": 24,
+      "name": "over-four-MiB.wav",
+      "sha256": "b448e010e4db15f1a493b2b5089821becf924176ef25b400f8ec3167b74715b8"
+    },
+    "profile": {
+      "admissionOverride": false,
+      "cpuThreads": "ordinary Auto2, unchanged",
+      "contextTokens": 2048,
+      "model": "Ultravox 1B",
+      "actualGpuLayers": 0
+    },
+    "flow": {
+      "preparedAudioAttachmentMarker": "observed",
+      "bytesAndSha": "passed",
+      "cold": "passed",
+      "originalNameInDraftAndMessage": "passed",
+      "send": "accepted",
+      "freshChat": true,
+      "content": "fixed_color_and_number_present; strict_answer_format_failed",
+      "original9fcErrorChatPreserved": true,
+      "observerSeconds": 900,
+      "sendCount": 1,
+      "terminal": "naturally_completed",
+      "stopUsed": false,
+      "observerTimeout": false
+    },
+    "timingScope": "Ordinary audio input UI timing is not native phase or TTS latency.",
+    "answer": {
+      "exactText": "Orange 7  The  The  The",
+      "fixedColorNumber": "passed",
+      "strictAnswerFormat": "failed_extra_repeated_words",
+      "generalSpeechOrTranscriptionAcceptance": "not_claimed",
+      "evidence": "UI text and viewed cold screenshot"
+    },
+    "timing": {
+      "uiTtftMs": 458274,
+      "uiTokensPerSecond": 7.8,
+      "sendToTerminalObservationUpperBoundMs": 526863,
+      "scope": "UI counters and bounded polling observation, not native phase timing or TTS latency"
+    },
+    "cold": {
+      "status": "passed",
+      "launchState": "COLD",
+      "processAbsentBeforeStart": true,
+      "launchTotalTimeMs": 2247,
+      "sameMessagesAndAttachment": true,
+      "originalName": "over-four-MiB.wav",
+      "bytes": 4608044,
+      "sha256": "b448e010e4db15f1a493b2b5089821becf924176ef25b400f8ec3167b74715b8",
+      "sameManagedFileInode": true,
+      "original9fcErrorAttachmentAndOtherHistoricalAttachmentsPreserved": true
+    },
+    "screenshot": {
+      "name": "emulator-large-cold-2ce8cbc.png",
+      "bytes": 187141,
+      "sha256": "f07ca34ac9e9dbfa765abcb7c3f9b47eea7d8902736be96cb50b36112fac827e",
+      "viewed": true
+    },
+    "scope": "One fresh ordinary chat on the repaired source; original 9fc failure retained. No retry, profile change, admission waiver, microphone capture or general quality acceptance."
+  },
+  "resourceCleanup": {
+    "status": "completed_verified",
+    "scopedTargetsRemoved": 27,
+    "mainTargetsRemoved": 21,
+    "residualTargetsRemoved": 6,
+    "logicalBytesAtVerifiedPreDeletionSnapshots": {
+      "main": 46163212152,
+      "residual": 65823303,
+      "total": 46229035455
+    },
+    "physicalFreedBytes": "not_measured; sparse emulator image logical size does not establish physical disk space freed",
+    "absenceVerification": "All 27 exact targets independently checked absent after deletion.",
+    "removedClasses": [
+      "isolated dependencies and native build outputs",
+      "task compiler/Gradle caches",
+      "task emulator data and configuration",
+      "unused downloaded input/evaluation model fixtures and evaluator environment",
+      "six obsolete APK files",
+      "generated local-module outputs and Python bytecode caches"
+    ],
+    "preserved": [
+      "published source and retained worktree",
+      "final ARM64 and x86 APK archives with matching identities/provenance/install receipts and signing material",
+      "eSpeak integration preparation and licensing/source evidence",
+      "small verification logs, JSON, screenshots and audio fixtures"
+    ],
+    "preservedIdentityChecks": "All ten required preservation roles rehashed by the guarded executor before each deletion; inventory separately checked metadata only.",
+    "retainedArchivesLogicalBytes": {
+      "arm64": 146206138,
+      "x86": 92711125
+    },
+    "retainedEspeakPreparationLogicalBytes": 45976796,
+    "borrowedResources": "Primary repository, shared SDK/toolchain caches, unrelated worktrees and user emulator configuration preserved.",
+    "scope": "Resource cleanup is not additional model, privacy or quality acceptance."
+  },
+  "reportHeadCi": {
+    "status": "not_run",
+    "reason": "At report preparation, the report-only commit was not yet published. Its CI must be observed separately after publication; successful source 2ce8cbc CI does not cover that later report head."
+  }
+}

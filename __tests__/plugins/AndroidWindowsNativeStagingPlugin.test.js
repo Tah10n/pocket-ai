@@ -56,9 +56,9 @@ describe('Windows scoped native staging', () => {
   it('fails closed when the root-plugin lifecycle boundary is absent', () => {
     expect(() => ensureWindowsNativeStaging('buildscript { }\n')).toThrow(/root plugin boundary/);
   });
-  it('limits Windows configuration to the app, MMKV and worklets-core using their respective Android plugin types', () => {
+  it('limits Windows configuration to evidenced native modules using their respective Android plugin types', () => {
     const gate = 'if (System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).startsWith("windows"))';
-    const registry = 'def pocketNativeModules = [":react-native-mmkv": ["com.android.library", "m"], ":react-native-worklets-core": ["com.android.library", "w"], ":app": ["com.android.application", "a"]]';
+    const registry = 'def pocketNativeModules = [":react-native-mmkv": ["com.android.library", "m"], ":react-native-worklets-core": ["com.android.library", "w"], ":react-native-reanimated": ["com.android.library", "r"], ":llama.rn": ["com.android.library", "l"], ":app": ["com.android.application", "a"]]';
     expect(WINDOWS_NATIVE_STAGING.indexOf(gate)).toBeLessThan(WINDOWS_NATIVE_STAGING.indexOf(registry));
     expect(WINDOWS_NATIVE_STAGING).toContain(registry);
     expect(WINDOWS_NATIVE_STAGING).toMatch(/def pocketNativeModule = pocketNativeModules\[subproject.path\]\s+if \(pocketNativeModule != null\) \{\s+subproject.plugins.withId\(pocketNativeModule\[0\]\)/u);
@@ -84,7 +84,7 @@ describe('Windows scoped native staging', () => {
     // Do not normalize away ../: legacy Ninja stats the joined spelling first.
     expect((original + relative).length).toBeGreaterThanOrEqual(260);
     expect((staged + relative).length).toBeLessThan(260);
-    expect(new Set(Object.values(registry).map(entry => entry.suffix)).size).toBe(3);
+    expect(new Set(Object.values(registry).map(entry => entry.suffix)).size).toBe(5);
   });
 
   it('upgrades the existing app/MMKV block to include worklets before root plugin evaluation', () => {
@@ -92,6 +92,35 @@ describe('Windows scoped native staging', () => {
     const upgraded = ensureWindowsNativeStaging(mockRootGradle + '\n' + previous);
     expect(upgraded).toContain('":react-native-worklets-core": ["com.android.library", "w"]');
     expect(upgraded.indexOf('":react-native-worklets-core"')).toBeLessThan(upgraded.indexOf('apply plugin: "expo-root-project"'));
+    expect(upgraded.split('// @generated pocket-ai Windows native staging')).toHaveLength(2);
+    expect(ensureWindowsNativeStaging(upgraded)).toBe(upgraded);
+  });
+
+  it.each([
+    { module: 'react-native-reanimated', suffix: 'r', hash: '5q145t23',
+      target: 'CMakeFiles/reanimated.dir', source: 'Common/cpp/reanimated/LayoutAnimations',
+      filename: 'LayoutAnimationsProxy_Experimental.cpp.o' },
+    { module: 'llama.rn', suffix: 'l', hash: '2a3ns5a6',
+      target: 'rnllama/CMakeFiles/rnllama_v8_2_dotprod_i8mm_hexagon_opencl.dir', source: 'cpp/ggml-hexagon/htp/v73',
+      filename: 'htp_iface_stub.c.o' },
+  ])('gives CMake room to hash the evidenced ARM64 object path for $module', ({ module, suffix, hash, target, source, filename }) => {
+    expect(WINDOWS_NATIVE_STAGING).toContain(`":${module}": ["com.android.library", "${suffix}"]`);
+    const project = 'C:/Users/developer/.codex/worktrees/stage-seven-followup/pocket_ai/app';
+    const originalBuild = path.win32.join(project, `node_modules/${module}/android/.cxx/RelWithDebInfo/${hash}/arm64-v8a`);
+    const originalObject = path.win32.join(originalBuild, target, project.replace(':', '_'), `node_modules/${module}`, source, filename);
+    expect(originalObject.length).toBeGreaterThanOrEqual(260);
+    const stagedBuild = path.win32.join(`C:/Users/developer/.pa/g-123456789abc/n/${suffix}-123456789abc`, `RelWithDebInfo/${hash}/arm64-v8a`);
+    // CMake must regenerate the graph: shortening alone retains the old mangled source path.
+    // Its existing 250-character budget now has room for a 32-hex source-parent hash.
+    expect(path.win32.join(stagedBuild, target, 'a'.repeat(32), filename).length).toBeLessThanOrEqual(250);
+  });
+
+  it('upgrades an existing staged app/MMKV/worklets block with the remaining evidenced ARM modules', () => {
+    const additions = ', ":react-native-reanimated": ["com.android.library", "r"], ":llama.rn": ["com.android.library", "l"]';
+    const previous = WINDOWS_NATIVE_STAGING.replace(additions, '');
+    const upgraded = ensureWindowsNativeStaging(mockRootGradle + '\n' + previous);
+    expect(upgraded).toContain(additions);
+    expect(upgraded.indexOf('":react-native-reanimated"')).toBeLessThan(upgraded.indexOf('apply plugin: "expo-root-project"'));
     expect(upgraded.split('// @generated pocket-ai Windows native staging')).toHaveLength(2);
     expect(ensureWindowsNativeStaging(upgraded)).toBe(upgraded);
   });

@@ -238,6 +238,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     ['cpp/rn-tts.cpp', 'dc55dac2ee2da8d49f4a04c2a82f647b4d0ee9e37e3da271dbf9d90ae8129fdb'],
     ['cpp/rn-tts.cpp', '5b2759c889c37641ce41e350f5a4a4d522c7c0f95fc251c4ab751255db1ea164'],
     ['cpp/rn-tts.cpp', 'fd32040a76cbf769242c686fed5493647d1cb85ca0e37b448c7a814709e0ba9c'],
+    ['cpp/rn-tts.cpp', '4bca3e40a29ad8ef073deb927ef7900f20dd1ce27c51f7bb05b880bf6a7fc3f5'],
   ])('upgrades the exact accepted pre-TTS privacy source: %s', (source, previousHash) => {
     const patch = SOURCE_PATCHES.find(entry => entry.source === source);
     const migration = patch.intermediates.find(entry => entry.sha256 === previousHash);

@@ -418,7 +418,7 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
                       const captured = revision.current;
                       await drain;
                       assertReferenceCurrent(captured);
-                      const picked = await DocumentPicker.getDocumentAsync({ type: ['audio/wav', 'audio/mpeg', 'audio/mp4'],
+                      const picked = await DocumentPicker.getDocumentAsync({ type: ['audio/wav', 'audio/wave', 'audio/x-wav', 'audio/mpeg', 'audio/mp4'],
                         copyToCacheDirectory: true, multiple: false });
                       if (picked.canceled) return;
                       const asset = picked.assets[0];
@@ -427,7 +427,7 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
                         assertReferenceCurrent(captured);
                         preparedAudio = await prepareManagedAudio({ sourceUri: asset.uri, purpose: 'reference', sampleRate: 24000,
                           assertCurrent: () => assertReferenceCurrent(captured) });
-                        const mime = asset.mimeType === 'audio/wav' || asset.mimeType === 'audio/x-wav' ? 'audio/wav'
+                        const mime = asset.mimeType === 'audio/wav' || asset.mimeType === 'audio/wave' || asset.mimeType === 'audio/x-wav' ? 'audio/wav'
                           : asset.mimeType === 'audio/mpeg' ? 'audio/mpeg' : 'audio/mp4';
                         await retainReference(preparedAudio, asset.uri, mime);
                       } finally {

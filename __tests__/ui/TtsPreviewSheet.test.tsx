@@ -476,6 +476,40 @@ it('opens reference recording only after an explicit action and audio drain, wit
   expect(referenceVoiceStore.save).not.toHaveBeenCalled();
 });
 
+it('offers all supported WAV MIME aliases to the reference document provider', async () => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const view = renderSheet(props());
+  fireEvent.press(view.getByTestId('tts-reference-import'));
+  await waitFor(() => expect(DocumentPicker.getDocumentAsync).toHaveBeenCalledWith({
+    type: ['audio/wav', 'audio/wave', 'audio/x-wav', 'audio/mpeg', 'audio/mp4'],
+    copyToCacheDirectory: true, multiple: false,
+  }));
+  expect(prepareManagedAudio).not.toHaveBeenCalled();
+  expect(referenceVoiceStore.retainTemporarySource).not.toHaveBeenCalled();
+});
+
+it.each(['audio/wav', 'audio/wave', 'audio/x-wav'])('retains imported %s as WAV after bounded reference preparation and requires consent', async mimeType => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  const sourceUri = 'file:///picker/reference.wav';
+  jest.mocked(DocumentPicker.getDocumentAsync).mockResolvedValueOnce({
+    canceled: false, assets: [{ uri: sourceUri, name: 'reference.wav', mimeType, lastModified: 1 }],
+  });
+  const view = renderSheet(props());
+  fireEvent.press(view.getByTestId('tts-reference-import'));
+  await waitFor(() => expect(view.getByTestId('tts-reference-preview')).toBeEnabled());
+  expect(prepareManagedAudio).toHaveBeenCalledWith({ sourceUri, purpose: 'reference', sampleRate: 24000,
+    assertCurrent: expect.any(Function) });
+  expect(referenceVoiceStore.retainTemporarySource).toHaveBeenCalledWith({ sourceUri,
+    sourceSha256: preparedReference.sourceSha256, durationMs: preparedReference.durationMs, sourceMimeType: 'audio/wav',
+  }, { assertCurrent: expect.any(Function) });
+  expect(discardPreparedAudio).toHaveBeenCalledWith(preparedReference);
+  expect(view.getByTestId('tts-synthesize')).toBeDisabled();
+  expect(referenceVoiceStore.save).not.toHaveBeenCalled();
+  expect(service.start).not.toHaveBeenCalled();
+  fireEvent.press(view.getByTestId('tts-reference-consent'));
+  await waitFor(() => expect(view.getByTestId('tts-synthesize')).toBeEnabled());
+});
+
 it.each([
   ['source_size', 'audio_size_limit'],
   ['duration_limit', 'audio_duration_limit'],

@@ -4,7 +4,7 @@ import { TtsPreviewSheet, getTtsQaPlaybackMarker } from '../../src/components/ui
 import { ttsService, getTtsSelectionStatus, type TtsServiceState } from '../../src/services/TtsService';
 import * as DocumentPicker from 'expo-document-picker';
 import { referenceVoiceStore, type TemporaryReferenceSource } from '../../src/services/ReferenceVoiceStore';
-import { prepareManagedAudio, discardPreparedAudio, waitForAudioPreparationDrain, type PreparedAudio } from '../../src/services/AudioPreparationService';
+import { AudioPreparationError, prepareManagedAudio, discardPreparedAudio, waitForAudioPreparationDrain, type PreparedAudio } from '../../src/services/AudioPreparationService';
 import { audioSamplePreviewService } from '../../src/services/AudioSamplePreviewService';
 import type { AudioRecordingSheet } from '../../src/components/ui/AudioRecordingSheet';
 import en from '../../src/i18n/locales/en.json';
@@ -150,6 +150,7 @@ jest.mock('../../src/services/ReferenceVoiceStore', () => ({ referenceVoiceStore
   hydrate: jest.fn(), retainTemporarySource: jest.fn(), save: jest.fn(), delete: jest.fn(), select: jest.fn(),
 } }));
 jest.mock('../../src/services/AudioPreparationService', () => ({
+  ...jest.requireActual('../../src/services/AudioPreparationService'),
   prepareManagedAudio: jest.fn(), discardPreparedAudio: jest.fn(), waitForAudioPreparationDrain: jest.fn(),
 }));
 let mockSampleState = { phase: 'idle' };
@@ -473,6 +474,22 @@ it('opens reference recording only after an explicit action and audio drain, wit
       sourceUri: 'file:///test-cache/audio-reference/immutable.wav', sourceSha256: 'a'.repeat(64), durationMs: 1000, consent: true } },
   })));
   expect(referenceVoiceStore.save).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['source_size', 'audio_size_limit'],
+  ['duration_limit', 'audio_duration_limit'],
+] as const)('shows a distinct reference import error for %s', async (reason, displayCode) => {
+  mockSelection = { profileId: 'qwen3-tts', languages: ['en'], voiceModes: ['reference'] };
+  jest.mocked(DocumentPicker.getDocumentAsync).mockResolvedValueOnce({
+    canceled: false, assets: [{ uri: 'file:///picker/reference.wav', name: 'reference.wav', mimeType: 'audio/wav', lastModified: 1 }],
+  });
+  jest.mocked(prepareManagedAudio).mockRejectedValueOnce(new AudioPreparationError('audio_limit', reason));
+  const view = renderSheet(props());
+  fireEvent.press(view.getByTestId('tts-reference-import'));
+  await waitFor(() => expect(view.getByTestId('tts-error').props.children).toBe(`audioRecording.errors.${displayCode}`));
+  expect(referenceVoiceStore.retainTemporarySource).not.toHaveBeenCalled();
+  expect(service.start).not.toHaveBeenCalled();
 });
 
 it('does not open an audio picker after close invalidates a deferred initial cleanup', async () => {

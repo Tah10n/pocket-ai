@@ -23,13 +23,22 @@ export const AUDIO_PREPARATION_LIMITS = Object.freeze({
 });
 export type AudioPreparationFailureReason = 'native_result' | 'prepared_uri' | 'channels' | 'sample_rate'
   | 'sample_count' | 'output_size' | 'source_hash' | 'output_hash' | 'native_input' | 'native_admission'
-  | 'native_sniff' | 'native_output' | 'native_decode' | 'native_identity' | 'native_delivery';
+  | 'native_sniff' | 'native_output' | 'native_decode' | 'native_identity' | 'native_delivery'
+  | 'source_size' | 'duration_limit' | 'native_format';
 export class AudioPreparationError extends Error {
   constructor(readonly code: 'invalid_audio' | 'audio_limit' | 'cancelled' | 'preparation_failed' | 'cleanup_failed',
     readonly safeReason?: AudioPreparationFailureReason) {
     super(code); this.name = 'AudioPreparationError';
   }
 }
+/** A finite user-facing key, separate from the privacy-safe native diagnostic reason. */
+export function audioPreparationErrorDisplayCode(error: unknown): string | undefined {
+  if (!(error instanceof AudioPreparationError)) return undefined;
+  if (error.code === 'audio_limit' && error.safeReason === 'source_size') return 'audio_size_limit';
+  if (error.code === 'audio_limit' && error.safeReason === 'duration_limit') return 'audio_duration_limit';
+  return error.code;
+}
+
 type NativePreparation = {
   prepare(sourceUri: string, sampleRate: number, seconds: number, sourceBytes: number): Promise<
     Omit<PreparedAudio, 'identity' | 'durationMs'> & { sha256: string }>;
@@ -80,14 +89,15 @@ async function performManagedAudio(options: AudioPreparationOptions): Promise<Pr
     || !options.sourceUri.startsWith('file://')) throw new AudioPreparationError('invalid_audio');
   const info = await FileSystem.getInfoAsync(options.sourceUri);
   check(options.signal, options.assertCurrent);
-  if (!info.exists || info.isDirectory || !info.size || info.size > limits.sourceBytes) throw new AudioPreparationError('audio_limit');
+  if (!info.exists || info.isDirectory || !Number.isSafeInteger(info.size) || info.size < 1) throw new AudioPreparationError('invalid_audio');
+  if (info.size > limits.sourceBytes) throw new AudioPreparationError('audio_limit', 'source_size');
   let result: Awaited<ReturnType<NativePreparation['prepare']>> | undefined;
   pending += 1;
   try {
     // Cancellation invalidates publication and retains ownership until this actual promise settles.
     result = await getNative().prepare(options.sourceUri, rate, limits.seconds, limits.sourceBytes);
     if (!result || typeof result !== 'object') throw new AudioPreparationError('invalid_audio', 'native_result');
-    if (isPreparedUri(result.uri)) ownedDerivatives.add(result.uri);
+    if (isPreparedAudioUri(result.uri)) ownedDerivatives.add(result.uri);
     check(options.signal, options.assertCurrent);
     if (result.channels !== 1) throw new AudioPreparationError('invalid_audio', 'channels');
     if (result.sampleRate !== rate) throw new AudioPreparationError('invalid_audio', 'sample_rate');
@@ -97,13 +107,13 @@ async function performManagedAudio(options: AudioPreparationOptions): Promise<Pr
     if (result.sizeBytes !== 44 + result.sampleCount * 2) throw new AudioPreparationError('invalid_audio', 'output_size');
     if (!/^([a-f0-9]{64})$/.test(result.sourceSha256)) throw new AudioPreparationError('invalid_audio', 'source_hash');
     if (!/^([a-f0-9]{64})$/.test(result.sha256)) throw new AudioPreparationError('invalid_audio', 'output_hash');
-    if (!isPreparedUri(result.uri)) throw new AudioPreparationError('invalid_audio', 'prepared_uri');
+    if (!isPreparedAudioUri(result.uri)) throw new AudioPreparationError('invalid_audio', 'prepared_uri');
     return { uri: result.uri, sourceSha256: result.sourceSha256, sampleRate: rate, channels: 1,
       sampleCount: result.sampleCount, durationMs: result.sampleCount * 1000 / rate, sizeBytes: result.sizeBytes,
       identity: JSON.stringify(['audio-preparation/v1', result.sourceSha256, options.purpose, rate,
         limits, 'pcm16-mono-area-resample', result.sha256]) };
   } catch (error) {
-    if (result?.uri && isPreparedUri(result.uri)) {
+    if (result?.uri && isPreparedAudioUri(result.uri)) {
       try { await getNative().remove(result.uri); }
       catch { cleanupBlocked = true; throw new AudioPreparationError('cleanup_failed'); }
       ownedDerivatives.delete(result.uri);
@@ -121,6 +131,9 @@ async function performManagedAudio(options: AudioPreparationOptions): Promise<Pr
     };
     const nativeCode = typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
       ? error.code : undefined;
+    if (nativeCode === 'ERR_AUDIO_SIZE_LIMIT') throw new AudioPreparationError('audio_limit', 'source_size');
+    if (nativeCode === 'ERR_AUDIO_DURATION_LIMIT') throw new AudioPreparationError('audio_limit', 'duration_limit');
+    if (nativeCode === 'ERR_AUDIO_INVALID_FORMAT') throw new AudioPreparationError('invalid_audio', 'native_format');
     if (nativeCode && Object.prototype.hasOwnProperty.call(nativeReasons, nativeCode)) {
       throw new AudioPreparationError('preparation_failed', nativeReasons[nativeCode]);
     }
@@ -128,13 +141,13 @@ async function performManagedAudio(options: AudioPreparationOptions): Promise<Pr
   } finally { pending -= 1; }
 }
 
-function isPreparedUri(uri: unknown): uri is string {
+export function isPreparedAudioUri(uri: unknown): uri is string {
   const root = FileSystem.cacheDirectory;
   return typeof uri === 'string' && Boolean(root) && uri.startsWith(root + 'audio-preparation/')
     && /^[a-f0-9-]+\.wav$/.test(uri.slice((root + 'audio-preparation/').length));
 }
 export async function discardPreparedAudio(audio: PreparedAudio): Promise<void> {
-  if (!isPreparedUri(audio.uri)) throw new AudioPreparationError('cleanup_failed');
+  if (!isPreparedAudioUri(audio.uri)) throw new AudioPreparationError('cleanup_failed');
   try { await getNative().remove(audio.uri); ownedDerivatives.delete(audio.uri); }
   catch { cleanupBlocked = true; throw new AudioPreparationError('cleanup_failed'); }
 }
@@ -172,7 +185,7 @@ export async function cleanupPreparedAudioAfterDrain(): Promise<void> {
 /** A short reference alone crosses the number[] JSI bridge; never persist this result. */
 export async function readPreparedReferencePcm(audio: PreparedAudio): Promise<number[]> {
   assertPrivateStorageWritable();
-  if (!isPreparedUri(audio.uri) || audio.channels !== 1 || audio.sampleCount < 1
+  if (!isPreparedAudioUri(audio.uri) || audio.channels !== 1 || audio.sampleCount < 1
     || audio.sampleRate < 8_000 || audio.sampleRate > 48_000 || audio.sampleCount > audio.sampleRate * 8
     || audio.sizeBytes !== 44 + audio.sampleCount * 2) throw new AudioPreparationError('audio_limit');
   const info = await FileSystem.getInfoAsync(audio.uri);

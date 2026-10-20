@@ -149,6 +149,16 @@ describe('bounded managed audio preparation', () => {
       expect(mockRemove).toHaveBeenCalledTimes(2);
     });
 
+  it.each([
+    ['ERR_AUDIO_SIZE_LIMIT', 'audio_limit', 'source_size'],
+    ['ERR_AUDIO_DURATION_LIMIT', 'audio_limit', 'duration_limit'],
+    ['ERR_AUDIO_INVALID_FORMAT', 'invalid_audio', 'native_format'],
+  ] as const)('distinguishes native %s without exposing its payload', async (nativeCode, code, reason) => {
+    mockPrepare.mockRejectedValueOnce({ code: nativeCode, message: sensitivePayload });
+    await expectSafeFailure(prepareManagedAudio({ sourceUri: sensitiveSource, purpose: 'reference' }), code,
+      reason as AudioPreparationFailureReason);
+  });
+
   it.each<[string, AudioPreparationFailureReason]>([
     ['ERR_AUDIO_PREPARATION_NATIVE_INPUT', 'native_input'],
     ['ERR_AUDIO_PREPARATION_NATIVE_ADMISSION', 'native_admission'],

@@ -19,7 +19,7 @@ import { prepareSpeechText, type PreparedSpeechText } from '../../utils/ttsText'
 import { TTS_LIMITS, TtsError, sanitizeTtsNativeCompletion, type TtsErrorCode } from '../../types/tts';
 import { AudioRecordingSheet } from './AudioRecordingSheet';
 import { referenceVoiceStore, type TemporaryReferenceSource } from '../../services/ReferenceVoiceStore';
-import { prepareManagedAudio, discardPreparedAudio, waitForAudioPreparationDrain, type PreparedAudio } from '../../services/AudioPreparationService';
+import { prepareManagedAudio, discardPreparedAudio, waitForAudioPreparationDrain, audioPreparationErrorDisplayCode, type PreparedAudio } from '../../services/AudioPreparationService';
 import { audioSamplePreviewService } from '../../services/AudioSamplePreviewService';
 import phonemizerNotices from '../../thirdParty/phonemize-notices.json';
 import { getInstalledRecommendedTtsModel, getRecommendedTtsModelMetadata, RECOMMENDED_TTS_DOWNLOAD_MIB, TtsModelSetupService } from '../../services/TtsModelSetupService';
@@ -109,7 +109,7 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
   const [sampleStopping, setSampleStopping] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [filesChecked, setFilesChecked] = useState(false);
-  const [localError, setLocalError] = useState<TtsErrorCode | 'unsafe_content'>();
+  const [localError, setLocalError] = useState<TtsErrorCode | 'unsafe_content' | 'audio_size_limit' | 'audio_duration_limit'>();
   const mounted = useRef(true);
   const current = useRef(true);
   const revision = useRef(0);
@@ -213,7 +213,10 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
         cleanupFailed.current = true;
         onCleanupFailure();
       }
-      if (mounted.current) setLocalError(uncertainCleanup ? 'storage_failed' : failure instanceof TtsError ? failure.code : fallback);
+      const preparationCode = audioPreparationErrorDisplayCode(failure);
+      if (mounted.current) setLocalError(uncertainCleanup ? 'storage_failed'
+        : preparationCode === 'audio_size_limit' || preparationCode === 'audio_duration_limit' ? preparationCode
+          : failure instanceof TtsError ? failure.code : fallback);
     } finally {
       busy.current = false;
       if (mounted.current) setPending(false);
@@ -527,7 +530,10 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
               </ScreenCard> : null}
 
               {error ? <ScreenCard tone="error" padding="compact" className="gap-2">
-                <Text testID="tts-error" colorRole="danger" accessibilityLiveRegion="polite">{t('tts.errors.' + error)}</Text>
+                <Text testID="tts-error" colorRole="danger" accessibilityLiveRegion="polite">{t(
+                  error === 'audio_size_limit' || error === 'audio_duration_limit'
+                    ? 'audioRecording.errors.' + error : 'tts.errors.' + error,
+                )}</Text>
                 {['selection_missing', 'files_missing', 'memory_insufficient', 'codec_incompatible', 'profile_unverified'].includes(error)
                   ? <Button action="secondary" testID="tts-error-models" onPress={() => close(onOpenModels)}><ButtonText>{t('tts.openModels')}</ButtonText></Button> : null}
               </ScreenCard> : null}

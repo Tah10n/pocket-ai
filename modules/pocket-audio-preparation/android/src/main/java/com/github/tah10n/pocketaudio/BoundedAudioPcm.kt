@@ -9,10 +9,21 @@ import java.nio.ByteOrder
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+internal enum class AudioInputFailure(val nativeCode: String) {
+  SIZE("ERR_AUDIO_SIZE_LIMIT"), DURATION("ERR_AUDIO_DURATION_LIMIT"), FORMAT("ERR_AUDIO_INVALID_FORMAT")
+}
+internal class AudioInputException(val failure: AudioInputFailure) : IllegalArgumentException(failure.name)
+internal fun requireAudioInput(condition: Boolean, failure: AudioInputFailure) {
+  if (!condition) throw AudioInputException(failure)
+}
+
 /** Streaming area resampling: average each exact output-time interval, never relabel headers. */
 internal class BoundedAudioPcm(
   private val file: File, val sourceRate: Int, val targetRate: Int, private val seconds: Int,
 ) : AutoCloseable {
+  init {
+    require(sourceRate in 8000..192000 && targetRate in 8000..48000 && seconds in 1..30)
+  }
   private val output = BufferedOutputStream(FileOutputStream(file), 16 * 1024)
   private val step = sourceRate.toDouble() / targetRate
   private var filled = 0.0
@@ -21,13 +32,12 @@ internal class BoundedAudioPcm(
   var samples = 0
     private set
   init {
-    require(sourceRate in 8000..192000 && targetRate in 8000..48000 && seconds in 1..30)
     output.write(ByteArray(44))
   }
   fun frame(channels: FloatArray) {
     require(channels.size in 1..2 && channels.all { it.isFinite() }) { "invalid_audio" }
     frames++
-    require(frames <= sourceRate.toLong() * seconds) { "audio_limit" }
+    requireAudioInput(frames <= sourceRate.toLong() * seconds, AudioInputFailure.DURATION)
     val mono = channels.sumOf { it.toDouble().coerceIn(-1.0, 1.0) } / channels.size
     var remaining = 1.0
     while (remaining > 1e-9) {
@@ -37,7 +47,7 @@ internal class BoundedAudioPcm(
       remaining -= weight
       if (filled >= step - 1e-9) {
         val value = sum / step
-        require(++samples <= targetRate * seconds) { "audio_limit" }
+        requireAudioInput(++samples <= targetRate * seconds, AudioInputFailure.DURATION)
         val pcm = (value * if (value < 0) 32768 else 32767).roundToInt().coerceIn(-32768, 32767)
         output.write(pcm and 255)
         output.write((pcm shr 8) and 255)

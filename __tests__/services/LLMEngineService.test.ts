@@ -17,6 +17,9 @@ import { getModelLoadParametersForModel, updateSettings } from '../../src/servic
 import { getFreshMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { buildPerformanceExportJson } from '../../src/services/PerformanceExport';
+import type { LlmChatMessage } from '../../src/types/chat';
+import { AUDIO_DECODER_RESERVE_PER_INPUT } from '../../src/services/AudioDecoderAdmission';
+import { MAX_CHAT_AUDIO_ATTACHMENT_BYTES } from '../../src/utils/chatAttachments';
 import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
 import { EngineStatus, LifecycleStatus } from '../../src/types/models';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
@@ -4398,6 +4401,7 @@ describe('LLMEngineService', () => {
     getMultimodalSupportMock().mockResolvedValue({ vision: false, audio: true });
 
     await llmEngineService.load('test/model');
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue(audioDecodeMemory());
 
     await llmEngineService.chatCompletion({
       messages: [{
@@ -4431,6 +4435,58 @@ describe('LLMEngineService', () => {
             { type: 'input_audio', input_audio: { format: 'wav', url: 'file:///document/audio.wav' } },
           ],
         }]);
+  });
+
+
+  function audioDecodeMemory() {
+    return { timestampMs: 1, platform: 'android' as const, totalBytes: 8 * 1024 ** 3, availableBytes: 1024 ** 3,
+      freeBytes: 1024 ** 3, usedBytes: 1024 ** 3, appUsedBytes: 128 * 1024 ** 2,
+      lowMemory: false, pressureLevel: 'normal' as const, thresholdBytes: 0 };
+  }
+  const decoderAudioMessages: LlmChatMessage[] = [{ role: 'user', content: 'Transcribe this', contentParts: [
+    { type: 'input_audio', input_audio: { format: 'wav', url: 'file:///document/audio.wav' } },
+  ] }];
+  const decoderReadiness = { modelId: 'test/model', status: 'ready' as const, projectorId: downloadedProjector.id,
+    support: ['audio' as const], requestedSupport: ['audio' as const], checkedAt: 1 };
+
+  it.each(['completion', 'count'] as const)('preserves admitted audio through real engine %s formatting', async operation => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedAudioModel());
+    getMultimodalSupportMock().mockResolvedValue({ vision: false, audio: true });
+    await llmEngineService.load('test/model');
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue(audioDecodeMemory());
+    getFormattedChatMock().mockClear(); getTokenizeMock().mockClear();
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    completion.mockClear();
+    const request = { messages: decoderAudioMessages, multimodalReadiness: decoderReadiness };
+    if (operation === 'completion') await llmEngineService.chatCompletion(request);
+    else await llmEngineService.countPromptTokens(request);
+    expect(getFormattedChatMock().mock.calls.at(-1)?.[0]).toEqual([{ role: 'user', content: [
+      { type: 'text', text: 'Transcribe this' }, decoderAudioMessages[0].contentParts![0],
+    ] }]);
+    if (operation === 'completion') expect(completion).toHaveBeenCalledTimes(1);
+    else { expect(completion).not.toHaveBeenCalled(); expect(getTokenizeMock()).toHaveBeenCalled(); }
+  });
+
+  it.each([
+    ['completion', 'unknown'], ['count', 'unknown'], ['completion', 'insufficient'], ['count', 'insufficient'],
+    ['completion', 'oversized'], ['count', 'oversized'],
+  ] as const)('rejects %s decoder admission (%s) before native formatting without a text-only fallback', async (operation, failure) => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedAudioModel());
+    getMultimodalSupportMock().mockResolvedValue({ vision: false, audio: true });
+    await llmEngineService.load('test/model');
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue(failure === 'unknown' ? null : {
+      ...audioDecodeMemory(), freeBytes: failure === 'insufficient' ? AUDIO_DECODER_RESERVE_PER_INPUT - 1 : 1024 ** 3,
+    });
+    if (failure === 'oversized') (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: MAX_CHAT_AUDIO_ATTACHMENT_BYTES + 1 });
+    getFormattedChatMock().mockClear(); getTokenizeMock().mockClear();
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    completion.mockClear();
+    const request = { messages: decoderAudioMessages, multimodalReadiness: decoderReadiness };
+    await expect(operation === 'completion' ? llmEngineService.chatCompletion(request) : llmEngineService.countPromptTokens(request))
+      .rejects.toMatchObject({ code: failure === 'oversized' ? 'audio_decoder_size_limit' : 'model_memory_insufficient' });
+    expect(getFormattedChatMock()).not.toHaveBeenCalled(); expect(getTokenizeMock()).not.toHaveBeenCalled();
+    expect(completion).not.toHaveBeenCalled();
+    expect(decoderAudioMessages[0].contentParts).toHaveLength(1);
   });
 
   it('rejects requests with more than the supported image attachment limit before native completion', async () => {

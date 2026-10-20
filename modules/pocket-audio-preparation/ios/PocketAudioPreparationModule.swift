@@ -2,7 +2,7 @@ import ExpoModulesCore
 import AVFoundation
 import CryptoKit
 
-private enum AudioPreparationFailure: Error { case invalid, limit, busy, cleanup }
+private enum AudioPreparationFailure: Error { case invalid, limit, size, duration, admission, busy, cleanup }
 
 public final class PocketAudioPreparationModule: Module {
   private let worker = DispatchQueue(label: "com.github.tah10n.pocketaudio.prepare", qos: .userInitiated)
@@ -24,7 +24,15 @@ public final class PocketAudioPreparationModule: Module {
         catch {
           self.lock.lock(); let failedCleanup = self.cleanupFailed; self.lock.unlock()
           if failedCleanup { promise.reject("ERR_AUDIO_CLEANUP", "cleanup_failed") }
-          else { promise.reject("ERR_AUDIO_PREPARATION", "invalid_or_oversized_audio") }
+          else if let failure = error as? AudioPreparationFailure {
+            switch failure {
+            case .size: promise.reject("ERR_AUDIO_SIZE_LIMIT", "audio_input_rejected")
+            case .duration: promise.reject("ERR_AUDIO_DURATION_LIMIT", "audio_input_rejected")
+            case .invalid: promise.reject("ERR_AUDIO_INVALID_FORMAT", "audio_input_rejected")
+            case .admission: promise.reject("ERR_AUDIO_PREPARATION_NATIVE_ADMISSION", "preparation_failed")
+            default: promise.reject("ERR_AUDIO_PREPARATION", "preparation_failed")
+            }
+          } else { promise.reject("ERR_AUDIO_PREPARATION", "preparation_failed") }
         }
       }
     }
@@ -61,7 +69,7 @@ public final class PocketAudioPreparationModule: Module {
     var count = 0
     while let chunk = try input.read(upToCount: 65536), !chunk.isEmpty {
       count += chunk.count
-      guard count <= 4 * 1024 * 1024 else { throw AudioPreparationFailure.limit }
+      guard count <= 4 * 1024 * 1024 else { throw AudioPreparationFailure.size }
       hash.update(data: chunk)
     }
     return hash.finalize().map { String(format: "%02x", $0) }.joined()
@@ -104,8 +112,8 @@ public final class PocketAudioPreparationModule: Module {
       }
       try input.seek(toOffset: start + UInt64(length + (length & 1)))
     }
-    guard try input.offset() == UInt64(bytes), rate > 0, alignment > 0, let length = dataBytes, length > 0, length % alignment == 0,
-      length / alignment <= rate * seconds else { throw AudioPreparationFailure.limit }
+    guard try input.offset() == UInt64(bytes), rate > 0, alignment > 0, let length = dataBytes, length > 0, length % alignment == 0 else { throw AudioPreparationFailure.invalid }
+    guard length / alignment <= rate * seconds else { throw AudioPreparationFailure.duration }
     return (rate, channels)
   }
 
@@ -114,10 +122,11 @@ public final class PocketAudioPreparationModule: Module {
       throw AudioPreparationFailure.limit
     }
     let source = try managed(uri)
-    guard PAPMemoryAdmission.availableBytes() >= 64 * 1024 * 1024 else { throw AudioPreparationFailure.limit }
+    guard PAPMemoryAdmission.availableBytes() >= 64 * 1024 * 1024 else { throw AudioPreparationFailure.admission }
     let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
     guard attributes[.type] as? FileAttributeType == .typeRegular,
-      let bytes = attributes[.size] as? NSNumber, bytes.intValue > 0, bytes.intValue <= maxBytes else { throw AudioPreparationFailure.limit }
+      let bytes = attributes[.size] as? NSNumber, bytes.intValue > 0 else { throw AudioPreparationFailure.invalid }
+    guard bytes.intValue <= maxBytes else { throw AudioPreparationFailure.size }
     let sourceHash = try digest(source)
     let sniff = try FileHandle(forReadingFrom: source)
     let prefix = try sniff.read(upToCount: 12) ?? Data()
@@ -137,7 +146,8 @@ public final class PocketAudioPreparationModule: Module {
     let channels = Int(format.channelCount)
     let sourceRate = Int(format.sampleRate)
     guard channels >= 1 && channels <= 2, (8000...192000).contains(sourceRate), format.sampleRate == Double(sourceRate),
-      audio.length > 0 && audio.length <= Int64(sourceRate * seconds) else { throw AudioPreparationFailure.limit }
+      audio.length > 0 else { throw AudioPreparationFailure.invalid }
+    guard audio.length <= Int64(sourceRate * seconds) else { throw AudioPreparationFailure.duration }
     // On WAV, require a real PCM source, never accept renamed AAC/MP3 as a WAV container.
     if wave {
       guard audio.fileFormat.commonFormat == .pcmFormatInt16 || audio.fileFormat.commonFormat == .pcmFormatFloat32 else {
@@ -174,7 +184,7 @@ public final class PocketAudioPreparationModule: Module {
       guard let channelData = buffer.floatChannelData else { throw AudioPreparationFailure.invalid }
       for index in 0..<Int(buffer.frameLength) {
         decoded += 1
-        guard decoded <= sourceRate * seconds else { throw AudioPreparationFailure.limit }
+        guard decoded <= sourceRate * seconds else { throw AudioPreparationFailure.duration }
         var mono = 0.0
         for channel in 0..<channels {
           let value = channelData[channel][index]
@@ -187,7 +197,7 @@ public final class PocketAudioPreparationModule: Module {
           sum += mono * weight; filled += weight; remaining -= weight
           if filled >= step - 1e-9 {
             samples += 1
-            guard samples <= rate * seconds else { throw AudioPreparationFailure.limit }
+            guard samples <= rate * seconds else { throw AudioPreparationFailure.duration }
             let normalized = sum / step
             let integer = Int16(max(-32768, min(32767, Int((normalized * (normalized < 0 ? 32768 : 32767)).rounded()))))
             let unsigned = UInt16(bitPattern: integer)

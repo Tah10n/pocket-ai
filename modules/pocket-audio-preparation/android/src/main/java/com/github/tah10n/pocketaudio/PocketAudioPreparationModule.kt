@@ -37,8 +37,11 @@ class PocketAudioPreparationModule : Module() {
             phase = "native_delivery"
             promise.resolve(result)
           }
-          catch (_: Exception) {
+          catch (error: Exception) {
             if (cleanupFailed.get()) promise.reject("ERR_AUDIO_CLEANUP", "cleanup_failed", null)
+            else if (error is AudioInputException) promise.reject(error.failure.nativeCode, "audio_input_rejected", null)
+            else if (error is IllegalArgumentException && phase in listOf("native_sniff", "native_decode"))
+              promise.reject(AudioInputFailure.FORMAT.nativeCode, "audio_input_rejected", null)
             else promise.reject("ERR_AUDIO_PREPARATION_" + phase.uppercase(Locale.ROOT), "preparation_failed", null)
           }
           finally { busy.set(false) }
@@ -70,7 +73,7 @@ class PocketAudioPreparationModule : Module() {
       var total = 0
       while (true) {
         val count = input.read(chunk); if (count < 0) break
-        total += count; require(total <= 4 * 1024 * 1024) { "audio_limit" }
+        total += count; requireAudioInput(total <= 4 * 1024 * 1024, AudioInputFailure.SIZE)
         digest.update(chunk, 0, count)
       }
     }
@@ -79,7 +82,8 @@ class PocketAudioPreparationModule : Module() {
   private fun prepare(uri: String, rate: Int, seconds: Int, maxBytes: Int, phase: (String) -> Unit): Map<String, Any> {
     require(rate in 8000..48000 && seconds in 1..30 && maxBytes in 1..4 * 1024 * 1024)
     val source = managed(uri)
-    require(source.isFile && source.length() in 1..maxBytes.toLong()) { "audio_limit" }
+    requireAudioInput(source.isFile && source.length() > 0, AudioInputFailure.FORMAT)
+    requireAudioInput(source.length() <= maxBytes, AudioInputFailure.SIZE)
     val context = requireNotNull(appContext.reactContext)
     phase("native_admission")
     val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -141,8 +145,8 @@ class PocketAudioPreparationModule : Module() {
         }
         input.seek(start + length + (length and 1L))
       }
-      require(input.filePointer == input.length() && format != 0 && dataOffset >= 0 && dataSize > 0 && dataSize % align == 0L
-        && dataSize / align <= rate.toLong() * seconds)
+      require(input.filePointer == input.length() && format != 0 && dataOffset >= 0 && dataSize > 0 && dataSize % align == 0L)
+      requireAudioInput(dataSize / align <= rate.toLong() * seconds, AudioInputFailure.DURATION)
       input.seek(dataOffset)
       BoundedAudioPcm(output, rate, target, seconds).use { sink ->
         val frameBytes = ByteArray(align)
@@ -177,7 +181,10 @@ class PocketAudioPreparationModule : Module() {
       val rate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
       val channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
       require(rate in 8000..192000 && channels in 1..2)
-      if (format.containsKey(MediaFormat.KEY_DURATION)) require(format.getLong(MediaFormat.KEY_DURATION) in 1..seconds * 1_000_000L)
+      if (format.containsKey(MediaFormat.KEY_DURATION)) {
+        require(format.getLong(MediaFormat.KEY_DURATION) > 0)
+        requireAudioInput(format.getLong(MediaFormat.KEY_DURATION) <= seconds * 1_000_000L, AudioInputFailure.DURATION)
+      }
       format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 65536)
       extractor.selectTrack(selected)
       codec = MediaCodec.createDecoderByType(requireNotNull(format.getString(MediaFormat.KEY_MIME)))
@@ -196,7 +203,8 @@ class PocketAudioPreparationModule : Module() {
             val size = extractor.readSampleData(buffer, 0)
             if (size < 0) { inputDone = true; codec.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM) }
             else {
-              require(size <= 65536 && extractor.sampleTime <= seconds * 1_000_000L)
+              require(size <= 65536)
+              requireAudioInput(extractor.sampleTime <= seconds * 1_000_000L, AudioInputFailure.DURATION)
               codec.queueInputBuffer(index, 0, size, extractor.sampleTime, 0); extractor.advance()
             }
           }

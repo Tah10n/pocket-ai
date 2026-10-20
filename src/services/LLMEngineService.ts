@@ -5,6 +5,7 @@ import type {
   NativeBackendDeviceInfo,
 } from 'llama.rn';
 import DeviceInfo from 'react-native-device-info';
+import { assertAudioDecoderAdmission } from './AudioDecoderAdmission';
 import { fileUriToNativePath } from '../utils/safeFilePath';
 import { Platform } from 'react-native';
 import appPackageJson from '../../package.json';
@@ -4259,6 +4260,10 @@ class LLMEngineService {
           ? { ...this.configuredSpeculativeDecoding }
           : null;
         const completionStartedAtMs = Date.now();
+        await assertAudioDecoderAdmission(requestMessages, () => {
+          this.assertCompletionNotInterrupted(interruptGeneration);
+          this.assertContextStillCurrent(context, contextGeneration);
+        });
         let firstTokenAtMs: number | null = null;
         let didUseSpeculativeCompletionFallback = false;
         try {
@@ -5362,6 +5367,10 @@ class LLMEngineService {
       let strictRoleSystemNormalization: StrictRoleSystemNormalization = 'plain';
       const countTokens = async (promptMessages: LlmChatMessage[]) => {
         this.assertContextStillCurrent(context, contextGeneration);
+        await assertAudioDecoderAdmission(promptMessages, () => {
+          cancellation.throwIfCancelled();
+          this.assertContextStillCurrent(context, contextGeneration);
+        });
         let formatted: LlamaFormattedChatResult;
         try {
           const prepared = await this.preparedRequestCache.prepare({

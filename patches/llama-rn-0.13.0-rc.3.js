@@ -541,7 +541,105 @@ const MTMD_TEXT_PRIVACY_PATCHES = [
       ],
     ] },
 ];
+// Attachment import is byte-preserving. Bound the actual decoder length separately
+// before allocation, including forged MP3 length metadata and nonfinite float WAV.
+const AUDIO_INPUT_BOUNDS_REPLACEMENTS = [
+  ['#include <cinttypes>\n', '#include <cinttypes>\n#include <cmath>\n#include <stdexcept>\n'],
+  [`    ma_result result;
+    const int channels = 1;
+    ma_decoder_config decoder_config = ma_decoder_config_init(ma_format_f32, channels, target_sampler_rate);`,
+  `    static constexpr size_t max_input_bytes = 25 * 1024 * 1024;
+    static constexpr ma_uint64 max_pcm_frames = 8 * 1024 * 1024;
+    if (buf_in == nullptr || len == 0 || target_sampler_rate < 8000 || target_sampler_rate > 192000) {
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    if (len > max_input_bytes) throw std::runtime_error("audio_decoder_size_limit");
+    ma_result result;
+    const int channels = 1;
+    ma_decoder_config decoder_config = ma_decoder_config_init(ma_format_f32, channels, target_sampler_rate);`],
+  [`    result = ma_decoder_init_memory(buf_in, len, &decoder_config, &decoder);
+    if (result != MA_SUCCESS) {
+        return false;
+    }`,
+  `    result = ma_decoder_init_memory(buf_in, len, &decoder_config, &decoder);
+    if (result != MA_SUCCESS) {
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }`],
+  [`    ma_uint64 frame_count;
+    ma_uint64 frames_read;
+    result = ma_decoder_get_length_in_pcm_frames(&decoder, &frame_count);
+    if (result != MA_SUCCESS) {
+        ma_decoder_uninit(&decoder);
+        return false;
+    }
+
+    pcmf32_mono.resize(frame_count);
+    result = ma_decoder_read_pcm_frames(&decoder, pcmf32_mono.data(), frame_count, &frames_read);
+    if (result != MA_SUCCESS) {
+        ma_decoder_uninit(&decoder);
+        return false;
+    }`,
+  `    struct decoder_guard {
+        ma_decoder * value;
+        ~decoder_guard() { ma_decoder_uninit(value); }
+    } guard{&decoder};
+    ma_uint64 frame_count = 0;
+    ma_uint64 frames_read = 0;
+    result = ma_decoder_get_length_in_pcm_frames(&decoder, &frame_count);
+    if (result != MA_SUCCESS || frame_count == 0) {
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    // One vector is copied into the mtmd bitmap: at most 2 * 32 MiB of PCM.
+    // The JS admission additionally reserves encoded copies and preprocessing workspace.
+    if (frame_count > max_pcm_frames) throw std::runtime_error("audio_decoder_duration_limit");
+    pcmf32_mono.resize(static_cast<size_t>(frame_count));
+    result = ma_decoder_read_pcm_frames(&decoder, pcmf32_mono.data(), frame_count, &frames_read);
+    if (result != MA_SUCCESS || frames_read != frame_count) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    float extra_sample = 0;
+    ma_uint64 extra_frames = 0;
+    result = ma_decoder_read_pcm_frames(&decoder, &extra_sample, 1, &extra_frames);
+    if (extra_frames != 0 || (result != MA_SUCCESS && result != MA_AT_END)) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    for (float sample : pcmf32_mono) {
+        if (!std::isfinite(sample)) {
+            pcmf32_mono.clear();
+            throw std::runtime_error("audio_decoder_invalid_format");
+        }
+    }`],
+  [`    ma_decoder_uninit(&decoder);
+    return true;
+}
+
+} // namespace audio_helpers`,
+  `    return true;
+}
+
+} // namespace audio_helpers`],
+  [`    buf.resize(file_size);
+
+    size_t n_read = fread(buf.data(), 1, file_size, f);`,
+  `    if (file_size > 25 * 1024 * 1024) {
+        unsigned char header[12] = {};
+        const size_t header_read = fread(header, 1, sizeof(header), f);
+        fseek(f, 0, SEEK_SET);
+        if (audio_helpers::is_audio_file(reinterpret_cast<const char *>(header), header_read)) {
+            fclose(f);
+            throw std::runtime_error("audio_decoder_size_limit");
+        }
+    }
+    buf.resize(file_size);
+
+    size_t n_read = fread(buf.data(), 1, file_size, f);`],
+];
 const SOURCE_PATCHES = [
+  { source: 'cpp/tools/mtmd/mtmd-helper.cpp',
+    beforeSha256: '323d595dfb719edb53c8720105f2da18abc76dade2dc3e7f38ecdf94200886d2',
+    afterSha256: 'c9a29e969cbba13599e169f99b7c5a340008e11a963030f6004d67d4efac934d', replacements: AUDIO_INPUT_BOUNDS_REPLACEMENTS },
   { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256,
     replacements: [[BEFORE, AFTER], ...SPEAKER_RECEIPT_REPLACEMENTS],
     intermediates: [{ sha256: SPEAKER_RECEIPT_PREVIOUS_SHA256, replacements: SPEAKER_RECEIPT_REPLACEMENTS }] },

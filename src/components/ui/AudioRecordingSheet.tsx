@@ -10,7 +10,7 @@ import { ScreenCard, ScreenIconButton, ScreenModalOverlay, ScreenSheet } from '.
 import { MaterialSymbols } from './MaterialSymbols';
 import { audioRecordingService, type RecordedAudio } from '../../services/AudioRecordingService';
 import { audioSamplePreviewService } from '../../services/AudioSamplePreviewService';
-import { prepareManagedAudio, discardPreparedAudio, type PreparedAudio, type AudioPurpose } from '../../services/AudioPreparationService';
+import { audioPreparationErrorDisplayCode, prepareManagedAudio, discardPreparedAudio, type PreparedAudio, type AudioPurpose } from '../../services/AudioPreparationService';
 
 export interface AudioRecordingSheetProps {
   ownerKey: string;
@@ -101,7 +101,8 @@ export function AudioRecordingSheet({ ownerKey, purpose, isCurrent, onAttach, on
     const work = Promise.resolve().then(() => action(captured));
     activeWork.current = work;
     void work.catch(failure => {
-      const code = failure && typeof failure === 'object' && 'code' in failure ? String(failure.code) : 'recording_failed';
+      const code = audioPreparationErrorDisplayCode(failure)
+        ?? (failure && typeof failure === 'object' && 'code' in failure ? String(failure.code) : 'recording_failed');
       if (['cleanup_failed', 'release_failed', 'storage_failed'].includes(code)) {
         cleanupFailed.current = true;
         cleanupFailure.current?.();

@@ -3,7 +3,7 @@ import { AppState } from 'react-native';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { AudioRecordingSheet } from '../../src/components/ui/AudioRecordingSheet';
 import { audioRecordingService, type AudioRecordingState, type RecordedAudio } from '../../src/services/AudioRecordingService';
-import { prepareManagedAudio, discardPreparedAudio, type PreparedAudio } from '../../src/services/AudioPreparationService';
+import { AudioPreparationError, prepareManagedAudio, discardPreparedAudio, type PreparedAudio } from '../../src/services/AudioPreparationService';
 import { audioSamplePreviewService } from '../../src/services/AudioSamplePreviewService';
 import en from '../../src/i18n/locales/en.json';
 import ru from '../../src/i18n/locales/ru.json';
@@ -23,7 +23,10 @@ jest.mock('../../src/services/AudioRecordingService', () => ({ audioRecordingSer
   subscribe: (listener: () => void) => { mockListeners.add(listener); return () => mockListeners.delete(listener); },
   start: jest.fn(), stop: jest.fn(), cancelAndClear: jest.fn(), onBackground: jest.fn(),
 } }));
-jest.mock('../../src/services/AudioPreparationService', () => ({ prepareManagedAudio: jest.fn(), discardPreparedAudio: jest.fn() }));
+jest.mock('../../src/services/AudioPreparationService', () => ({
+  ...jest.requireActual('../../src/services/AudioPreparationService'),
+  prepareManagedAudio: jest.fn(), discardPreparedAudio: jest.fn(),
+}));
 let mockPreviewState = { phase: 'stopped', position: 0, duration: 0 };
 const mockPreviewListeners = new Set<() => void>();
 jest.mock('../../src/services/AudioSamplePreviewService', () => ({ audioSamplePreviewService: {
@@ -335,3 +338,14 @@ it('localizes every recorder phase and native failure in both languages', () => 
     }
   }
 });
+
+
+it.each([['source_size', 'audio_size_limit'], ['duration_limit', 'audio_duration_limit']] as const)(
+  'shows a distinct %s preparation failure', async (reason, key) => {
+    const view = render(<AudioRecordingSheet {...props()} />);
+    await primeRecorder(view, 'ready', source);
+    jest.mocked(prepareManagedAudio).mockRejectedValueOnce(new AudioPreparationError('audio_limit', reason));
+    fireEvent.press(view.getByTestId('audio-record-preview'));
+    await waitFor(() => expect(view.getByTestId('audio-recording-error').props.children).toBe('audioRecording.errors.' + key));
+    view.unmount();
+  });

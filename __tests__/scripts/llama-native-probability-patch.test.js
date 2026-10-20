@@ -37,6 +37,44 @@ describe('pinned serial sampling and template clock corrections', () => {
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it('bounds actual input decoder allocations and rejects truncated/nonfinite PCM before bitmap publication', () => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn/cpp/tools/mtmd/mtmd-helper.cpp'), 'utf8');
+    const decode = source.slice(source.indexOf('static bool decode_audio_from_buf('), source.indexOf('} // namespace audio_helpers'));
+    const inputLimit = Number(decode.match(/max_input_bytes = (\d+) \* 1024 \* 1024/u)[1]) * 1024 * 1024;
+    const frameLimit = Number(decode.match(/max_pcm_frames = (\d+) \* 1024 \* 1024/u)[1]) * 1024 * 1024;
+    // Execute the real C++ numeric guard expressions, whose syntax is also JavaScript.
+    const inputGuard = decode.match(/if \((len > max_input_bytes)\)/u)[1];
+    const frameGuard = decode.match(/if \((frame_count > max_pcm_frames)\)/u)[1];
+    for (const [bytes, rejected] of [[25 * 1024 * 1024, false], [25 * 1024 * 1024 + 1, true]]) {
+      expect(vm.runInNewContext(inputGuard, { len: bytes, max_input_bytes: inputLimit })).toBe(rejected);
+    }
+    for (const [frames, rejected] of [[140 * 16000, false], [40 * 16000, false],
+      [8 * 1024 * 1024, false], [8 * 1024 * 1024 + 1, true], [0xffffffff, true]]) {
+      expect(vm.runInNewContext(frameGuard, { frame_count: frames, max_pcm_frames: frameLimit })).toBe(rejected);
+    }
+    expect(decode.indexOf('len > max_input_bytes')).toBeLessThan(decode.indexOf('ma_decoder_init_memory('));
+    expect(decode.indexOf('frame_count > max_pcm_frames')).toBeLessThan(decode.indexOf('pcmf32_mono.resize('));
+    expect(decode).toContain('result != MA_SUCCESS || frame_count == 0');
+    expect(decode).toContain('result != MA_SUCCESS || frames_read != frame_count');
+    expect(decode).toContain('extra_frames != 0 || (result != MA_SUCCESS && result != MA_AT_END)');
+    expect(decode).toContain('!std::isfinite(sample)');
+    expect(decode).toContain('~decoder_guard() { ma_decoder_uninit(value); }');
+    expect(decode).toContain('audio_decoder_duration_limit');
+    const file = source.slice(source.indexOf('mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_file('));
+    expect(file.indexOf('audio_helpers::is_audio_file(')).toBeLessThan(file.indexOf('buf.resize(file_size)'));
+    expect(file).toContain('fclose(f);\n            throw std::runtime_error("audio_decoder_size_limit")');
+  });
+
+  it.each(['pristine', 'applied'])('rejects unknown %s input decoder source before writing guarded files', state => {
+    if (state === 'applied') patchLlamaBridge(root);
+    const file = path.join(root, 'node_modules/llama.rn/cpp/tools/mtmd/mtmd-helper.cpp');
+    fs.appendFileSync(file, '\n// unknown audio decoder drift\n');
+    const jsiBefore = fs.readFileSync(sourcePath, 'utf8');
+    expect(() => patchLlamaBridge(root)).toThrow(/source fingerprint mismatch/u);
+    expect(fs.readFileSync(sourcePath, 'utf8')).toBe(jsiBefore);
+  });
+
   it('removes actual multimodal text-log arguments while retaining event and media-count metadata', () => {
     const paths = ['cpp/tools/mtmd/mtmd.cpp', 'cpp/rn-mtmd.hpp'];
     const originals = new Map(paths.map(relative => [relative, fs.readFileSync(path.join(root, 'node_modules/llama.rn', relative), 'utf8')]));

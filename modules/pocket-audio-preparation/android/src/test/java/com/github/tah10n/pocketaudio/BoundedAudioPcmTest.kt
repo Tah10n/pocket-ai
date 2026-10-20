@@ -34,4 +34,20 @@ class BoundedAudioPcmTest {
       }
     } finally { assertTrue(file.delete()) }
   }
+  @Test fun preservesThirtySecondMicrophoneAndEightSecondReferenceLimits() {
+    val file = File.createTempFile("audio-profiles-", ".wav")
+    try {
+      for (seconds in listOf(30, 8)) {
+        BoundedAudioPcm(file, 8000, 8000, seconds).use { sink ->
+          repeat(8000 * seconds) { sink.frame(floatArrayOf(0f)) }
+          assertEquals(8000 * seconds, sink.samples)
+          try { sink.frame(floatArrayOf(0f)); fail("profile overflow accepted") }
+          catch (error: AudioInputException) { assertEquals(AudioInputFailure.DURATION, error.failure) }
+        }
+      }
+      try { BoundedAudioPcm(file, 8000, 8000, 31).close(); fail("native duration cap relaxed") }
+      catch (_: IllegalArgumentException) { }
+    } finally { assertTrue(file.delete()) }
+  }
+
 }

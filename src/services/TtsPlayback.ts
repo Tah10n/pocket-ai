@@ -1,6 +1,7 @@
 import type { AudioPlayer, AudioStatus } from 'expo-audio';
 import type { File } from 'expo-file-system';
-import { TTS_LIMITS, TtsError, type TtsErrorCode } from '../types/tts';
+import { TTS_LIMITS, boundedTtsLatencyMs, TtsError, type TtsErrorCode } from '../types/tts';
+import { ttsNow } from '../utils/ttsLatency';
 import { acquireAudioSession, type AudioSessionLease } from './AudioSessionCoordinator';
 
 export interface TtsPlaybackState {
@@ -8,6 +9,7 @@ export interface TtsPlaybackState {
   readonly position: number;
   readonly duration: number;
   readonly errorCode?: TtsErrorCode;
+  readonly playToPlayingMs?: number;
 }
 
 type OwnedPlayer = {
@@ -313,6 +315,7 @@ export class TtsPlaybackController {
   }
 
   private start(replay: boolean): Promise<void> {
+    const playStartedAt = ttsNow();
     const generation = this.invalidate();
     // Seek status callbacks retain the old playing bit on both platforms. Pause
     // first so Replay cannot be mistaken for an unexpected native resume.
@@ -336,13 +339,16 @@ export class TtsPlaybackController {
         owned.paused = false;
         owned.observedPlaying = false;
         owned.requestId = generation;
-        this.publish({ ...this.state, phase: 'starting', errorCode: undefined });
+        this.publish({ ...this.state, phase: 'starting', errorCode: undefined, playToPlayingMs: undefined });
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => pending.finish(new TtsError('playback_start_timeout')), TTS_PLAYBACK_START_TIMEOUT_MS);
           const pending = { owned, generation, accepted: false, finish: (error?: TtsError) => {
             if (this.pendingStart !== pending) return;
             this.pendingStart = null;
             clearTimeout(timer);
+            if (!error && pending.accepted && owned.observedPlaying && this.current(generation) && this.desiredPlaying) {
+              this.publish({ ...this.state, playToPlayingMs: boundedTtsLatencyMs(ttsNow() - playStartedAt) });
+            }
             if (error) reject(error); else resolve();
           } };
           this.pendingStart = pending;

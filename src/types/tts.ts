@@ -97,7 +97,7 @@ export function isTtsFailureStage(value: unknown): value is TtsFailureStage {
   return typeof value === 'string' && TTS_FAILURE_STAGES.includes(value as TtsFailureStage);
 }
 export type TtsOperation = 'vocoder_init' | 'speaker_create' | 'speaker_bake' | 'speaker_release'
-  | 'phonemizer' | 'formatter' | 'completion' | 'completion_stop' | 'decode' | 'vocoder_release';
+  | 'phonemizer' | 'phonemizer_module_init' | 'phonemizer_conversion' | 'prompt_prepare' | 'formatter' | 'completion' | 'completion_stop' | 'decode' | 'vocoder_release';
 export interface TtsObservation {
   operation: TtsOperation | 'first_failure';
   phase: 'started' | 'settled' | 'failed';
@@ -113,4 +113,49 @@ export interface TtsObservation {
   speakerRows?: number;
   speakerBaked?: boolean;
   elapsedMs?: number;
+  nativePrefillMs?: number;
+  nativeGenerationMs?: number;
+}
+
+/** Bounded process-local diagnostics. Stages may nest (formatter includes phonemizer).
+ * First/repeat describes requests in this process, never a warm native context or OS cache. */
+export const TTS_LATENCY_STAGES = [
+  'file_validation', 'release_chat', 'backbone_init', 'vocoder_init', 'phonemizer',
+  'phonemizer_module_init', 'phonemizer_conversion', 'speaker_create', 'speaker_bake',
+  'formatter', 'prompt_prepare', 'completion', 'completion_stop', 'decode', 'speaker_release',
+  'vocoder_release', 'context_release', 'restore_chat', 'wav_player_prepare',
+] as const;
+export type TtsLatencyStage = typeof TTS_LATENCY_STAGES[number];
+export interface TtsLatency {
+  readonly runKind: 'first_in_process' | 'repeat_in_process';
+  readonly stagesMs: Readonly<Partial<Record<TtsLatencyStage, number>>>;
+  readonly nativePrefillMs?: number;
+  readonly nativeGenerationMs?: number;
+  readonly audioDurationMs?: number;
+  readonly playToPlayingMs?: number;
+  /** Automatic playback only: excludes a user's deliberate wait before manual Play. */
+  readonly actionToFirstPlaybackMs?: number;
+}
+export function boundedTtsLatencyMs(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 600_000
+    ? Math.round(value) : undefined;
+}
+export function sanitizeTtsLatency(value: unknown): TtsLatency | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const source = value as Record<string, unknown>;
+  if (source.runKind !== 'first_in_process' && source.runKind !== 'repeat_in_process') return undefined;
+  const stages = source.stagesMs;
+  if (!stages || typeof stages !== 'object') return undefined;
+  const stagesMs: Partial<Record<TtsLatencyStage, number>> = {};
+  for (const stage of TTS_LATENCY_STAGES) {
+    const duration = boundedTtsLatencyMs((stages as Record<string, unknown>)[stage]);
+    if (duration !== undefined) stagesMs[stage] = duration;
+  }
+  const numeric: Partial<Record<'nativePrefillMs' | 'nativeGenerationMs' | 'audioDurationMs'
+    | 'playToPlayingMs' | 'actionToFirstPlaybackMs', number>> = {};
+  for (const key of ['nativePrefillMs', 'nativeGenerationMs', 'audioDurationMs', 'playToPlayingMs', 'actionToFirstPlaybackMs'] as const) {
+    const duration = boundedTtsLatencyMs(source[key]);
+    if (duration !== undefined && (key !== 'audioDurationMs' || duration <= TTS_LIMITS.durationSeconds * 1000)) numeric[key] = duration;
+  }
+  return Object.freeze({ runKind: source.runKind, stagesMs: Object.freeze(stagesMs), ...numeric });
 }

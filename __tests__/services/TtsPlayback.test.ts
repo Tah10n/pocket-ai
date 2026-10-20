@@ -146,7 +146,7 @@ describe('TtsPlaybackController', () => {
     expect(mockWrite).toHaveBeenCalledTimes(1);
     expect(mockCreateAudioPlayer).toHaveBeenCalledTimes(1);
     for (const [state] of observe.mock.calls) {
-      expect(Object.keys(state).every(key => ['phase', 'position', 'duration', 'errorCode'].includes(key))).toBe(true);
+      expect(Object.keys(state).every(key => ['phase', 'position', 'duration', 'errorCode', 'playToPlayingMs'].includes(key))).toBe(true);
       expect(JSON.stringify(state)).not.toContain('private-cache');
     }
     await controller.stop();

@@ -341,8 +341,10 @@ it('ignores stale native completion callbacks after cancellation and a fresh gen
   await service.start({ text: 'Hello again.', language: 'en', playAfterSynthesis: false });
   const current = { tokensPredicted: 12, tokensEvaluated: 200, elapsedMs: 10 };
   expect(service.getState().nativeCompletion).toEqual(current);
+  const latency = service.getState().latency;
   oldCompletion.observe?.({ operation: 'completion', phase: 'settled', tokensPredicted: 999, tokensEvaluated: 999 });
   expect(service.getState().nativeCompletion).toEqual(current);
+  expect(service.getState().latency).toEqual(latency);
 });
 
 function chooseReference() {
@@ -1077,9 +1079,12 @@ describe('service + real playback controller initial admission', () => {
     native.emit({ playing: false, playbackRequestId: 0 });
     native.emit({ playing: false });
     expect(service.getState().phase).toBe('starting');
+    expect(service.getState().latency?.playToPlayingMs).toBeUndefined();
+    expect(service.getState().latency?.actionToFirstPlaybackMs).toBeUndefined();
     jest.advanceTimersByTime(250);
     native.emit({ playing: true }); await start;
     expect(service.getState().phase).toBe('playing');
+    expect(service.getState().latency).toMatchObject({ playToPlayingMs: 250, actionToFirstPlaybackMs: 250 });
     expect(jest.getTimerCount()).toBe(0);
   });
 
@@ -1094,6 +1099,8 @@ describe('service + real playback controller initial admission', () => {
     expect(service.getState().phase).toBe('starting');
     next.emit({ playing: true }); await retry;
     expect(service.getState()).toMatchObject({ phase: 'playing', errorCode: undefined });
+    expect(service.getState().latency?.playToPlayingMs).toBeDefined();
+    expect(service.getState().latency?.actionToFirstPlaybackMs).toBeUndefined();
     expect(synthesize).toHaveBeenCalledTimes(1); expect(mockClipWrite).toHaveBeenCalledTimes(1);
     expect(mockClipFiles.size).toBe(1);
   });
@@ -1155,6 +1162,8 @@ describe('service + real playback controller initial admission', () => {
     jest.advanceTimersByTime(3_000);
     await rejected;
     expect(service.getState()).toMatchObject({ phase: 'error', errorCode: 'playback_start_timeout', clipAvailable: true });
+    expect(service.getState().latency?.playToPlayingMs).toBeUndefined();
+    expect(service.getState().latency?.actionToFirstPlaybackMs).toBeUndefined();
     expect(mockClipFiles.size).toBe(1);
   });
 });
@@ -1209,4 +1218,33 @@ it('contains request observer exceptions while preserving normal synthesis and A
   expect(observe).toHaveBeenCalled();
   expect(releaseContext).toHaveBeenCalledTimes(1);
   expect(restoreA).toHaveBeenCalledTimes(1);
+});
+
+
+it('separates validation, native prefill and generation from restore and manual playback waiting', async () => {
+  choose();
+  let now = 0;
+  jest.spyOn(performance, 'now').mockImplementation(() => now);
+  engine.runWithAuxiliarySequence.mockImplementationOnce(async (request, operation) => {
+    request.observeTiming?.('detach', 'started'); now += 11;
+    request.observeTiming?.('detach', 'settled');
+    const result = await normalSequence(request, operation);
+    request.observeTiming?.('restore', 'started'); now += 700;
+    request.observeTiming?.('restore', 'settled');
+    return result;
+  });
+  jest.mocked(validateAuxiliaryFile).mockImplementationOnce(async () => { now += 31; return '/models/safe'; });
+  synthesize.mockImplementationOnce(async (_context, _profile, options) => {
+    options.observe?.({ operation: 'completion', phase: 'started' }); now += 123;
+    options.observe?.({ operation: 'completion', phase: 'settled', nativePrefillMs: 20, nativeGenerationMs: 90 });
+    return pcm();
+  });
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().latency).toMatchObject({ nativePrefillMs: 20, nativeGenerationMs: 90,
+    stagesMs: { release_chat: 11, file_validation: 31, completion: 123, restore_chat: 700 } });
+  expect(service.getState().latency?.actionToFirstPlaybackMs).toBeUndefined();
+  now += 9000;
+  await service.start({ text: 'Hello.', language: 'en', playAfterSynthesis: false });
+  expect(service.getState().latency?.runKind).toBe('repeat_in_process');
+  expect(service.getState().latency?.nativeGenerationMs).toBeUndefined();
 });

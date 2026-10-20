@@ -498,3 +498,18 @@ it('reports restore as the first failure only when the native operation and cont
   expect(events).toContain('release:b');
   expect(observeFailure.mock.calls).toEqual([['restore']]);
 });
+
+
+it('times the real detach, initialization, release and exact restore boundaries without affecting ownership', async () => {
+  const boundaries: string[] = [];
+  const observeTiming = jest.fn((stage: string, state: string) => {
+    boundaries.push(`${stage}:${state}`);
+    if (state === 'started') throw new Error('diagnostic observer failure');
+  });
+  await expect(llmEngineService.runWithAuxiliarySequence({ isCurrent: () => true, observeTiming },
+    sequence => sequence.withContext(phase('b'), async () => 7))).resolves.toBe(7);
+  expect(boundaries).toEqual(['detach:started', 'detach:settled', 'backbone_init:started', 'backbone_init:settled',
+    'context_release:started', 'context_release:settled', 'restore:started', 'restore:settled']);
+  expect(events).toEqual(['release-media:a', 'release:a', 'init:b', 'release:b', 'restore:a']);
+  expect(service.activeLoraAdapters).toEqual(adapters);
+});

@@ -16,7 +16,7 @@ import { isAndroidQaGenerationEvidenceEnabled } from '../../services/AndroidQaGe
 import { subscribeSettings } from '../../services/SettingsStore';
 import { registry } from '../../services/LocalStorageRegistry';
 import { prepareSpeechText, type PreparedSpeechText } from '../../utils/ttsText';
-import { TTS_LIMITS, TtsError, sanitizeTtsNativeCompletion, type TtsErrorCode } from '../../types/tts';
+import { TTS_LIMITS, TtsError, sanitizeTtsLatency, sanitizeTtsNativeCompletion, type TtsErrorCode } from '../../types/tts';
 import { AudioRecordingSheet } from './AudioRecordingSheet';
 import { referenceVoiceStore, type TemporaryReferenceSource } from '../../services/ReferenceVoiceStore';
 import { prepareManagedAudio, discardPreparedAudio, waitForAudioPreparationDrain, audioPreparationErrorDisplayCode, type PreparedAudio } from '../../services/AudioPreparationService';
@@ -42,6 +42,7 @@ export function getTtsQaPlaybackMarker(state: TtsServiceState): string {
     && value >= 0 && value <= 64 * 1024 ** 3 ? value : undefined;
   const admission = state.memoryAdmission;
   const nativeCompletion = sanitizeTtsNativeCompletion(state.nativeCompletion);
+  const latency = sanitizeTtsLatency(state.latency);
   const normalization = state.pcmNormalization;
   const pcmNormalization = normalization && typeof normalization.sourcePeakAbs === 'number'
     && Number.isFinite(normalization.sourcePeakAbs) && normalization.sourcePeakAbs >= 0
@@ -73,6 +74,7 @@ export function getTtsQaPlaybackMarker(state: TtsServiceState): string {
     } } : {}),
     ...(pcmNormalization ? { pcmNormalization } : {}),
     ...(nativeCompletion ? { nativeCompletion } : {}),
+    ...(latency ? { latency } : {}),
     errorCode: state.errorCode ?? null,
   });
 }

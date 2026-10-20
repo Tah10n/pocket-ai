@@ -173,3 +173,20 @@ it('sanitizes only closed reasons and consistent bounded integer timings', () =>
   expect(sanitizePhonemizerFailure({ ...safe, reason: 'file:///private' })).toBeUndefined();
   expect(new TtsError('native_failed', safe as never).phonemizerFailure).toBeUndefined();
 });
+
+
+it('observes initialization and conversion independently without publishing text or phones', async () => {
+  let now = 0; jest.spyOn(performance, 'now').mockImplementation(() => now);
+  const observe = jest.fn();
+  const evaluation = () => { now += 35; return { ...jest.requireActual('phonemize'),
+    toIPA: () => { now += 12; return 'safe phones'; } }; };
+  await withLazyPhonemizer(evaluation, async isolated => {
+    await isolated.phonemizeSpeech('Hello.', 'en-us', () => undefined, observe);
+  });
+  expect(observe.mock.calls.map(([event]) => event)).toEqual([
+    { operation: 'phonemizer_module_init', phase: 'started' },
+    { operation: 'phonemizer_module_init', phase: 'settled', elapsedMs: 35 },
+    { operation: 'phonemizer_conversion', phase: 'started' },
+    { operation: 'phonemizer_conversion', phase: 'settled', elapsedMs: 12 },
+  ]);
+});

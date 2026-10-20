@@ -1,5 +1,5 @@
 import type { CompletionParams, LlamaContext, LlamaSpeaker, SpeakerPayload } from 'llama.rn';
-import { TTS_LIMITS, TtsError, TtsCleanupError, type TtsFlow, type TtsObservation, type TtsOperation, type TtsFailureStage, type TtsPhase, type TtsVoiceSelection } from '../types/tts';
+import { TTS_LIMITS, boundedTtsLatencyMs, TtsError, TtsCleanupError, type TtsFlow, type TtsObservation, type TtsOperation, type TtsFailureStage, type TtsPhase, type TtsVoiceSelection } from '../types/tts';
 import type { TtsExecutionProfile } from './TtsExecutionProfiles';
 import { requireLlamaModule } from './llamaRnModule';
 import { getCompletionPromptTokenCount } from './LlamaPromptTokenCount';
@@ -78,10 +78,10 @@ export async function synthesizeTtsOnContext(
     observe({ operation: 'first_failure', phase: 'failed', failureStage: stage });
   };
   const observed = async <T>(operation: TtsOperation, call: () => Promise<T>): Promise<T> => {
-    failureStage = operation;
+    failureStage = operation === 'phonemizer_module_init' || operation === 'phonemizer_conversion' ? 'phonemizer' : operation;
     observe({ operation, phase: 'started' });
     try { return await call(); }
-    catch (error) { observeFailure(operation); throw error; }
+    catch (error) { observeFailure(failureStage); throw error; }
     finally { observe({ operation, phase: 'settled' }); }
   };
   check();
@@ -120,7 +120,7 @@ export async function synthesizeTtsOnContext(
     const phonemizer = profile.phonemizerLanguage ? async (text: string, language: string) => {
       const started = Date.now();
       observe({ operation: 'phonemizer', phase: 'started' });
-      try { return await phonemizeSpeech(text, language, check); }
+      try { return await phonemizeSpeech(text, language, check, observe); }
       catch (error) { observeFailure('phonemizer'); throw error; }
       finally { observe({ operation: 'phonemizer', phase: 'settled', elapsedMs: Math.max(0, Date.now() - started) }); }
     } : undefined;
@@ -216,7 +216,7 @@ export async function synthesizeTtsOnContext(
     // Qwen's prefix is owned by native; tokenizing the empty returned prompt is meaningless.
     // Bound payload text and reserve the fixed role/speaker prefix without manufacturing one.
     failureStage = 'prompt_prepare';
-    const tokenized = await context.tokenize(flow === 'talker_embd' ? options.text : formatted.prompt);
+    const tokenized = await observed('prompt_prepare', () => context.tokenize(flow === 'talker_embd' ? options.text : formatted.prompt));
     check();
     const promptTokens = getCompletionPromptTokenCount(context, tokenized);
     if (promptTokens > (profile.maxPromptTokens ?? TTS_LIMITS.promptTokens)
@@ -246,6 +246,8 @@ export async function synthesizeTtsOnContext(
       observe({ operation: 'completion', phase: 'settled', flow,
         elementCount: flow === 'continuous_embd' ? result.embeddings?.length : result.audio_tokens?.length,
         tokensPredicted: result.tokens_predicted, tokensEvaluated: result.tokens_evaluated,
+        nativePrefillMs: boundedTtsLatencyMs(result.timings?.prompt_ms),
+        nativeGenerationMs: boundedTtsLatencyMs(result.timings?.predicted_ms),
         interrupted: result.interrupted, stoppedEos: result.stopped_eos });
     } catch (error) { observeFailure('completion'); observe({ operation: 'completion', phase: 'settled', flow }); throw error; }
     finally { completionActive = false; await stopping; }

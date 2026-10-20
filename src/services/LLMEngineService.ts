@@ -405,6 +405,9 @@ export interface AuxiliaryContextRequest {
 
 export type AuxiliaryFailureStage = 'detach' | 'before_init' | 'backbone_init' | 'native_callback' | 'context_release' | 'restore';
 export interface AuxiliarySequenceRequest {
+  /** Closed timing boundaries only; observers cannot affect the context transaction. */
+  readonly observeTiming?: (stage: 'detach' | 'backbone_init' | 'context_release' | 'restore',
+    phase: 'started' | 'settled') => void;
   /** Nonthrowing observation only; no error object or change to native ownership. */
   readonly observeFailure?: (stage: AuxiliaryFailureStage) => void;
   readonly runOwner?: symbol;
@@ -3918,6 +3921,9 @@ class LLMEngineService {
       failureObserved = true;
       try { request.observeFailure?.(stage); } catch { /* Diagnostics cannot change the transaction. */ }
     };
+    const observeTiming = (stage: 'detach' | 'backbone_init' | 'context_release' | 'restore', phase: 'started' | 'settled') => {
+      try { request.observeTiming?.(stage, phase); } catch { /* Diagnostics cannot change ownership. */ }
+    };
     // Notify auto-load observers before detaching A. No native handles are published.
     this.updateState(this.state);
     try {
@@ -3994,11 +4000,14 @@ class LLMEngineService {
               this.assertNoOrphanedContextReleasePending();
               initStarted = true;
               failureStage = 'backbone_init';
-              auxiliaryContext = await this.awaitModelInitWithProgressWatchdog(
-                progress => initLlamaContext({ ...phase.initParams, n_parallel: 1,
-                  state_cache_budget_mb: DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
-                  state_cache_max_checkpoints: PROMPT_STATE_CACHE_MAX_CHECKPOINTS }, progress), () => undefined,
-              );
+              observeTiming('backbone_init', 'started');
+              try {
+                auxiliaryContext = await this.awaitModelInitWithProgressWatchdog(
+                  progress => initLlamaContext({ ...phase.initParams, n_parallel: 1,
+                    state_cache_budget_mb: DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+                    state_cache_max_checkpoints: PROMPT_STATE_CACHE_MAX_CHECKPOINTS }, progress), () => undefined,
+                );
+              } finally { observeTiming('backbone_init', 'settled'); }
               assertPhaseCurrent();
               // rc.3 exposes no generic cancel for embedding/rerank. Await the
               // actual callback, retaining native ownership throughout its drain.
@@ -4029,8 +4038,13 @@ class LLMEngineService {
               throw error;
             } finally {
               try {
-                if (auxiliaryContext) await this.releaseNativeContextsConfirmed(auxiliaryContext);
-                else if (initStarted && !this.orphanedContextReleaseError) await this.releaseNativeContextsConfirmed();
+                if (auxiliaryContext || (initStarted && !this.orphanedContextReleaseError)) {
+                  observeTiming('context_release', 'started');
+                  try {
+                    if (auxiliaryContext) await this.releaseNativeContextsConfirmed(auxiliaryContext);
+                    else await this.releaseNativeContextsConfirmed();
+                  } finally { observeTiming('context_release', 'settled'); }
+                }
               } catch (cleanupError) {
                 observeFailure('context_release');
                 if (phaseOperationFailed) throw new AuxiliaryContextCleanupError(phaseOperationError, cleanupError);
@@ -4050,7 +4064,11 @@ class LLMEngineService {
           // new user generation can start between this check and the detach.
           if (this.hasActiveCompletion()) throw new AppError('engine_busy', 'A response is being generated.');
           if (toolOwner) toolOwner.handoffActive = true;
-          if (this.context) await this.unloadInternal({ preservePromptPreparation: true });
+          if (this.context) {
+            observeTiming('detach', 'started');
+            try { await this.unloadInternal({ preservePromptPreparation: true }); }
+            finally { observeTiming('detach', 'settled'); }
+          }
           assertCurrent();
           sequenceFailureStage = 'native_callback';
           result = await operation({ withContext });
@@ -4065,6 +4083,7 @@ class LLMEngineService {
           }
         }
         if (previousModelId && selectionCurrent() && !this.orphanedContextReleaseError) {
+          observeTiming('restore', 'started');
           try {
             const currentModel = registry.getModel(previousModelId);
             if ((currentModel ? getCompanionBindingIdentity(currentModel) : null) !== previousBinding) {
@@ -4102,7 +4121,7 @@ class LLMEngineService {
             this.auxiliaryRestoreError = 'The auxiliary check ended, but the previous chat model could not be restored.';
             this.updateState({ ...this.state, status: EngineStatus.ERROR, lastError: this.auxiliaryRestoreError });
             throw new AppError('model_load_failed', this.auxiliaryRestoreError);
-          }
+          } finally { observeTiming('restore', 'settled'); }
         }
         if (restorationReceipt && isCurrent()) request.onRestored?.(restorationReceipt);
         // Stop must not replace an unconfirmed native teardown failure with cancellation.

@@ -555,3 +555,14 @@ it('allows a throwing diagnostic observer without changing successful synthesis 
   })).resolves.toMatchObject({ samples: [0.25, -0.5, 0.75], sampleRate: tokensProfile.sampleRate });
   expect(native.releaseVocoder).toHaveBeenCalledTimes(1);
 });
+
+
+it('reports actual native prefill and generation counters separately from formatter/completion wall time', async () => {
+  const { native, context } = nativeContext();
+  const observe = jest.fn();
+  native.completion.mockResolvedValue(completed({ timings: { ...completed().timings, prompt_ms: 21.2, predicted_ms: 88.7 } }));
+  await synthesizeTtsOnContext(context, tokensProfile, { ...options(), observe });
+  expect(observe.mock.calls.map(([event]) => event)).toContainEqual(expect.objectContaining({
+    operation: 'completion', phase: 'settled', nativePrefillMs: 21, nativeGenerationMs: 89,
+  }));
+});

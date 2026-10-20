@@ -1,4 +1,5 @@
-import { TTS_LIMITS, TtsError, type PhonemizerFailureReason } from '../types/tts';
+import { ttsNow } from '../utils/ttsLatency';
+import { TTS_LIMITS, boundedTtsLatencyMs, TtsError, type TtsObservation, type PhonemizerFailureReason } from '../types/tts';
 
 export const LOCAL_PHONEMIZER_IDENTITY = 'phonemize/2.0.1:en-us:ipa:preserve-stress-punctuation:v1';
 const MAX_PHONE_CHARACTERS = 4096;
@@ -6,7 +7,7 @@ export const LOCAL_PHONEMIZER_MODULE_INIT_DEADLINE_MS = 2000;
 export const LOCAL_PHONEMIZER_DEADLINE_MS = 1000;
 
 /** English-only entry: packaged dictionaries/rules, no network or native installation. */
-export async function phonemizeSpeech(text: string, language: string, assertCurrent: () => void): Promise<string> {
+export async function phonemizeSpeech(text: string, language: string, assertCurrent: () => void, observe?: (event: TtsObservation) => void): Promise<string> {
   assertCurrent();
   if (language !== 'en-us') throw new TtsError('language_unsupported');
   if (!text.trim() || text.length > TTS_LIMITS.textCharacters) throw new TtsError('input_too_large');
@@ -20,7 +21,15 @@ export async function phonemizeSpeech(text: string, language: string, assertCurr
   let moduleInitMs: number;
   const failed = (reason: PhonemizerFailureReason, elapsedMs = Date.now() - started) =>
     new TtsError('phonemizer_failed', { reason, elapsedMs, moduleInitMs });
+  let operationStartedAt = ttsNow();
+  const emit = (operation: 'phonemizer_module_init' | 'phonemizer_conversion', phase: 'started' | 'settled') => {
+    if (phase === 'started') operationStartedAt = ttsNow();
+    try {
+      observe?.({ operation, phase, ...(phase === 'settled' ? { elapsedMs: boundedTtsLatencyMs(ttsNow() - operationStartedAt) } : {}) });
+    } catch { /* Diagnostics cannot alter conversion. */ }
+  };
   let local: typeof import('phonemize');
+  emit('phonemizer_module_init', 'started');
   try {
     // Lazy English entry keeps dictionary work outside ordinary chat startup.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -29,18 +38,20 @@ export async function phonemizeSpeech(text: string, language: string, assertCurr
     moduleInitMs = Date.now() - started;
     assertCurrent();
     throw failed('module_init', moduleInitMs);
-  }
+  } finally { emit('phonemizer_module_init', 'settled'); }
   moduleInitMs = Date.now() - started;
   assertCurrent();
   // Cold bundled dictionary evaluation has its own finite admission budget. Do
   // not begin conversion after an over-budget or cancelled module initialization.
   if (moduleInitMs > LOCAL_PHONEMIZER_MODULE_INIT_DEADLINE_MS) throw failed('deadline', moduleInitMs);
   let output: string;
+  emit('phonemizer_conversion', 'started');
   try {
     output = local.toIPA(text, { language: 'en-us', anyAscii: false });
     if (typeof output === 'string') output = output.replace(/\s+/gu, ' ').trim();
   }
   catch { assertCurrent(); throw failed('conversion'); }
+  finally { emit('phonemizer_conversion', 'settled'); }
   assertCurrent();
   // A synchronous G2P cannot be forcibly interrupted in Hermes. Reject late output only
   // after the actual call settles; never treat a timer as completion or a resource drain.

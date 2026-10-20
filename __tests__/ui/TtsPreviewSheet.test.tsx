@@ -825,3 +825,14 @@ it('exposes the checked builtin radio state to assistive technology', async () =
   await waitFor(() => expect(view.getByTestId('tts-builtin-jo').props.accessibilityState.checked).toBe(true));
   expect(view.getByTestId('tts-builtin-dave').props.accessibilityState.checked).toBe(false);
 });
+
+
+it('exports only the closed bounded latency receipt without private stage labels or payloads', () => {
+  const latency = { runKind: 'repeat_in_process' as const, stagesMs: { completion: 123, decode: 20, '/private': 3 },
+    nativePrefillMs: 12, nativeGenerationMs: 100, actionToFirstPlaybackMs: 500, playToPlayingMs: 25,
+    audioDurationMs: 1000, text: 'private', pcm: [1] };
+  const marker = getTtsQaPlaybackMarker({ phase: 'playing', latency });
+  expect(JSON.parse(marker).latency).toEqual({ runKind: 'repeat_in_process', stagesMs: { completion: 123, decode: 20 },
+    nativePrefillMs: 12, nativeGenerationMs: 100, actionToFirstPlaybackMs: 500, playToPlayingMs: 25, audioDurationMs: 1000 });
+  expect(marker).not.toMatch(/private|pcm|text/);
+});

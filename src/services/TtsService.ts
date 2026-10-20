@@ -11,7 +11,7 @@ import { normalizeSha256Digest } from '../utils/sha256';
 import { encodeDecodedMonoPcmWav, TtsWavError, type TtsPcmNormalization } from '../utils/ttsWav';
 import { prepareSpeechText, TtsTextError } from '../utils/ttsText';
 import { TTS_LIMITS, TtsError, isTtsFailureStage, sanitizeTtsNativeCompletion, type TtsNativeCompletion,
-  type TtsFailureStage, type TtsErrorCode, type TtsPhase, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
+  type TtsLatency, type TtsFailureStage, type TtsErrorCode, type TtsPhase, type TtsObservation, type TtsVoiceSelection } from '../types/tts';
 import { getAuxiliarySelection, validateAuxiliaryFile } from './AuxiliaryModelService';
 import { registry } from './LocalStorageRegistry';
 import { getSettings, subscribeSettings } from './SettingsStore';
@@ -31,6 +31,9 @@ import { TtsPlaybackController, cleanupColdTtsClips } from './TtsPlayback';
 import { referenceVoiceStore, type ReferenceVoiceLease } from './ReferenceVoiceStore';
 import { prepareManagedAudio, readPreparedReferencePcm, discardPreparedAudio, AudioPreparationError, type PreparedAudio } from './AudioPreparationService';
 import { LOCAL_PHONEMIZER_IDENTITY } from './TtsPhonemizer';
+import { TtsLatencyMeasurement } from '../utils/ttsLatency';
+
+let hasStartedTtsInProcess = false;
 
 export interface TtsRequest {
   /** Exact text already shown in the preview. No chat protocol or hidden channels. */
@@ -78,6 +81,7 @@ export interface TtsServiceState {
   pcmNormalization?: TtsPcmNormalization;
   /** Existing native completion counters and measured started-to-settled wall time. */
   nativeCompletion?: TtsNativeCompletion;
+  latency?: TtsLatency;
   /** True only while the service owns a validated clip; cleanup errors still block reuse. */
   clipAvailable?: boolean;
 }
@@ -175,6 +179,7 @@ export class TtsService {
   private generation = 0;
   private executionIdentity: string | null = null;
   private playbackGeneration: number | null = null;
+  private latency: { measurement: TtsLatencyMeasurement; generation: number; automatic: boolean } | null = null;
   private readonly playback = new TtsPlaybackController();
 
   constructor() {
@@ -183,8 +188,13 @@ export class TtsService {
         && ['storage_failed', 'release_failed', 'restore_failed'].includes(this.state.errorCode ?? ''))) return;
       const next = this.playback.getState();
       const errorCode = next.errorCode;
+      const latency = this.latency;
+      if (latency?.generation === this.generation && next.phase === 'playing' && next.playToPlayingMs !== undefined
+        && this.playbackGeneration === this.generation && !this.controller?.signal.aborted) {
+        latency.measurement.confirmPlayback(next.playToPlayingMs, latency.automatic);
+      }
       this.publish({ ...this.state, phase: next.phase, position: next.position, duration: next.duration,
-        errorCode });
+        errorCode, ...(latency?.generation === this.generation ? { latency: latency.measurement.snapshot() } : {}) });
     });
   }
   getState = (): TtsServiceState => this.state;
@@ -215,7 +225,8 @@ export class TtsService {
   }
 
   private async performFileCheck(controller: AbortController, generation: number): Promise<void> {
-    this.publish({ ...this.state, pcmNormalization: undefined, nativeCompletion: undefined });
+    this.latency = null;
+    this.publish({ ...this.state, pcmNormalization: undefined, nativeCompletion: undefined, latency: undefined });
     try {
       this.unsubscribe();
       await this.playback.clear();
@@ -239,7 +250,10 @@ export class TtsService {
     const controller = new AbortController();
     this.controller = controller;
     const generation = ++this.generation;
-    const work = Promise.resolve().then(() => this.perform(request, controller, generation));
+    const measurement = new TtsLatencyMeasurement(hasStartedTtsInProcess ? 'repeat_in_process' : 'first_in_process');
+    hasStartedTtsInProcess = true;
+    this.latency = { measurement, generation, automatic: request.playAfterSynthesis !== false };
+    const work = Promise.resolve().then(() => this.perform(request, controller, generation, measurement));
     this.drain = work;
     void work.finally(() => {
       if (this.drain === work) { this.drain = null; this.controller = null; }
@@ -247,9 +261,9 @@ export class TtsService {
     return work;
   }
 
-  private async perform(request: TtsRequest, controller: AbortController, generation: number): Promise<void> {
+  private async perform(request: TtsRequest, controller: AbortController, generation: number, measurement: TtsLatencyMeasurement): Promise<void> {
     this.unsubscribe();
-    this.publish({ ...this.state, pcmNormalization: undefined, nativeCompletion: undefined });
+    this.publish({ ...this.state, pcmNormalization: undefined, nativeCompletion: undefined, latency: measurement.snapshot() });
     this.executionIdentity = null;
     this.playbackGeneration = null;
     let clipInstalled = false;
@@ -257,7 +271,18 @@ export class TtsService {
     let failureObserved = false;
     let completionStartedAt: number | undefined;
     let completionSettled = false;
+    const timingCurrent = () => generation === this.generation && this.controller === controller && !controller.signal.aborted;
+    const observeTiming = (stage: string, phase: 'started' | 'settled' | 'failed') => {
+      if (!timingCurrent()) return;
+      measurement.observe(stage, phase);
+      this.publish({ ...this.state, latency: measurement.snapshot() });
+    };
     const observe = (event: TtsObservation) => {
+      observeTiming(event.operation, event.phase);
+      if (event.operation === 'completion' && event.phase === 'settled' && timingCurrent()) {
+        measurement.set('nativePrefillMs', event.nativePrefillMs);
+        measurement.set('nativeGenerationMs', event.nativeGenerationMs);
+      }
       if (event.operation === 'first_failure') {
         if (failureObserved || event.phase !== 'failed' || !isTtsFailureStage(event.failureStage)) return;
         failureObserved = true;
@@ -387,7 +412,7 @@ export class TtsService {
         preparedReference = undefined;
         check();
       }
-      this.publish({ phase: 'checking', profileId: binding.profile.id,
+      this.publish({ phase: 'checking', profileId: binding.profile.id, latency: measurement.snapshot(),
         requiredBytes: estimateTtsPeakBytes(binding.profile), memoryConfidence: 'low' });
       const callbackDrains = new Set<Promise<unknown>>();
       let result: TtsPcmResult;
@@ -398,6 +423,7 @@ export class TtsService {
           return await llmEngineService.runWithAuxiliarySequence({ signal: controller.signal,
             isCurrent: publicationCurrent,
             isSelectionCurrent: selectionCurrent,
+            observeTiming: (stage, phase) => observeTiming(stage === 'detach' ? 'release_chat' : stage === 'restore' ? 'restore_chat' : stage, phase),
             observeFailure: stage => {
               switch (stage) {
                 case 'detach': observeFailure('tts_detach'); break;
@@ -414,7 +440,9 @@ export class TtsService {
             initParams: getTtsInitParameters(binding.profile, binding.backbonePath),
             beforeInit: async () => {
               check();
-              await validateTtsFiles(binding);
+              observeTiming('file_validation', 'started');
+              try { await validateTtsFiles(binding); }
+              finally { observeTiming('file_validation', 'settled'); }
               check();
               const memory = await getSystemMemorySnapshot();
               check();
@@ -465,6 +493,7 @@ export class TtsService {
       });
       check(); // runWithAuxiliarySequence has confirmed codec/context cleanup and exact A restore.
       failureStage = 'wav_encode';
+      observeTiming('wav_player_prepare', 'started');
       const encoded = encodeDecodedMonoPcmWav(result.samples, result.sampleRate, {
         maxSamples: TTS_LIMITS.pcmSamples, maxDurationSeconds: TTS_LIMITS.durationSeconds, maxBytes: TTS_LIMITS.wavBytes,
       });
@@ -473,10 +502,12 @@ export class TtsService {
       check();
       failureStage = 'tts_setup';
       await this.playback.setClip(encoded.wav, metadata, publicationCurrent);
+      observeTiming('wav_player_prepare', 'settled');
+      measurement.set('audioDurationMs', metadata.sampleCount / metadata.sampleRate * 1000);
       check();
       clipInstalled = true;
       this.playbackGeneration = generation;
-      this.publish({ ...this.state, phase: 'ready', clipAvailable: true, sampleRate: metadata.sampleRate,
+      this.publish({ ...this.state, latency: measurement.snapshot(), phase: 'ready', clipAvailable: true, sampleRate: metadata.sampleRate,
         sampleCount: metadata.sampleCount, pcmNormalization: encoded.pcmNormalization,
         position: 0, duration: metadata.sampleCount / metadata.sampleRate });
       if (request.playAfterSynthesis !== false) {
@@ -580,9 +611,9 @@ export class TtsService {
       throw new TtsError(this.state.errorCode);
     }
   }
-  async play(): Promise<void> { this.assertPlaybackAllowed(); await this.playback.play(); }
+  async play(): Promise<void> { this.assertPlaybackAllowed(); if (this.latency) this.latency.automatic = false; await this.playback.play(); }
   async pause(): Promise<void> { if (this.controlDrain) throw new TtsError('busy'); await this.playback.pause(); }
-  async replay(): Promise<void> { this.assertPlaybackAllowed(); await this.playback.replay(); }
+  async replay(): Promise<void> { this.assertPlaybackAllowed(); if (this.latency) this.latency.automatic = false; await this.playback.replay(); }
 }
 
 export const ttsService = new TtsService();

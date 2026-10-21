@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
-import { Image, Linking } from 'react-native';
+import { Image, Linking, StyleSheet, View } from 'react-native';
 import { MarkdownRenderer } from '../../src/components/ui/MarkdownRenderer';
 
 jest.mock('react-native-css-interop', () => {
@@ -101,5 +101,38 @@ describe('MarkdownRenderer', () => {
     fireEvent.press(screen.getByText('safe linked image'));
     expect(openUrl).toHaveBeenCalledTimes(1);
     expect(openUrl).toHaveBeenCalledWith('https://example.com');
+  });
+
+  it.each([
+    ['bullet', '- Orange\n- Seven', ['Orange', 'Seven'], 2],
+    ['ordered', '1. Orange\n2. Seven', ['Orange', 'Seven'], 2],
+    ['nested', '- Orange\n  1. Seven\n  2. Nested detail', ['Orange', 'Seven', 'Nested detail'], 3],
+  ] as const)('keeps %s list content intrinsic and shrinkable inside a content-sized chat bubble', (_kind, content, labels, expectedRows) => {
+    const screen = render(<MarkdownRenderer content={content} selectable />);
+    // Inspect the real parser/rules output, including merged library defaults.
+    // A growing zero-basis list child measures as zero inside an auto-width bubble.
+    const contentViews = screen.UNSAFE_getAllByType(View).filter(node => {
+      const style = StyleSheet.flatten(node.props.style);
+      return style?.flex !== undefined;
+    });
+    expect(contentViews).toHaveLength(expectedRows);
+    for (const node of contentViews) {
+      expect(StyleSheet.flatten(node.props.style)).toMatchObject({ flex: 0, flexShrink: 1 });
+    }
+    for (const label of labels) {
+      expect(screen.getByText(label).props.selectable).toBe(true);
+    }
+  });
+
+  it('preserves long list text, fenced code and table content without stretching all paragraphs', () => {
+    const longText = 'A long list item remains readable and wraps within the available chat width. '.repeat(5).trim();
+    const screen = render(<MarkdownRenderer content={`- ${longText}\n\n\`\`\`js\nconst answer = 7;\n\`\`\`\n\n| Color | Number |\n| --- | --- |\n| Orange | Seven |\n\nShort reply.`} selectable />);
+    expect(screen.getByText(longText)).toBeTruthy();
+    expect(screen.getByText('const answer = 7;')).toBeTruthy();
+    expect(screen.getByText('Color')).toBeTruthy();
+    expect(screen.getByText('Number')).toBeTruthy();
+    expect(screen.getByText('Orange')).toBeTruthy();
+    expect(screen.getByText('Seven')).toBeTruthy();
+    expect(screen.getByText('Short reply.')).toBeTruthy();
   });
 });

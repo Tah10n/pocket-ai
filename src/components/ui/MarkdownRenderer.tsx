@@ -120,6 +120,16 @@ export function MarkdownRenderer({ content, selectable = false }: MarkdownRender
         ordered_list: {
           marginVertical: 8,
         },
+        // Preserve intrinsic text width in content-sized chat bubbles. The
+        // library's flex: 1 starts at zero width; shrinking still permits wraps.
+        bullet_list_content: {
+          flex: 0,
+          flexShrink: 1,
+        },
+        ordered_list_content: {
+          flex: 0,
+          flexShrink: 1,
+        },
         list_item: {
           color: colors.text,
         },

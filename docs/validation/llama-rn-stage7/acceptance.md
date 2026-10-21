@@ -1,6 +1,65 @@
 # Stage 7 audio and reference-voice acceptance
 
-## Current follow-up status
+## Current completion follow-up — source 05926ad
+
+**Scoped acceptance and cleanup are complete; report-head CI remains required.** The [completion record](acceptance-completion-20261021.json)
+separates native results on 75eb06b, physical results on 67ad56c, and completed
+UI/CI results on 7099c7c. Current [05926ad](https://github.com/Tah10n/pocket-ai/commit/05926adacc4df63b11357cc058c188d26b1db10d)
+repairs error-text intrinsic width; ARM same-error pixels and all required CI passed.
+Complete source/APK/model/codec/reference identities are retained without relabeling.
+The exact two-file delta preserves all 14 reference-contract files and 47 of 48
+import-scope paths; only error text and its tests change. Markdown, storage, recorder
+and native paths remain unchanged. Historical 14/9/48 comparisons keep their original scopes.
+
+The real offline native eSpeak frontend supports Android and iOS builds. The combined
+application follows [GPL-3.0-or-later requirements](../../../DISTRIBUTION.md), preserving
+original MIT grants and dependency notices: direct Android installation and iOS
+development builds, not App Store distribution. An owned synthetic Neu reference
+replaces removed upstream reference assets. Reference and arbitrary target text use
+the actual frontend; model weights retain separate terms.
+
+On75eb06b, two Neu targets, Qwen R1 eager/R2 lazy/speakerless, saved-voice cold
+restoration and A+LoRA restoration passed native checks. Five fresh offline ASR
+results had WER 0. Ordinary Qwen R2 eager passed SAF selection, consent, automatic
+playback, export and fresh ASR. Matched eager/eager comparison passed a scoped
+reference association check, not human identity, naturalness or general quality.
+Ordinary reference Stop/Close functionally drained and removed the temporary reference.
+Sequential Stop→drain→Delete is closed by scoped historical 5e926cd carry-forward
+and separate 75eb06b checks: nine unchanged critical regions and 14 unchanged paths
+to 7099c7c. Active-work Delete is disabled and unclaimed; neither whole historical
+binary identity nor new 7099 execution is inferred.
+
+Ordinary Neu automatic playback took 61.134/55.327s, both `repeat_in_process`, with
+decode 20.797/19.864s. Ordinary Qwen R2 eager took 158.211s, `first_in_process`.
+Physical Oute on 67ad56c took 53.572s first and 32.079s repeat; decode 27.658/11.215s.
+Native Stop produced no WAV; fresh retry played at 54.340s. Reconnected export of
+that existing retry matched first/repeat bytes and the first fresh ASR; its original
+interrupted export remains failed. These are product timings, not host ASR time,
+OS-cold or warm-model benchmarks. Admission snapshots are not peak memory.
+
+Ordinary A replies completed after Neu and physical Oute. The phone reply failed
+its HELLO-only instruction: functionality passed, answer quality did not. Baseline
+attachments retained bytes/hash/inode identity. The 29.373s recording-cap case passed
+bounds/Attach/Remove without controlled acoustic stimulus. A separate fresh 12.840625s
+physical synthetic recording passed preview, Attach and content: raw WER 1/9,
+numeric-normalized WER 0. Its ordinary physical Send failed the 310MiB audio-decoder admission before native decode and
+persisted an error; its recording bytes remained unchanged afterward. The same saved error is now readable on05926ad; no resend or model-fit failure is claimed.
+The identical WAV completed ordinary7099 emulator Send naturally with the correct orange/7 answer. UI TTFT2,466,092ms under concurrent ARM build is not a performance benchmark. One host receipt-write failure is retained. Explicit7099 cold reopen preserved answer/name/bytes and readable filename pixels. Physical05926ad cold retained the same memory-error pair and all three attachment hashes; no physical inference pass is implied. No memory limit was waived.
+
+Historical WAV/MP3 import outcomes retain 9fc7f4b/2ce8cbc identities and quality
+limitations under scoped source/dependency carry-forward, not a current corpus rerun.
+The same stored Markdown answer rendered readable bullets after 7099 installation/relaunch;
+no regeneration or separate audio cold check is implied. All 34 x86 native libraries
+match 75eb06b bytes; whole APKs differ.
+
+[Exact05926ad CI](https://github.com/Tah10n/pocket-ai/actions/runs/39664476937) passed
+all required checks, including iOS and Android API32–35:308 suites/7,173 tests,
+Jest528.642s and Rust68+3; optional Android QA skipped. Prior7099 success remains
+separate. iOS build/link is not device inference. All28 cleanup targets are absent; retained sources, archives and proofs are audited.
+Owned processes stopped. Report-only CI is pending at this freeze and required
+before handoff. Prior failures persist.
+
+## Historical decoder-repair status — source2ce8cbc
 
 The [follow-up record](acceptance-followup.json) separates each source/APK and verification
 scope. The committed decoder-repair tree passed 303 Jest suites / 7,095 tests,

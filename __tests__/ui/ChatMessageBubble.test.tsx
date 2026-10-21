@@ -881,3 +881,37 @@ it.each([['en', en.common.errors.localToolRoundLimit], ['ru', ru.common.errors.l
     } finally { reactI18nextMock.__resetTranslations(); }
   },
 );
+it.each(['', 'Partial assistant response retained.'])(
+  'keeps a long error intrinsically measurable and shrinkable with body %j', async (content) => {
+    const error = 'Not enough memory is available to process this audio. Close other applications and try again. '.repeat(3).trim();
+    const screen = render(<ChatMessageBubble id="memory-error-layout" isUser={false}
+      content={content} messageState="error" errorCode="memory_insufficient" errorMessage={error} />);
+    const errorNode = screen.getByText(error);
+    expect(errorNode.props.selectable).toBe(true);
+    // Compile the actual rendered classes through Tailwind and NativeWind's native
+    // CSS parser. A text child with a zero basis cannot size its auto-width row.
+    const postcss = require('postcss');
+    const tailwind = require('tailwindcss');
+    const { cssToReactNativeRuntime } = require('react-native-css-interop/css-to-rn');
+    const css = await postcss([tailwind({
+      content: [{ raw: errorNode.props.className, extension: 'html' }],
+      corePlugins: { preflight: false },
+    })]).process('@tailwind utilities;', { from: undefined });
+    const compiled = cssToReactNativeRuntime(css.css) as {
+      rules: Record<string, { n?: { d?: [Record<string, unknown>][] }[] }>;
+    };
+    const nativeStyle: Record<string, unknown> = {};
+    for (const rule of Object.values(compiled.rules)) {
+      for (const normal of rule.n ?? []) {
+        for (const [declaration] of normal.d ?? []) Object.assign(nativeStyle, declaration);
+      }
+    }
+    expect(nativeStyle.flexGrow ?? 0).toBe(0);
+    expect(nativeStyle.flexBasis ?? 'auto').toBe('auto');
+    expect(nativeStyle.flexShrink).toBe(1);
+    expect(nativeStyle.minWidth).toBe(0);
+    expect(screen.getByTestId('assistant-message-state-error-memory-error-layout')).toBeTruthy();
+    if (content) expect(screen.getByTestId('markdown-renderer').props.children).toBe(content);
+    else expect(screen.queryByTestId('assistant-message-content-memory-error-layout')).toBeNull();
+  },
+);

@@ -1118,6 +1118,20 @@ describe('android-smoke APK reuse decisions', () => {
 });
 
 describe('android-smoke target ABI contract', () => {
+  it.each(['x86_64', 'arm64-v8a'])('starts the actual build-only CLI with target ABI %s before help exits', (abi) => {
+    const result = require('child_process').spawnSync(process.execPath, [
+      path.resolve(__dirname, '../../scripts/android-smoke.js'),
+      '--build-only', '--apk-variant', 'release', '--target-abi', abi,
+      '--isolated-qa-install', '--help',
+    ], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('Usage: node ./scripts/android-smoke.js');
+    expect(result.stderr).toBe('');
+  });
+
   const reactNativeLibrary = (abi) => `lib/${abi}/libreactnative.so`;
   const rnLlamaLibrary = (abi) => `lib/${abi}/librnllama.so`;
   const rnLlamaJniLibrary = (abi) => `lib/${abi}/librnllama_jni.so`;

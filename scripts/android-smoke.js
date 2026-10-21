@@ -34,6 +34,11 @@ const {
 const { isCompletePngBuffer } = require("./png-validation");
 const { normalizeAndroidQaInstance, resolveAndroidQaApplicationId } = require("./android-qa-application-id");
 
+const supportedAndroidTargetAbis = Object.freeze([
+  "universal",
+  "arm64-v8a",
+  "x86_64",
+]);
 const cliOptions = require.main === module ? parseCliOptions(process.argv.slice(2)) : {};
 const projectRoot = path.resolve(__dirname, "..");
 const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
@@ -77,11 +82,6 @@ const apkPath = path.join(
   apkVariant,
   `app-${apkVariant}.apk`
 );
-const supportedAndroidTargetAbis = Object.freeze([
-  "universal",
-  "arm64-v8a",
-  "x86_64",
-]);
 const cacheRoot = path.join(projectRoot, "node_modules", ".cache", "pocket-ai-android");
 const buildTargetAbi = parseTargetAbi(
   cliOptions.targetAbi ?? process.env.ANDROID_SMOKE_TARGET_ABI ?? "universal"

@@ -7,6 +7,10 @@ const LOCALIZED_PHOTO_LIBRARY_USAGE_DESCRIPTIONS = Object.freeze({
   en: 'Pocket AI uses your photo library so you can attach images to local chats.',
   ru: 'Pocket AI использует медиатеку, чтобы вы могли прикреплять изображения к локальным чатам.',
 });
+const LOCALIZED_MICROPHONE_USAGE_DESCRIPTIONS = Object.freeze({
+  en: 'Pocket AI records audio only when you tap Record, for a chat attachment or a voice sample.',
+  ru: 'Pocket AI записывает звук только после нажатия «Записать», для вложения в чат или образца голоса.',
+});
 
 function escapeInfoPlistString(value) {
   return String(value)
@@ -99,6 +103,7 @@ function writeLocalizedPhotoLibraryPermissionFiles({
 
     fs.writeFileSync(infoPlistStringsPath, updateInfoPlistStringsContent(existingContent, {
       [PHOTO_LIBRARY_USAGE_DESCRIPTION_KEY]: description,
+      NSMicrophoneUsageDescription: LOCALIZED_MICROPHONE_USAGE_DESCRIPTIONS[locale] ?? LOCALIZED_MICROPHONE_USAGE_DESCRIPTIONS.en,
     }));
   }
 }

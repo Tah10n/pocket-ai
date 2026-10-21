@@ -5,7 +5,13 @@ const expoConfig = require('eslint-config-expo/flat');
 module.exports = defineConfig([
   expoConfig,
   {
-    ignores: ['node_modules/*', 'dist/*', 'build/*', 'coverage/*', '.expo/*', '**/*.min.js'],
+    ignores: [
+      'node_modules/*', 'dist/*', 'build/*', 'coverage/*', '.expo/*', '**/*.min.js',
+      'modules/pocket-phonemizer/generated/**',
+      'modules/*/android/build/**',
+      'modules/*/android/.cxx/**',
+      'modules/*/android/.gradle/**',
+    ],
   },
   {
     rules: {

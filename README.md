@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/Tah10n/pocket-ai/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/Tah10n/pocket-ai?style=flat-square" alt="License" />
+    <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue?style=flat-square" alt="License" />
   </a>
   <a href="https://github.com/Tah10n/pocket-ai/actions/workflows/ci.yml">
     <img src="https://img.shields.io/github/actions/workflow/status/Tah10n/pocket-ai/ci.yml?style=flat-square&label=CI" alt="CI" />
@@ -304,4 +304,4 @@ assets/      App icons, splash assets, and static images
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+The eSpeak-enabled application is distributed under GPL-3.0-or-later. Original project MIT grants remain in [LICENSE](LICENSE). See [distribution and source requirements](DISTRIBUTION.md) and [GPL text](COPYING.GPL-3.0).

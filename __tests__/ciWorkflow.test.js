@@ -300,3 +300,22 @@ describe('Android catalog QA CI configuration', () => {
     );
   });
 });
+
+
+describe('native release immutable build-before-emulator ordering', () => {
+  it('builds and stamps the isolated x86 artifact before boot, then forbids an implicit rebuild', () => {
+    const workflow = readAppFile('.github', 'workflows', 'ci.yml');
+    const job = extractWorkflowJob(workflow, 'android-native-release');
+    const build = extractWorkflowStep(job, 'Build native release APK before emulator');
+    const scenario = extractWorkflowStep(job, 'Build and run native release pack');
+    expect(build).toContain('npm run android:smoke -- --build-only --apk-variant release --target-abi x86_64 --isolated-qa-install');
+    expect(job.indexOf('name: Build native release APK before emulator')).toBeLessThan(job.indexOf('uses: reactivecircus/android-emulator-runner@v2'));
+    expect(build).toContain('ANDROID_SMOKE_TARGET_ABI: x86_64');
+    expect(build).toContain('EXPO_PUBLIC_ANDROID_QA: "1"');
+    expect(scenario).toContain('EXPO_PUBLIC_ANDROID_QA: "1"');
+    expect(scenario).toContain('ANDROID_SMOKE_REQUIRE_EXISTING_BUILD: "1"');
+    expect(scenario).toContain('--isolated-qa-install');
+    expect(scenario).toContain('--fail-on-skip');
+    expect(scenario).toContain('npm run verify:native-config -- --require-android');
+  });
+});

@@ -20,7 +20,7 @@ describe('Android HMR compatibility plugin', () => {
     const once = applyRegistration(application);
     expect(applyRegistration(once)).toBe(once);
     expect(once.match(/PocketHmrCompatibility.install/g)).toHaveLength(1);
-    expect(once).toContain('if (BuildConfig.DEBUG) PocketHmrCompatibility.install(reactHost)');
+    expect(once).toContain('BuildConfig.DEBUG && BuildConfig.BUILD_TYPE.equals("debug")');
     expect(once.indexOf('loadReactNative(this)')).toBeLessThan(once.indexOf('PocketHmrCompatibility.install'));
     expect(once.indexOf('PocketHmrCompatibility.install')).toBeLessThan(once.indexOf('ApplicationLifecycleDispatcher'));
   });
@@ -35,7 +35,13 @@ describe('Android HMR compatibility plugin', () => {
     expect(require('../../app.json').expo.plugins).toContain('./plugins/withAndroidHmrCompatibility');
   });
 
-  it('normalizes real JVM no-argument proxies, preserves parameterized calls/errors and handles context reload', () => {
+  it('keeps release QA host creation lazy and preserves real JVM proxy calls and context reload', () => {
+    const emittedRegistration = applyRegistration(application).split('\n')
+      .find((line) => line.includes('PocketHmrCompatibility.install(reactHost)'));
+    expect(emittedRegistration).toBeDefined();
+    // The emitted guard is valid Kotlin and Java. Compile it unchanged, lowering
+    // only Kotlin's lazy property access to the instrumented Java getter below.
+    const javaRegistration = `${emittedRegistration.replace(/\breactHost\b/g, 'application.getReactHost()')};`;
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-hmr-jvm-'));
     const files = {
       'example/app/PocketHmrCompatibility.java': createSource('example.app'),
@@ -84,6 +90,36 @@ import java.util.*;
 
 public class HmrRegression {
   static void check(boolean condition) { if (!condition) throw new AssertionError(); }
+  static class BuildConfig {
+    static boolean DEBUG;
+    static String BUILD_TYPE;
+  }
+  static class LazyApplication {
+    int hostEvaluations;
+    boolean devSupportEnabled;
+    ReactHost host;
+    ReactHost getReactHost() {
+      hostEvaluations++;
+      if (host == null) {
+        host = new ReactHost(); host.manager.enabled = devSupportEnabled;
+      }
+      return host;
+    }
+  }
+  static void register(LazyApplication application) {
+    ${javaRegistration}
+  }
+  static void checkRegistration(boolean debuggable, String buildType, int evaluations) {
+    BuildConfig.DEBUG = debuggable; BuildConfig.BUILD_TYPE = buildType;
+    LazyApplication application = new LazyApplication();
+    // Release QA remains debuggable, but native dev support is disabled. Even
+    // an install that returns immediately must not evaluate its lazy argument.
+    application.devSupportEnabled = buildType.equals("debug");
+    register(application);
+    check(application.hostEvaluations == evaluations);
+    check((application.host != null) == (evaluations != 0));
+    if (application.host != null) check(application.host.listener != null);
+  }
   static class Recorder implements InvocationHandler {
     final List<String> methods = new ArrayList<>();
     Object[] lastArgs;
@@ -100,6 +136,10 @@ public class HmrRegression {
       new Class<?>[] {HMRClient.class}, recorder);
   }
   public static void main(String[] ignored) {
+    checkRegistration(true, "release", 0);
+    checkRegistration(true, "debug", 1);
+    checkRegistration(false, "release", 0);
+    checkRegistration(false, "debug", 0);
     Recorder recorder = new Recorder();
     HMRClient original = original(recorder);
     try { original.enable(); throw new AssertionError("must reproduce upstream failure"); }

@@ -1,0 +1,17 @@
+{
+  "platforms": [
+    "apple",
+    "android"
+  ],
+  "apple": {
+    "modules": [
+      "PocketPhonemizerModule"
+    ],
+    "podspecPath": "PocketPhonemizer.podspec"
+  },
+  "android": {
+    "modules": [
+      "com.github.tah10n.pocketphonemizer.PocketPhonemizerModule"
+    ]
+  }
+}

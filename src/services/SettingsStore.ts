@@ -118,6 +118,8 @@ export interface AppSettings extends AdvancedGenerationParameters {
     activePresetId: string | null;
     activeModelId: string | null;
     auxiliaryModels?: AuxiliaryModelBindings;
+    /** Use the preferred installed TTS pair only until an explicit TTS selection or unselect. */
+    autoSelectTtsModel?: boolean;
     chatRetentionDays: number | null;
     modelParamsByModelId: Record<string, GenerationParameters>;
     modelLoadParamsByModelId: Record<string, ModelLoadParameters>;
@@ -157,6 +159,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     activePresetId: null,
     activeModelId: null,
     auxiliaryModels: {},
+    autoSelectTtsModel: true,
     chatRetentionDays: 90,
     modelParamsByModelId: {},
     modelLoadParamsByModelId: {},
@@ -525,6 +528,9 @@ function sanitizeModelLoadParamsByModelId(input: unknown): Record<string, ModelL
 
 function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
     const generationDefaults = sanitizeGenerationParameters(input);
+    const auxiliaryModels = sanitizeAuxiliaryModels(input.auxiliaryModels);
+    const hasTtsBinding = Boolean(input.auxiliaryModels && typeof input.auxiliaryModels === 'object'
+        && Object.prototype.hasOwnProperty.call(input.auxiliaryModels, 'tts'));
 
     return {
         ...sanitizeAdvancedGenerationParameters(generationDefaults),
@@ -547,7 +553,11 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
             : DEFAULT_SETTINGS.showAdvancedInferenceControls,
         activePresetId: typeof input.activePresetId === 'string' ? input.activePresetId : null,
         activeModelId: typeof input.activeModelId === 'string' ? input.activeModelId : null,
-        auxiliaryModels: sanitizeAuxiliaryModels(input.auxiliaryModels),
+        auxiliaryModels,
+        // Dropping a malformed explicit binding must not silently select another TTS model.
+        autoSelectTtsModel: hasTtsBinding && !auxiliaryModels.tts ? false
+            : typeof input.autoSelectTtsModel === 'boolean' ? input.autoSelectTtsModel
+                : hasTtsBinding ? false : DEFAULT_SETTINGS.autoSelectTtsModel,
         chatRetentionDays: normalizeChatRetentionDays(input.chatRetentionDays),
         modelParamsByModelId: sanitizeModelParamsByModelId(input.modelParamsByModelId),
         modelLoadParamsByModelId: sanitizeModelLoadParamsByModelId(input.modelLoadParamsByModelId),
@@ -595,6 +605,7 @@ export function getSettings(): AppSettings {
     const sanitized = sanitizeSettings({
         ...DEFAULT_SETTINGS,
         ...parsed,
+        autoSelectTtsModel: parsed.autoSelectTtsModel,
         reasoningEffort: hasExplicitReasoningEffort ? parsed.reasoningEffort : undefined,
         chatRetentionDays: hasExplicitChatRetention ? parsed.chatRetentionDays : null,
     });
@@ -623,10 +634,11 @@ export function resetSettings() {
 
 export function clearAuxiliaryBindingsForModel(modelId: string): void {
     const auxiliaryModels = { ...getSettings().auxiliaryModels };
+    const clearsExplicitTts = auxiliaryModels.tts?.modelId === modelId;
     for (const role of ['embedding', 'reranker', 'tts'] as const) {
         if (auxiliaryModels[role]?.modelId === modelId) delete auxiliaryModels[role];
     }
-    updateSettings({ auxiliaryModels });
+    updateSettings({ auxiliaryModels, ...(clearsExplicitTts ? { autoSelectTtsModel: false } : {}) });
 }
 
 export function resetSettingsRuntimeForPrivateStorageReset(): AppSettings {

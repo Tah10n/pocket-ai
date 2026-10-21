@@ -6,9 +6,37 @@ const path = require('node:path');
 const VERSION = '0.13.0-rc.3';
 const SOURCE = 'cpp/jsi/RNLlamaJSI.cpp';
 const BEFORE_SHA256 = '2534ba08430259ba417e21483ebcea3cd0e01508cb40689ae7aed284212ea8c1';
-const AFTER_SHA256 = '4f4c6254c3cefecabe19110efd18dd6d70078083a88b29adf1e73ab083a667a1';
+const SPEAKER_RECEIPT_PREVIOUS_SHA256 = '4f4c6254c3cefecabe19110efd18dd6d70078083a88b29adf1e73ab083a667a1';
+const AFTER_SHA256 = '37086c38c42f9f91e2947bd486d845da421d7b848318d9287f52950373065017';
 const BEFORE = '                ctx->completion->rewind();\n';
 const AFTER = `${BEFORE}                ctx->completion->generated_token_probs.clear();\n`;
+const SPEAKER_RECEIPT_REPLACEMENTS = [[
+  `                        auto audio_result = ctx->tts_wrapper->getFormattedAudioCompletion(ctx, speakerJsonStr, textToSpeak, speakerId);
+                        return [audio_result](jsi::Runtime& rt) {`,
+  `                        auto audio_result = ctx->tts_wrapper->getFormattedAudioCompletion(ctx, speakerJsonStr, textToSpeak, speakerId);
+                        // The formatter may lazily bake a registry speaker. Report the actual
+                        // native receipt and reject failed encoding before completion can use
+                        // a null x-vector and silently synthesize without conditioning.
+                        const rnllama::rn_speaker * formatted_speaker = speakerId >= 0
+                            ? ctx->tts_wrapper->getSpeaker(speakerId) : nullptr;
+                        if (speakerId >= 0 && (formatted_speaker == nullptr || !formatted_speaker->baked
+                            || formatted_speaker->rows <= 0)) {
+                            throw std::runtime_error("Reference speaker encoding failed");
+                        }
+                        const int speaker_rows = formatted_speaker ? formatted_speaker->rows : 0;
+                        const bool speaker_baked = formatted_speaker && formatted_speaker->baked;
+                        return [audio_result, speakerId, speaker_rows, speaker_baked](jsi::Runtime& rt) {`,
+], [
+  `                            res.setProperty(rt, "flow", jsi::String::createFromUtf8(rt, audio_result.flow));
+                            return res;`,
+  `                            res.setProperty(rt, "flow", jsi::String::createFromUtf8(rt, audio_result.flow));
+                            if (speakerId >= 0) {
+                                res.setProperty(rt, "speakerId", jsi::Value((double) speakerId));
+                                res.setProperty(rt, "speakerRows", jsi::Value((double) speaker_rows));
+                                res.setProperty(rt, "speakerBaked", speaker_baked);
+                            }
+                            return res;`,
+]];
 const PARAMS_SOURCE = 'cpp/jsi/JSIParams.cpp';
 const PARAMS_BEFORE_SHA256 = '07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475';
 const PARAMS_AFTER_SHA256 = '6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5';
@@ -128,7 +156,7 @@ const CLOCK_PRIVACY_REPLACEMENTS = [
 ];
 const COMPLETION_SOURCE = 'cpp/rn-completion.cpp';
 const COMPLETION_BEFORE_SHA256 = '4563b4a65e98e7022d4ae38014f12acd2241a0911fc2201f5da465679df82087';
-const COMPLETION_AFTER_SHA256 = 'b65be79e6cd665a482e82c4a4b27eb2f067a35907ca485d3aa68435f76625d12';
+const COMPLETION_AFTER_SHA256 = 'ad864b7de08544ea75a9bbd40ad17d1d7735ffac62035a08d5920e9d8c5a968b';
 const COMPLETION_REPLACEMENTS = [
   [
     `    if (ctx_sampling != nullptr) {
@@ -285,7 +313,90 @@ const SAMPLING_PRIVACY_REPLACEMENTS = [
 const TTS_SOURCE = 'cpp/rn-tts.cpp';
 const TTS_BEFORE_SHA256 = '2e02fd6d1acaeac7a7f321baeb6ea99dac4503ba78b70439ee2c9de8effe488c';
 const TTS_PRIVACY_SHA256 = '30c41e9ee214171f20ab11191317954c7f13d3bc3c8508d4f14901d27f05abe0';
-const TTS_AFTER_SHA256 = 'ac3acbe44c5a84b60144f79105cbd6902af0e3548a5f3ac53c4a9e1ce2546ad3';
+const TTS_SPEAKER_PREVIOUS_SHA256 = 'ac3acbe44c5a84b60144f79105cbd6902af0e3548a5f3ac53c4a9e1ce2546ad3';
+const TTS_DAC_MEMORY_PREVIOUS_SHA256 = 'dc55dac2ee2da8d49f4a04c2a82f647b4d0ee9e37e3da271dbf9d90ae8129fdb';
+const TTS_DAC_ONLY_PREVIOUS_SHA256 = '5b2759c889c37641ce41e350f5a4a4d522c7c0f95fc251c4ab751255db1ea164';
+const TTS_NEU_PREVIOUS_SHA256 = 'fd32040a76cbf769242c686fed5493647d1cb85ca0e37b448c7a814709e0ba9c';
+const TTS_NEU_EOS_PREVIOUS_SHA256 = '4bca3e40a29ad8ef073deb927ef7900f20dd1ce27c51f7bb05b880bf6a7fc3f5';
+const TTS_AFTER_SHA256 = '963ddbf2f9970f06d5338b40934aa125d3fdea7cadb7d956d0dc8706869f2446';
+// The model's speech-end token is EOS. Grammar admits EOS only at an empty stack;
+// requiring its spelling as an ordinary literal masks that same EOS indefinitely.
+const TTS_NEU_EOS_REPLACEMENTS = [[`root ::= speechToken+ end
+end ::= "<|SPEECH_GENERATION_END|>"`, `root ::= speechToken+`]];
+// GBNF identifiers use hyphens; multiline alternatives must be nested.
+// This changes syntax only: the codec ID language remains exactly 0..65535.
+const TTS_NEU_GRAMMAR_REPLACEMENTS = [[`speechToken ::= "<|speech_" SPEECH_ID "|>"
+SPEECH_ID ::= [0-9]
+        | [1-9] [0-9]
+        | [1-9] [0-9] [0-9]
+        | [1-9] [0-9] [0-9] [0-9]
+        | [1-5] [0-9] [0-9] [0-9] [0-9]
+        | "6" [0-4] [0-9] [0-9] [0-9]
+        | "65" [0-4] [0-9] [0-9]
+        | "655" [0-2] [0-9]
+        | "6553" [0-5]`, `speechToken ::= "<|speech_" speech-id "|>"
+speech-id ::= ( [0-9]
+        | [1-9] [0-9]
+        | [1-9] [0-9] [0-9]
+        | [1-9] [0-9] [0-9] [0-9]
+        | [1-5] [0-9] [0-9] [0-9] [0-9]
+        | "6" [0-4] [0-9] [0-9] [0-9]
+        | "65" [0-4] [0-9] [0-9]
+        | "655" [0-2] [0-9]
+        | "6553" [0-5] )`]];
+const TTS_DAC_MEMORY_REPLACEMENTS = [
+  [
+    "// Constructor and destructor implementations\n",
+    `// A plain DAC decoder already owns the required model and context.
+// Preserve the optional audio LM path unless actual metadata proves it absent.
+static bool rn_tts_needs_audio_lm(::codec_model *model) {
+    if (model == nullptr || ::codec_model_arch(model) != CODEC_ARCH_DAC) return true;
+    const struct codec_lm_gguf_metadata *meta = codec_model_metadata(model);
+    if (meta == nullptr || meta->items == nullptr || meta->n_items == 0) return true;
+    for (size_t i = 0; i < meta->n_items; ++i) {
+        const char *key = meta->items[i].key;
+        if (key == nullptr || std::strncmp(key, "codec.lm.", 9) == 0) return true;
+    }
+    return false;
+}
+
+// Constructor and destructor implementations
+`
+  ],
+  [
+    `  // Initialize the codec_common audio_lm context alongside the codec.
+  // audio_lm_init re-uses the same GGUF file (just loads it again through
+  // the codec_common abstraction); it will return nullptr without error for
+  // GGUFs that have no codec.lm section — that's fine, those stay on the
+  // direct codec_decode path.
+  {
+      codec_common::audio_lm_params alm_params;`,
+    `  // Avoid loading a second decoder for a metadata-confirmed plain DAC.
+  // Other architectures and uncertain metadata retain their audio LM path.
+  if (rn_tts_needs_audio_lm(codec_model)) {
+      codec_common::audio_lm_params alm_params;`
+  ],
+];
+const TTS_WAVTOKENIZER_MEMORY_REPLACEMENTS = [
+  [
+    '// A plain DAC decoder already owns the required model and context.',
+    '// A plain DAC or WavTokenizer decoder already owns the required model and context.',
+  ],
+  [
+    '    if (model == nullptr || ::codec_model_arch(model) != CODEC_ARCH_DAC) return true;',
+    `    if (model == nullptr) return true;
+    const ::codec_arch arch = ::codec_model_arch(model);
+    if (arch != CODEC_ARCH_DAC && arch != CODEC_ARCH_WAVTOKENIZER_LARGE) return true;`,
+  ],
+  [
+    '  // Avoid loading a second decoder for a metadata-confirmed plain DAC.',
+    '  // Avoid loading a second decoder for a metadata-confirmed plain DAC or WavTokenizer.',
+  ],
+];
+const TTS_SPEAKER_REPLACEMENTS = [[
+  'llama_rn_context_tts::~llama_rn_context_tts() {\n',
+  'llama_rn_context_tts::~llama_rn_context_tts() {\n    // Speaker registry owns conditioning buffers; destroy them while codecs are live.\n    speakers.clear();\n    pending_speaker_id = -1;\n',
+]];
 const TTS_PRIVACY_REPLACEMENTS = [[
   "          LOG_WARNING(\"audio_lm_init failed (non-fatal): %s\",\n                      alm_err.empty() ? \"(no error)\" : alm_err.c_str());",
   "          LOG_WARNING(\"audio_lm_init failed (non-fatal)\");"
@@ -429,11 +540,331 @@ static int codec_decode_n_q_for_profile(const tts_model_profile &profile, ::code
     return rn_tts_take_pcm(codec_model, pcm);`
   ],
 ];
+const MTMD_TEXT_PRIVACY_PATCHES = [
+  { source: 'cpp/tools/mtmd/mtmd.cpp',
+    beforeSha256: '70d790fc2d34e85ea34874d385caf65d07517d9c4bee648e6709feb50bbb9ac9',
+    afterSha256: '39ed20835c38dee50b8e29fe906bdd4faf38565981aa7eaf17fd5271451df3f4',
+    replacements: [
+      [
+        '                            LOG_DBG("%s: lazy callback returned text: %s\\n", __func__, out_str);',
+        '                            LOG_DBG("%s: lazy callback returned text\\n", __func__);',
+      ],
+      [
+        '        LOG_DBG("%s: %s\\n", __func__, txt.c_str());',
+        '        LOG_DBG("%s: added text chunk\\n", __func__);',
+      ],
+    ] },
+  { source: 'cpp/rn-mtmd.hpp',
+    beforeSha256: '3f0512f398a30d10d466b9a4736dedd31758fb2250dcebf164dc07dd99fab4e0',
+    afterSha256: '396f4c1760e9b366ee02cbe961d4f8ab2b5c5f1b6f8525145ecef3ccac2a3450',
+    replacements: [
+      [
+        '    LOG_INFO("[DEBUG] Processing message with role=user, content=%s", full_prompt.c_str());',
+        '    LOG_INFO("[DEBUG] Processing message with role=user");',
+      ],
+      [
+        '    LOG_INFO("[DEBUG] Processing %zu media with prompt: %s", media_paths.size(), prompt.c_str());',
+        '    LOG_INFO("[DEBUG] Processing %zu media", media_paths.size());',
+      ],
+    ] },
+];
+// Attachment import is byte-preserving. Bound the actual decoder length separately
+// before allocation, including forged MP3 length metadata and nonfinite float WAV.
+const AUDIO_INPUT_BOUNDS_REPLACEMENTS = [
+  ['#include <cinttypes>\n', '#include <cinttypes>\n#include <cmath>\n#include <stdexcept>\n'],
+  [`    ma_result result;
+    const int channels = 1;
+    ma_decoder_config decoder_config = ma_decoder_config_init(ma_format_f32, channels, target_sampler_rate);`,
+  `    static constexpr size_t max_input_bytes = 25 * 1024 * 1024;
+    static constexpr ma_uint64 max_pcm_frames = 8 * 1024 * 1024;
+    if (buf_in == nullptr || len == 0 || target_sampler_rate < 8000 || target_sampler_rate > 192000) {
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    if (len > max_input_bytes) throw std::runtime_error("audio_decoder_size_limit");
+    ma_result result;
+    const int channels = 1;
+    ma_decoder_config decoder_config = ma_decoder_config_init(ma_format_f32, channels, target_sampler_rate);`],
+  [`    result = ma_decoder_init_memory(buf_in, len, &decoder_config, &decoder);
+    if (result != MA_SUCCESS) {
+        return false;
+    }`,
+  `    result = ma_decoder_init_memory(buf_in, len, &decoder_config, &decoder);
+    if (result != MA_SUCCESS) {
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }`],
+  [`    ma_uint64 frame_count;
+    ma_uint64 frames_read;
+    result = ma_decoder_get_length_in_pcm_frames(&decoder, &frame_count);
+    if (result != MA_SUCCESS) {
+        ma_decoder_uninit(&decoder);
+        return false;
+    }
+
+    pcmf32_mono.resize(frame_count);
+    result = ma_decoder_read_pcm_frames(&decoder, pcmf32_mono.data(), frame_count, &frames_read);
+    if (result != MA_SUCCESS) {
+        ma_decoder_uninit(&decoder);
+        return false;
+    }`,
+  `    struct decoder_guard {
+        ma_decoder * value;
+        ~decoder_guard() { ma_decoder_uninit(value); }
+    } guard{&decoder};
+    ma_uint64 frame_count = 0;
+    ma_uint64 frames_read = 0;
+    result = ma_decoder_get_length_in_pcm_frames(&decoder, &frame_count);
+    if (result != MA_SUCCESS || frame_count == 0) {
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    // One vector is copied into the mtmd bitmap: at most 2 * 32 MiB of PCM.
+    // The JS admission additionally reserves encoded copies and preprocessing workspace.
+    if (frame_count > max_pcm_frames) throw std::runtime_error("audio_decoder_duration_limit");
+    pcmf32_mono.resize(static_cast<size_t>(frame_count));
+    result = ma_decoder_read_pcm_frames(&decoder, pcmf32_mono.data(), frame_count, &frames_read);
+    if (result != MA_SUCCESS || frames_read != frame_count) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    float extra_sample = 0;
+    ma_uint64 extra_frames = 0;
+    result = ma_decoder_read_pcm_frames(&decoder, &extra_sample, 1, &extra_frames);
+    if (extra_frames != 0 || (result != MA_SUCCESS && result != MA_AT_END)) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    for (float sample : pcmf32_mono) {
+        if (!std::isfinite(sample)) {
+            pcmf32_mono.clear();
+            throw std::runtime_error("audio_decoder_invalid_format");
+        }
+    }`],
+  [`    ma_decoder_uninit(&decoder);
+    return true;
+}
+
+} // namespace audio_helpers`,
+  `    return true;
+}
+
+} // namespace audio_helpers`],
+  [`    buf.resize(file_size);
+
+    size_t n_read = fread(buf.data(), 1, file_size, f);`,
+  `    if (file_size > 25 * 1024 * 1024) {
+        unsigned char header[12] = {};
+        const size_t header_read = fread(header, 1, sizeof(header), f);
+        fseek(f, 0, SEEK_SET);
+        if (audio_helpers::is_audio_file(reinterpret_cast<const char *>(header), header_read)) {
+            fclose(f);
+            throw std::runtime_error("audio_decoder_size_limit");
+        }
+    }
+    buf.resize(file_size);
+
+    size_t n_read = fread(buf.data(), 1, file_size, f);`],
+];
+// Preserve valid resampler rounding without accepting truncated encoded WAV data.
+const AUDIO_INPUT_RESAMPLING_REPLACEMENTS = [
+  [`    if (len > max_input_bytes) throw std::runtime_error("audio_decoder_size_limit");
+    ma_result result;`,
+  `    if (len > max_input_bytes) throw std::runtime_error("audio_decoder_size_limit");
+    // miniaudio may clamp a truncated WAV's backend length. Validate the encoded
+    // RIFF extents before using backend EOF as evidence of complete source data.
+    if (len >= 12 && memcmp(buf_in, "RIFF", 4) == 0 && memcmp(buf_in + 8, "WAVE", 4) == 0) {
+        const auto u16 = [](const unsigned char * p) -> uint32_t {
+            return uint32_t(p[0]) | (uint32_t(p[1]) << 8);
+        };
+        const auto u32 = [](const unsigned char * p) -> uint32_t {
+            return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+        };
+        const auto invalid = []() { throw std::runtime_error("audio_decoder_invalid_format"); };
+        if (uint64_t(u32(buf_in + 4)) + 8 != len) invalid();
+        size_t offset = 12;
+        size_t chunks = 0;
+        uint32_t alignment = 0;
+        bool have_data = false;
+        while (offset < len) {
+            if (++chunks > 4096 || len - offset < 8) invalid();
+            const unsigned char * chunk = buf_in + offset;
+            const size_t size = u32(chunk + 4);
+            offset += 8;
+            if (size > len - offset || (size & 1) > len - offset - size) invalid();
+            if (memcmp(chunk, "fmt ", 4) == 0) {
+                if (alignment != 0 || size < 16) invalid();
+                const unsigned char * fmt = buf_in + offset;
+                const uint32_t encoding = u16(fmt);
+                const uint32_t source_channels = u16(fmt + 2);
+                const uint32_t rate = u32(fmt + 4);
+                const uint32_t bits = u16(fmt + 14);
+                alignment = u16(fmt + 12);
+                const bool pcm = encoding == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32);
+                const bool floating = encoding == 3 && (bits == 32 || bits == 64);
+                if ((!pcm && !floating) || source_channels < 1 || source_channels > 2
+                    || rate < 8000 || rate > 192000 || alignment != source_channels * bits / 8
+                    || u32(fmt + 8) != uint64_t(rate) * alignment) invalid();
+            } else if (memcmp(chunk, "data", 4) == 0) {
+                if (alignment == 0 || have_data || size == 0 || size % alignment != 0) invalid();
+                have_data = true;
+            }
+            offset += size + (size & 1);
+        }
+        if (!have_data || alignment == 0) invalid();
+    }
+    ma_result result;`],
+  [`    if (result != MA_SUCCESS || frames_read != frame_count) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    float extra_sample = 0;
+    ma_uint64 extra_frames = 0;
+    result = ma_decoder_read_pcm_frames(&decoder, &extra_sample, 1, &extra_frames);
+    if (extra_frames != 0 || (result != MA_SUCCESS && result != MA_AT_END)) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    for (float sample : pcmf32_mono) {`,
+  `    if ((result != MA_SUCCESS && result != MA_AT_END) || frames_read == 0 || frames_read > frame_count) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    float extra_sample = 0;
+    ma_uint64 extra_frames = 0;
+    result = ma_decoder_read_pcm_frames(&decoder, &extra_sample, 1, &extra_frames);
+    ma_uint64 source_cursor = 0;
+    ma_uint64 source_length = 0;
+    // Resampled output length is a conservative estimate, not an exact count.
+    // Accept fewer frames only after both output EOF and full backend consumption;
+    // never grow beyond the already admitted allocation or publish zero padding.
+    if (extra_frames != 0 || result != MA_AT_END || decoder.pBackend == nullptr
+        || ma_data_source_get_cursor_in_pcm_frames(decoder.pBackend, &source_cursor) != MA_SUCCESS
+        || ma_data_source_get_length_in_pcm_frames(decoder.pBackend, &source_length) != MA_SUCCESS
+        || source_length == 0 || source_cursor != source_length) {
+        pcmf32_mono.clear();
+        throw std::runtime_error("audio_decoder_invalid_format");
+    }
+    pcmf32_mono.resize(static_cast<size_t>(frames_read));
+    for (float sample : pcmf32_mono) {`],
+];
+const NEU_DIAGNOSTIC_PATCHES = [
+  {
+    "source": "cpp/rn-completion.h",
+    "beforeSha256": "bdc0fe895be630ab6cb301d08f66bae4287dd3b9d3417662d270e86bcf280588",
+    "afterSha256": "0fbd27893dec7f77640e38b95a4210329507a39eef93b4887930b001e3c91c2c",
+    "replacements": [
+      [
+        "    size_t num_tokens_predicted = 0;",
+        "    size_t num_tokens_predicted = 0;\n    // Neu diagnostic only; never fed back into sampling or completion decisions.\n    size_t tts_sampled_tokens = 0;\n    int tts_stop_token_kind = 0; // 0: no EOG, 1: model EOS, 2: other EOG"
+      ]
+    ]
+  },
+  {
+    "source": "cpp/rn-completion.cpp",
+    "beforeSha256": "b65be79e6cd665a482e82c4a4b27eb2f067a35907ca485d3aa68435f76625d12",
+    "afterSha256": "ad864b7de08544ea75a9bbd40ad17d1d7735ffac62035a08d5920e9d8c5a968b",
+    "replacements": [
+      [
+        "    num_tokens_predicted = 0;",
+        "    num_tokens_predicted = 0;\n    tts_sampled_tokens = 0;\n    tts_stop_token_kind = 0;"
+      ],
+      [
+        "        llama_token new_token_id = common_sampler_sample(ctx_sampling, parent_ctx->ctx, -1);",
+        "        llama_token new_token_id = common_sampler_sample(ctx_sampling, parent_ctx->ctx, -1);\n        if (parent_ctx->isVocoderEnabled() && parent_ctx->tts_wrapper != nullptr\n            && parent_ctx->tts_wrapper->getTTSType(parent_ctx) == NEUTTS_NANO) {\n            if (tts_sampled_tokens < 1000000) ++tts_sampled_tokens;\n            if (llama_vocab_is_eog(vocab, new_token_id)) {\n                tts_stop_token_kind = new_token_id == llama_vocab_eos(vocab) ? 1 : 2;\n            }\n        }"
+      ]
+    ]
+  },
+  {
+    "source": "cpp/jsi/JSICompletion.h",
+    "beforeSha256": "521cd22f28f4905e197be995747d2aeba4bf4b364e5f3f06d2f620adea573e39",
+    "afterSha256": "21a5bdbc6854a45758f9fe6fc37754ff437124fad21300436f1bffaa16bee1d5",
+    "replacements": [
+      [
+        "        if (ctx->isVocoderEnabled() && ctx->tts_wrapper != nullptr && !ctx->tts_wrapper->audio_tokens.empty()) {",
+        "        // Additive, closed Neu receipt. Generic/chat and parallel result contracts are unchanged.\n        if (ctx->isVocoderEnabled() && ctx->tts_wrapper != nullptr\n            && ctx->tts_wrapper->getTTSType(ctx) == rnllama::NEUTTS_NANO\n            && ctx->completion->tts_sampled_tokens > 0) {\n            jsi::Object diagnostic(runtime);\n            diagnostic.setProperty(runtime, \"schemaVersion\", 1);\n            diagnostic.setProperty(runtime, \"sampledTokenCount\", (double)ctx->completion->tts_sampled_tokens);\n            const size_t audio_count = ctx->tts_wrapper->audio_tokens.size();\n            diagnostic.setProperty(runtime, \"audioTokenCount\", (double)std::min(audio_count, (size_t)1000000));\n            if (ctx->completion->stopped_eos && ctx->completion->tts_stop_token_kind != 0) {\n                diagnostic.setProperty(runtime, \"stopTokenKind\", jsi::String::createFromUtf8(runtime,\n                    ctx->completion->tts_stop_token_kind == 1 ? \"expected_speech_end\" : \"other_eog\"));\n            }\n            res.setProperty(runtime, \"tts_diagnostics\", diagnostic);\n        }\n\n        if (ctx->isVocoderEnabled() && ctx->tts_wrapper != nullptr && !ctx->tts_wrapper->audio_tokens.empty()) {"
+      ]
+    ]
+  }
+];
+// DAC must honor each decode request without changing shared model defaults.
+// The existing serial context owner and graph release guard remain unchanged.
+const DAC_DECODE_THREAD_REPLACEMENTS = [
+  [
+    `    int32_t use_n_q,
+    struct codec_pcm_buffer * out_pcm,
+    int32_t hop_size,
+    int32_t sample_rate) {`,
+    `    int32_t use_n_q,
+    struct codec_pcm_buffer * out_pcm,
+    int32_t hop_size,
+    int32_t sample_rate,
+    int32_t requested_threads) {`,
+  ],
+  [
+    `    if (!codec_runtime_write_tensor(t_tok, tok_i32.data(), tok_i32.size() * sizeof(int32_t), &err)) {
+        codec_context_set_error(ctx, err);
+        return CODEC_STATUS_INTERNAL_ERROR;
+    }
+
+    const int32_t n_threads = ctx->model->n_threads > 0 ? ctx->model->n_threads : 1;`,
+    `    if (!codec_runtime_write_tensor(t_tok, tok_i32.data(), tok_i32.size() * sizeof(int32_t), &err)) {
+        codec_context_set_error(ctx, err);
+        return CODEC_STATUS_INTERNAL_ERROR;
+    }
+
+    const int32_t n_threads = requested_threads > 0 ? requested_threads
+        : (ctx->model->n_threads > 0 ? ctx->model->n_threads : 1);`,
+  ],
+  [
+    `    struct codec_decode_params params) {
+
+    (void) params;
+
+    codec_dac & dac = *static_cast<codec_dac *>(ctx->model->impl);`,
+    `    struct codec_decode_params params) {
+
+    codec_dac & dac = *static_cast<codec_dac *>(ctx->model->impl);`,
+  ],
+  [
+    `        !codec_runtime_write_tensor(t_kernel, kernel.data(), kernel.size() * sizeof(float), &err)) {
+        codec_context_set_error(ctx, err);
+        return CODEC_STATUS_INTERNAL_ERROR;
+    }
+
+    const int32_t n_threads = ctx->model->n_threads > 0 ? ctx->model->n_threads : 1;`,
+    `        !codec_runtime_write_tensor(t_kernel, kernel.data(), kernel.size() * sizeof(float), &err)) {
+        codec_context_set_error(ctx, err);
+        return CODEC_STATUS_INTERNAL_ERROR;
+    }
+
+    const int32_t n_threads = params.n_threads > 0 ? params.n_threads
+        : (ctx->model->n_threads > 0 ? ctx->model->n_threads : 1);`,
+  ],
+  [
+    `        use_n_q,
+        out_pcm,
+        std::max(1, dac.hop_size),
+        dac.sample_rate);`,
+    `        use_n_q,
+        out_pcm,
+        std::max(1, dac.hop_size),
+        dac.sample_rate,
+        params.n_threads);`,
+  ],
+];
 const SOURCE_PATCHES = [
-  { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256, replacements: [[BEFORE, AFTER]] },
+  { source: 'cpp/codec/src/models/dac.cpp',
+    beforeSha256: 'ce9268f76217400269cef5277591b25bd94e3e7fc66d52ca7cfe0f75ee8c528d',
+    afterSha256: 'f86e0f9835196146a78c0b52660f4ba80825c3fe9139e21914c6d86a58fd28f8', replacements: DAC_DECODE_THREAD_REPLACEMENTS },
+  { source: 'cpp/tools/mtmd/mtmd-helper.cpp',
+    beforeSha256: '323d595dfb719edb53c8720105f2da18abc76dade2dc3e7f38ecdf94200886d2',
+    afterSha256: '7977edcac38005046c3630488de4da59fab6298824bfc34ea94a3540836b2b8f',
+    replacements: [...AUDIO_INPUT_BOUNDS_REPLACEMENTS, ...AUDIO_INPUT_RESAMPLING_REPLACEMENTS],
+    intermediates: [{ sha256: 'c9a29e969cbba13599e169f99b7c5a340008e11a963030f6004d67d4efac934d', replacements: AUDIO_INPUT_RESAMPLING_REPLACEMENTS }] },
+  { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256,
+    replacements: [[BEFORE, AFTER], ...SPEAKER_RECEIPT_REPLACEMENTS],
+    intermediates: [{ sha256: SPEAKER_RECEIPT_PREVIOUS_SHA256, replacements: SPEAKER_RECEIPT_REPLACEMENTS }] },
   { source: PARAMS_SOURCE, beforeSha256: PARAMS_BEFORE_SHA256, afterSha256: PARAMS_AFTER_SHA256, replacements: PARAMS_REPLACEMENTS },
   { source: CLOCK_SOURCE, beforeSha256: CLOCK_BEFORE_SHA256, afterSha256: CLOCK_AFTER_SHA256, replacements: [[CLOCK_BEFORE, CLOCK_AFTER], ...CLOCK_PRIVACY_REPLACEMENTS], intermediates: [{ sha256: CLOCK_PREVIOUS_SHA256, replacements: CLOCK_PRIVACY_REPLACEMENTS }] },
-  { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, intermediates: [{ sha256: '014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc', replacements: CHATTERBOX_PRIVACY_REPLACEMENTS }, { sha256: 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d', replacements: COMPLETION_PRIVACY_REPLACEMENTS }, { sha256: 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058', replacements: [...PROMPT_TOKEN_PRIVACY_REPLACEMENTS, ...CHATTERBOX_PRIVACY_REPLACEMENTS] }], replacements: [...COMPLETION_REPLACEMENTS, ...COMPLETION_PRIVACY_REPLACEMENTS] },
+  { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: 'b65be79e6cd665a482e82c4a4b27eb2f067a35907ca485d3aa68435f76625d12', intermediates: [{ sha256: '014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc', replacements: CHATTERBOX_PRIVACY_REPLACEMENTS }, { sha256: 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d', replacements: COMPLETION_PRIVACY_REPLACEMENTS }, { sha256: 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058', replacements: [...PROMPT_TOKEN_PRIVACY_REPLACEMENTS, ...CHATTERBOX_PRIVACY_REPLACEMENTS] }], replacements: [...COMPLETION_REPLACEMENTS, ...COMPLETION_PRIVACY_REPLACEMENTS] },
   { source: SAMPLING_SOURCE, beforeSha256: SAMPLING_BEFORE_SHA256, afterSha256: SAMPLING_AFTER_SHA256, intermediates: [{ sha256: SAMPLING_PREVIOUS_SHA256, replacements: [...LLGUIDANCE_REPLACEMENTS, ...SAMPLING_PRIVACY_REPLACEMENTS] }, { sha256: 'd68916d80be1f3e3b1dd8ec238ab77cc23b8056394f3db49991eb2739fd0a1c2', replacements: SAMPLING_PRIVACY_REPLACEMENTS }], replacements: [...SAMPLING_REPLACEMENTS, ...SAMPLING_PRIVACY_REPLACEMENTS] },
   { source: GRAMMAR_SOURCE, beforeSha256: GRAMMAR_BEFORE_SHA256, afterSha256: GRAMMAR_AFTER_SHA256, replacements: GRAMMAR_REPLACEMENTS },
   {"source": "cpp/llama-batch.cpp", "beforeSha256": "88f7b462c41fda25c1767880c0d0a70550bfd816a1477663de06de8d5f5ca2fe", "afterSha256": "941ede2131208b75ce936979e9822934c88bc34f4d8760df736fb0c4eb0d2e96", "replacements": [["                    LLAMA_LOG_DEBUG(\"%s:  %4d: id = %6d (%16s), pos = %4d, n_seq_id = %2d, seq_id = [%s], output = %d\\n\",\n                            __func__, i, ubatch.token[i], vocab->token_to_piece(ubatch.token[i]).c_str(),\n                            ubatch.pos[i], ubatch.n_seq_id[i], ss.str().c_str(), ubatch.output[i]);", "                    LLAMA_LOG_DEBUG(\"%s:  %4d: [token], pos = %4d, n_seq_id = %2d, seq_id = [%s], output = %d\\n\",\n                            __func__, i, ubatch.pos[i], ubatch.n_seq_id[i], ss.str().c_str(), ubatch.output[i]);"]]},
@@ -459,16 +890,22 @@ const SOURCE_PATCHES = [
   {"source": "cpp/rn-slot-manager.h", "beforeSha256": "76b457c59ae574134094e203c38d411f1dc7243b6616c4fd13d32d3c80b88dce", "afterSha256": "882150b9bb69c8b4cb4da71b1433b42adf161caa256e6c7c4dc058731ead2c3e", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
   {"source": "cpp/rn-slot.h", "beforeSha256": "6c44d5d937212addb9e31ec629953937e77be26ba0427047190992e2bf2794d2", "afterSha256": "cd89f60afb06a0c819fac99f8f8a036c83826484e2a03276d7b151848151c7a0", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
   { source: TTS_SOURCE, beforeSha256: TTS_BEFORE_SHA256, afterSha256: TTS_AFTER_SHA256,
-    replacements: [["#include \"common.h\"", "#include \"common/common.h\""], ...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS],
+    replacements: [["#include \"common.h\"", "#include \"common/common.h\""], ...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS, ...TTS_DAC_MEMORY_REPLACEMENTS, ...TTS_WAVTOKENIZER_MEMORY_REPLACEMENTS, ...TTS_NEU_GRAMMAR_REPLACEMENTS, ...TTS_NEU_EOS_REPLACEMENTS],
     intermediates: [
-      { sha256: '147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f', replacements: [...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS] },
-      { sha256: TTS_PRIVACY_SHA256, replacements: TTS_BOUNDS_REPLACEMENTS },
+      { sha256: '147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f', replacements: [...TTS_PRIVACY_REPLACEMENTS, ...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS, ...TTS_DAC_MEMORY_REPLACEMENTS, ...TTS_WAVTOKENIZER_MEMORY_REPLACEMENTS, ...TTS_NEU_GRAMMAR_REPLACEMENTS, ...TTS_NEU_EOS_REPLACEMENTS] },
+      { sha256: TTS_PRIVACY_SHA256, replacements: [...TTS_BOUNDS_REPLACEMENTS, ...TTS_SPEAKER_REPLACEMENTS, ...TTS_DAC_MEMORY_REPLACEMENTS, ...TTS_WAVTOKENIZER_MEMORY_REPLACEMENTS, ...TTS_NEU_GRAMMAR_REPLACEMENTS, ...TTS_NEU_EOS_REPLACEMENTS] },
+      { sha256: TTS_SPEAKER_PREVIOUS_SHA256, replacements: [...TTS_SPEAKER_REPLACEMENTS, ...TTS_DAC_MEMORY_REPLACEMENTS, ...TTS_WAVTOKENIZER_MEMORY_REPLACEMENTS, ...TTS_NEU_GRAMMAR_REPLACEMENTS, ...TTS_NEU_EOS_REPLACEMENTS] },
+      { sha256: TTS_DAC_MEMORY_PREVIOUS_SHA256, replacements: [...TTS_DAC_MEMORY_REPLACEMENTS, ...TTS_WAVTOKENIZER_MEMORY_REPLACEMENTS, ...TTS_NEU_GRAMMAR_REPLACEMENTS, ...TTS_NEU_EOS_REPLACEMENTS] },
+      { sha256: TTS_DAC_ONLY_PREVIOUS_SHA256, replacements: [...TTS_WAVTOKENIZER_MEMORY_REPLACEMENTS, ...TTS_NEU_GRAMMAR_REPLACEMENTS, ...TTS_NEU_EOS_REPLACEMENTS] },
+      { sha256: TTS_NEU_PREVIOUS_SHA256, replacements: [...TTS_NEU_GRAMMAR_REPLACEMENTS, ...TTS_NEU_EOS_REPLACEMENTS] },
+      { sha256: TTS_NEU_EOS_PREVIOUS_SHA256, replacements: TTS_NEU_EOS_REPLACEMENTS },
     ] },
   {"source": "cpp/ggml-cpu/arch/arm/quants.c", "beforeSha256": "edb15b62111d41fa68e8f4c069eb50a8ce1c2de8a9525a3cd02b1cd5aca7391b", "afterSha256": "bce5e39eaffbde886d74f822115b1f925ab5b40c6877aee8a3a3b90269fc2be6", "replacements": [["#define LM_GGML_COMMON_IMPL_C", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM) || defined(_M_ARM64))\n#define LM_GGML_COMMON_IMPL_C"], [");\n    }\n\n    *s = sumf;\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n\n", ");\n    }\n\n    *s = sumf;\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n\n\n#endif // compile-target CPU architecture\n"]]},
   {"source": "cpp/ggml-cpu/arch/arm/repack.cpp", "beforeSha256": "f36e53ebde15b39147eb77d444ebf5c494af7aefed096444256fdf2836722e98", "afterSha256": "c12d2f0ab327a04341868205b5b7d83ee08c55d6b38aa61bdb768e128004e6bf", "replacements": [["#define LM_GGML_COMMON_IMPL_CPP", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM) || defined(_M_ARM64))\n#define LM_GGML_COMMON_IMPL_CPP"], ["endif  // defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_MATMUL_INT8)\n    lm_ggml_gemm_q8_0_4x8_q8_0_generic(n, s, bs, vx, vy, nr, nc);\n}\n", "endif  // defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_MATMUL_INT8)\n    lm_ggml_gemm_q8_0_4x8_q8_0_generic(n, s, bs, vx, vy, nr, nc);\n}\n\n#endif // compile-target CPU architecture\n"]]},
   {"source": "cpp/ggml-cpu/arch/x86/quants.c", "beforeSha256": "0b0942f1030384ae3a907350d69b0ad29f5a9dffe3bf35286a24489f9caa9eeb", "afterSha256": "93fe81c2ea5b0b321b6bf50e7833f6152bc8e4464ea6e65afc2c891c4097ad69", "replacements": [["#define LM_GGML_COMMON_IMPL_C", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || defined(_M_X64))\n#define LM_GGML_COMMON_IMPL_C"], ["*s = hsum_float_8(accum);\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n", "*s = hsum_float_8(accum);\n\n#else\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(nb);\n    lm_ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);\n#endif\n}\n\n#endif // compile-target CPU architecture\n"]]},
   {"source": "cpp/ggml-cpu/arch/x86/repack.cpp", "beforeSha256": "18c55964dcdf1ac589dfca0e5013755a856505f5d48e4c935ed8300580e4a7c2", "afterSha256": "0141703d24d858af37ea92eab1246e5d4a6cded95cf57de113d035345da27e92", "replacements": [["#define LM_GGML_COMMON_IMPL_CPP", "#if !defined(LM_GGML_CPU_GENERIC) && (defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || defined(_M_X64))\n#define LM_GGML_COMMON_IMPL_CPP"], ["_mm256_sub_ps(acc_rows[i], acc_min_rows[i]));\n            }\n        }\n    }\n#else\n\n    lm_ggml_gemm_q2_K_8x8_q8_K_generic(n, s, bs, vx, vy, nr, nc);\n\n\n#endif\n}\n", "_mm256_sub_ps(acc_rows[i], acc_min_rows[i]));\n            }\n        }\n    }\n#else\n\n    lm_ggml_gemm_q2_K_8x8_q8_K_generic(n, s, bs, vx, vy, nr, nc);\n\n\n#endif\n}\n\n#endif // compile-target CPU architecture\n"]]},
   {"source":"cpp/rn-llama.cpp","beforeSha256":"e33948572e199c90a74f1ecb4d27be791924fe4954737f0d83c96b2a18ad0d1c","afterSha256":"b4ad27f004e6398d5de8fe49181f52e1d77c734f0b499389b8c5973ba6d14835","replacements":[["            LOG_ERROR(\"unable to load model: %s\", params_.model.path.c_str());","            LOG_ERROR(\"unable to load model\");"],["            LOG_ERROR(\"unable to initialize context for model: %s\", params_.model.path.c_str());","            LOG_ERROR(\"unable to initialize context for model\");"]]},
+  ...MTMD_TEXT_PRIVACY_PATCHES,
 ];
 // JSI fixes are compiled locally in every mode. Clock and sampler fixes are in the core:
 // source-build configuration must also be enforced by the native config verifier.
@@ -483,6 +920,20 @@ const BUILD_FILES = Object.freeze({
   'cpp/common/chat-auto-parser.h': 'c774fcc02980529671793e110118ecfccb1e3c48eac52c852ce354922f599b52',
   'cpp/common/chat.h': 'e6d106744146668453d38fa3db725b630a438eb982c74effd094f30cd3ed4d65',
 });
+
+
+// Each extension is anchored to the previously accepted exact installed source.
+for (const extension of NEU_DIAGNOSTIC_PATCHES) {
+  const previous = SOURCE_PATCHES.find(entry => entry.source === extension.source);
+  if (previous) {
+    if (previous.afterSha256 !== extension.beforeSha256) throw new Error('Neu diagnostic source identity mismatch.');
+    previous.intermediates = [...(previous.intermediates || []).map(entry => ({
+      ...entry, replacements: [...entry.replacements, ...extension.replacements],
+    })), { sha256: extension.beforeSha256, replacements: extension.replacements }];
+    previous.replacements = [...previous.replacements, ...extension.replacements];
+    previous.afterSha256 = extension.afterSha256;
+  } else SOURCE_PATCHES.push(extension);
+}
 
 function hashSource(text) {
   return crypto.createHash('sha256').update(text.replace(/\r\n/gu, '\n')).digest('hex');

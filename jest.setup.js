@@ -88,6 +88,7 @@ jest.mock('expo-file-system/legacy', () => ({
   }),
   getInfoAsync: jest.fn().mockResolvedValue({ exists: true, size: 1024 }),
   readAsStringAsync: jest.fn().mockResolvedValue(''),
+  writeAsStringAsync: jest.fn().mockResolvedValue(undefined),
   readDirectoryAsync: jest.fn().mockResolvedValue([]),
   deleteAsync: jest.fn().mockResolvedValue(undefined),
   copyAsync: jest.fn().mockResolvedValue(undefined),

@@ -1147,6 +1147,136 @@ describe('ChatScreen', () => {
     });
   });
 
+  it.each(['success', 'cancel', 'background', 'close', 'thread', 'blur', 'model', 'unmount', 'timeout', 'drain-failure'] as const)(
+    'owns the real speech reference picker through parent AppState: %s', async outcome => {
+      const { AppState } = require('react-native') as typeof import('react-native');
+      const picker = require('expo-document-picker') as typeof import('expo-document-picker');
+      const files = require('expo-file-system/legacy') as typeof import('expo-file-system/legacy');
+      const tts = require('../../src/services/TtsService') as typeof import('../../src/services/TtsService');
+      const preparation = require('../../src/services/AudioPreparationService') as typeof import('../../src/services/AudioPreparationService');
+      const { audioSamplePreviewService } = require('../../src/services/AudioSamplePreviewService') as typeof import('../../src/services/AudioSamplePreviewService');
+      const { referenceVoiceStore } = require('../../src/services/ReferenceVoiceStore') as typeof import('../../src/services/ReferenceVoiceStore');
+      const navigation = require('@react-navigation/native') as { __setIsFocused: (value: boolean) => void };
+      const sharedMocks = [AppState.addEventListener, picker.getDocumentAsync, files.getInfoAsync, files.deleteAsync]
+        .filter(jest.isMockFunction).map(mock => ({ mock: mock as jest.Mock, implementation: (mock as jest.Mock).getMockImplementation() }));
+      const descriptor = Object.getOwnPropertyDescriptor(AppState, 'currentState');
+      const listeners = new Set<(next: import('react-native').AppStateStatus) => void>();
+      const setAppState = (next: import('react-native').AppStateStatus) => {
+        Object.defineProperty(AppState, 'currentState', { configurable: true, value: next });
+        for (const listener of [...listeners]) listener(next);
+      };
+      Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'active' });
+      navigation.__setIsFocused(true);
+      let selection = { profileId: 'qwen3-tts', modelName: 'Qwen', languages: ['en'], voiceModes: ['reference'] as const };
+      const state = { phase: null };
+      const savedState = { voices: [], selectedVoiceId: null };
+      const selected = createDeferred<import('expo-document-picker').DocumentPickerResult>();
+      const sourceUri = 'test-cache/reference-picked.wav';
+      const prepared = { uri: 'test-cache/audio-preparation/reference.wav', sourceSha256: 'a'.repeat(64),
+        identity: 'reference', sampleRate: 24000, sampleCount: 24000, durationMs: 1000, channels: 1, sizeBytes: 48044 };
+      const temporary = { uri: 'test-cache/audio-reference/reference.wav', sourceSha256: 'a'.repeat(64), durationMs: 1000,
+        sourceMimeType: 'audio/wav' as const, isCurrent: () => true, release: jest.fn().mockResolvedValue(undefined) };
+      const cancel = jest.spyOn(tts.ttsService, 'cancelAndClear').mockResolvedValue(undefined);
+      const prepare = jest.spyOn(preparation, 'prepareManagedAudio').mockResolvedValue(prepared as import('../../src/services/AudioPreparationService').PreparedAudio);
+      const retain = jest.spyOn(referenceVoiceStore, 'retainTemporarySource').mockResolvedValue(temporary);
+      const save = jest.spyOn(referenceVoiceStore, 'save');
+      const spies: jest.SpyInstance[] = [cancel, prepare, retain, save,
+        jest.spyOn(AppState, 'addEventListener').mockImplementation((_event, listener) => {
+          listeners.add(listener); return { remove: () => { listeners.delete(listener); } };
+        }),
+        jest.spyOn(picker, 'getDocumentAsync').mockReturnValue(selected.promise),
+        jest.spyOn(tts, 'getTtsSelectionStatus').mockImplementation(() => selection),
+        jest.spyOn(tts.ttsService, 'getState').mockReturnValue(state),
+        jest.spyOn(tts.ttsService, 'subscribe').mockReturnValue(() => undefined),
+        jest.spyOn(preparation, 'discardPreparedAudio').mockResolvedValue(undefined),
+        jest.spyOn(preparation, 'waitForAudioPreparationDrain').mockResolvedValue(undefined),
+        jest.spyOn(audioSamplePreviewService, 'stop').mockResolvedValue(undefined),
+        jest.spyOn(referenceVoiceStore, 'hydrate').mockImplementation(() => undefined),
+        jest.spyOn(referenceVoiceStore, 'getState').mockReturnValue(savedState),
+        jest.spyOn(referenceVoiceStore, 'select').mockImplementation(() => undefined),
+        jest.spyOn(files, 'getInfoAsync').mockResolvedValue({ exists: false, uri: sourceUri, isDirectory: false }),
+      ];
+      const deletion = jest.spyOn(files, 'deleteAsync').mockResolvedValue(undefined);
+      spies.push(deletion);
+      const view = render(React.createElement(ChatScreen));
+      let unmounted = false;
+      try {
+        fireEvent.press(view.getByTestId('chat-speech-preview'));
+        await waitFor(() => expect(view.getByTestId('tts-preview-sheet')).toBeTruthy());
+        fireEvent.changeText(view.getByTestId('tts-text-input'), 'Keep this preview.');
+        if (outcome === 'background') {
+          await act(async () => { setAppState('background'); });
+          expect(view.queryByTestId('tts-preview-sheet')).toBeNull();
+          expect(cancel).toHaveBeenCalled();
+          return;
+        }
+        fireEvent.press(view.getByTestId('tts-voice-options'));
+        await waitFor(() => expect(view.getByTestId('tts-reference-import')).toBeEnabled());
+        if (outcome === 'drain-failure') cancel.mockRejectedValueOnce(new Error('native drain failed'));
+        fireEvent.press(view.getByTestId('tts-reference-import'));
+        if (outcome === 'drain-failure') {
+          await waitFor(() => expect(view.getByText('tts.errors.reference_invalid')).toBeTruthy());
+          expect(picker.getDocumentAsync).not.toHaveBeenCalled();
+          return;
+        }
+        await waitFor(() => expect(picker.getDocumentAsync).toHaveBeenCalledTimes(1));
+        const beforeBackground = cancel.mock.calls.length;
+        await act(async () => { setAppState('inactive'); setAppState('background'); });
+        expect(cancel.mock.calls.length).toBeGreaterThan(beforeBackground);
+        if (outcome === 'success' || outcome === 'cancel' || outcome === 'timeout') {
+          expect(view.getByTestId('tts-preview-sheet')).toBeTruthy();
+          expect(view.getByTestId('tts-text-input').props.value).toBe('Keep this preview.');
+        }
+        if (outcome === 'close') await act(async () => { fireEvent.press(view.getByTestId('tts-close')); });
+        if (outcome === 'thread') await act(async () => { useChatStore.setState({ activeThreadId: null }); });
+        if (outcome === 'blur') await act(async () => { navigation.__setIsFocused(false); view.rerender(React.createElement(ChatScreen)); });
+        if (outcome === 'model') await act(async () => {
+          selection = { ...selection, modelName: 'Replacement' };
+          updateSettings({ autoSelectTtsModel: !getSettings().autoSelectTtsModel });
+        });
+        if (outcome === 'unmount') { view.unmount(); unmounted = true; }
+        if (outcome === 'timeout') jest.useFakeTimers();
+        await act(async () => { selected.resolve(outcome === 'cancel' ? { canceled: true, assets: null }
+          : { canceled: false, assets: [{ uri: sourceUri, name: 'reference.wav', mimeType: 'audio/x-wav', lastModified: 1 }] });
+          await selected.promise;
+        });
+        expect(prepare).not.toHaveBeenCalled(); // Activity result may arrive before onResume.
+        if (outcome === 'timeout') {
+          await act(async () => { await jest.advanceTimersByTimeAsync(5001); });
+          jest.useRealTimers();
+        } else await act(async () => { setAppState('active'); });
+        if (outcome === 'success') {
+          await waitFor(() => expect(view.getByTestId('tts-reference-preview')).toBeEnabled());
+          expect(prepare).toHaveBeenCalledWith({ sourceUri, purpose: 'reference', sampleRate: 24000, assertCurrent: expect.any(Function) });
+          expect(retain).toHaveBeenCalledTimes(1);
+          fireEvent.press(view.getByTestId('tts-save-options'));
+          fireEvent.changeText(view.getByTestId('tts-reference-name'), 'Allowed sample');
+          expect(view.getByTestId('tts-reference-save')).toBeDisabled();
+          fireEvent.press(view.getByTestId('tts-reference-consent'));
+          await waitFor(() => expect(view.getByTestId('tts-reference-save')).toBeEnabled());
+          expect(save).not.toHaveBeenCalled();
+        } else {
+          expect(prepare).not.toHaveBeenCalled();
+          expect(retain).not.toHaveBeenCalled();
+        }
+        if (outcome !== 'cancel') await waitFor(() => expect(deletion).toHaveBeenCalledWith(sourceUri, { idempotent: true }));
+        if (outcome === 'cancel' || outcome === 'timeout') {
+          await waitFor(() => expect(view.getByTestId('tts-reference-import')).toBeEnabled());
+          await act(async () => { setAppState('background'); });
+          expect(view.queryByTestId('tts-preview-sheet')).toBeNull(); // No stale handoff exemption.
+        }
+      } finally {
+        jest.useRealTimers();
+        if (!unmounted) view.unmount();
+        selected.resolve({ canceled: true, assets: null });
+        await act(async () => { await selected.promise; });
+        navigation.__setIsFocused(true);
+        for (const spy of spies.reverse()) spy.mockRestore();
+        for (const { mock, implementation } of sharedMocks) if (implementation) mock.mockImplementation(implementation);
+        if (descriptor) Object.defineProperty(AppState, 'currentState', descriptor);
+        else Reflect.deleteProperty(AppState, 'currentState');
+      }
+    });
   it('shows preset generation seeds, sends explicit draft edits, and resets them for a new draft', async () => {
     const presetParameters = { ...getGenerationParametersForModel('author/model-q4'), temperature: 0.2,
       output: { mode: 'json_object' as const }, template: { jinja: true, prefillText: '{' }, stop: [' END '] };
@@ -4175,6 +4305,140 @@ describe('ChatScreen', () => {
     }
   });
 
+  it.each([
+    { status: 'running', requiresForceStop: false, terminalStatus: 'native_passed' },
+    { status: 'failed', requiresForceStop: true, terminalStatus: 'failed' },
+  ] as const)('keeps the Stage 7 owner through $status and its deferred drain before ordinary loading or speech', async ({
+    status, requiresForceStop, terminalStatus,
+  }) => {
+    const qaBootstrap = jest.requireActual('../../src/services/AndroidQaDocumentModelBootstrap');
+    const qaGeneration = jest.requireActual('../../src/services/AndroidQaGenerationEvidence');
+    const qaStage7 = jest.requireActual<typeof import('../../src/services/AndroidQaAudioStage7')>('../../src/services/AndroidQaAudioStage7');
+    const qaTts = jest.requireActual('../../src/services/AndroidQaTts');
+    const qaSmoke = jest.requireActual('../../src/services/AndroidQaInferenceSmoke');
+    const qaRetrieval = jest.requireActual('../../src/services/AndroidQaDocumentRetrieval');
+    const qaIndex = jest.requireActual('../../src/services/AndroidQaDocumentIndexPublication');
+    const gate = jest.spyOn(qaBootstrap, 'isAndroidQaDocumentModelBootstrapEnabled').mockReturnValue(true);
+    // Stage 7 ownership is independent of the old generation/TTS QA flag.
+    const generationGate = jest.spyOn(qaGeneration, 'isAndroidQaGenerationEvidenceEnabled').mockReturnValue(false);
+    const stage7Gate = jest.spyOn(qaStage7, 'isAndroidQaAudioStage7Enabled').mockReturnValue(true);
+    const legacySpies = [
+      jest.spyOn(qaTts, 'getAndroidQaTtsEvidence').mockReturnValue({
+        ...qaTts.getAndroidQaTtsEvidence(), status: 'idle', requiresForceStop: false,
+      }),
+      jest.spyOn(qaSmoke, 'getAndroidQaInferenceSmokeEvidence').mockReturnValue({
+        ...qaSmoke.getAndroidQaInferenceSmokeEvidence(), status: 'idle', requiresForceStop: false,
+      }),
+      jest.spyOn(qaRetrieval, 'getAndroidQaDocumentRetrievalEvidence').mockReturnValue({
+        ...qaRetrieval.getAndroidQaDocumentRetrievalEvidence(), status: 'idle', requiresForceStop: false,
+      }),
+      jest.spyOn(qaIndex, 'getAndroidQaDocumentIndexPublicationEvidence').mockReturnValue({
+        ...qaIndex.getAndroidQaDocumentIndexPublicationEvidence(), status: 'idle', requiresForceStop: false,
+      }),
+    ];
+    let snapshot: ReturnType<typeof qaStage7.getAndroidQaAudioStage7Evidence> = {
+      ...qaStage7.getAndroidQaAudioStage7Evidence(), status: 'idle', phase: 'idle', requiresForceStop: false,
+    };
+    const listeners = new Set<() => void>();
+    const evidenceSpy = jest.spyOn(qaStage7, 'getAndroidQaAudioStage7Evidence').mockImplementation(() => snapshot);
+    const subscribeSpy = jest.spyOn(qaStage7, 'subscribeAndroidQaAudioStage7').mockImplementation((listener: () => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    });
+    registry.saveModels([{
+      id: 'author/model-q4', name: 'Model Q4', author: 'Test', size: 1024,
+      localPath: 'model-q4.gguf', lifecycleStatus: 'downloaded',
+    }]);
+    // Before the fix an ordinary saved-profile load races QA and raises the observed busy alert.
+    mockLoadModel.mockRejectedValue(new Error('busy'));
+    const originalThread = useChatStore.getState().getActiveThread()!;
+    const engineHook = jest.requireMock('../../src/hooks/useLLMEngine');
+    const hookBoundary = engineHook.useLLMEngine();
+    const stableHookSpy = jest.spyOn(engineHook, 'useLLMEngine').mockImplementation(() => ({
+      ...hookBoundary, state: mockEngineState,
+    }));
+    const qaDrain = createDeferred<void>();
+    const ordinaryLoad = createDeferred<void>();
+    const view = render(React.createElement(ChatScreen));
+    try {
+      let ownedThreadId = '';
+      await act(async () => {
+        snapshot = { ...snapshot, status: 'running', phase: 'prepare', mode: 'voices' };
+        for (const listener of [...listeners]) listener();
+        ownedThreadId = useChatStore.getState().createThread({ modelId: 'author/model-q4',
+          title: 'Android Stage 7 voices QA', presetId: null, presetSnapshot: originalThread.presetSnapshot,
+          paramsSnapshot: originalThread.paramsSnapshot, loraSnapshot: [] });
+        mockEngineState = { status: 'initializing', loadProgress: 0, activeModelId: 'author/model-q4' };
+        view.rerender(React.createElement(ChatScreen));
+      });
+      expect(mockLoadModel).not.toHaveBeenCalled();
+      // Native initialization can settle before the QA finally/drain has released ownership.
+      await act(async () => {
+        snapshot = { ...snapshot, status, requiresForceStop, phase: 'complete' };
+        for (const listener of [...listeners]) listener();
+        mockEngineState = { status: 'idle', loadProgress: 0, activeModelId: null };
+        view.rerender(React.createElement(ChatScreen));
+      });
+      const threadBeforeCleanup = JSON.stringify(useChatStore.getState().getActiveThread());
+      expect(mockLoadModel).not.toHaveBeenCalled();
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(useChatStore.getState().activeThreadId).toBe(ownedThreadId);
+      fireEvent.press(view.getByTestId('chat-speech-preview'));
+      expect(view.queryByTestId('tts-preview-sheet')).toBeNull();
+      mockLoadModel.mockImplementation(() => ordinaryLoad.promise);
+      const settledQa = qaDrain.promise.then(() => {
+        snapshot = { ...snapshot, status: terminalStatus, requiresForceStop: false, phase: 'complete' };
+        for (const listener of [...listeners]) listener();
+      });
+      // No engine or thread rerender: the actual Stage 7 subscription must wake the consumer.
+      await act(async () => { qaDrain.resolve(undefined); await settledQa; });
+      await waitFor(() => expect(mockLoadModel).toHaveBeenCalledTimes(1));
+      expect(mockLoadModel).toHaveBeenCalledWith('author/model-q4', expect.objectContaining({ preferLastWorkingProfile: true }));
+      expect(JSON.stringify(useChatStore.getState().getActiveThread())).toBe(threadBeforeCleanup);
+      await act(async () => { ordinaryLoad.resolve(undefined); await ordinaryLoad.promise; });
+      await waitFor(() => expect(lastChatInputBarProps.disabled).toBe(false));
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(mockLoadModel).toHaveBeenCalledTimes(1);
+    } finally {
+      qaDrain.resolve(undefined); ordinaryLoad.resolve(undefined);
+      view.unmount();
+      expect(listeners.size).toBe(0);
+      stableHookSpy.mockRestore(); subscribeSpy.mockRestore(); evidenceSpy.mockRestore(); stage7Gate.mockRestore();
+      generationGate.mockRestore(); gate.mockRestore();
+      for (const spy of legacySpies) spy.mockRestore();
+    }
+  });
+
+  it.each([
+    { enabled: true, status: 'idle', requiresForceStop: false },
+    { enabled: true, status: 'failed', requiresForceStop: false },
+    { enabled: false, status: 'running', requiresForceStop: false },
+    { enabled: false, status: 'failed', requiresForceStop: true },
+  ] as const)('preserves ordinary model auto-load for Stage 7 enabled=$enabled status=$status forceStop=$requiresForceStop', async ({
+    enabled, status, requiresForceStop,
+  }) => {
+    const qaBootstrap = jest.requireActual('../../src/services/AndroidQaDocumentModelBootstrap');
+    const qaStage7 = jest.requireActual<typeof import('../../src/services/AndroidQaAudioStage7')>('../../src/services/AndroidQaAudioStage7');
+    const gate = jest.spyOn(qaBootstrap, 'isAndroidQaDocumentModelBootstrapEnabled').mockReturnValue(enabled);
+    const stage7Gate = jest.spyOn(qaStage7, 'isAndroidQaAudioStage7Enabled').mockReturnValue(enabled);
+    const evidenceSpy = jest.spyOn(qaStage7, 'getAndroidQaAudioStage7Evidence').mockReturnValue({
+      ...qaStage7.getAndroidQaAudioStage7Evidence(), status, requiresForceStop, phase: 'complete',
+    });
+    registry.saveModels([{
+      id: 'author/model-q4', name: 'Model Q4', author: 'Test', size: 1024,
+      localPath: 'model-q4.gguf', lifecycleStatus: 'downloaded',
+    }]);
+    mockEngineState = { status: 'idle', loadProgress: 0, activeModelId: null };
+    const view = render(React.createElement(ChatScreen));
+    try {
+      await waitFor(() => expect(mockLoadModel).toHaveBeenCalledTimes(1));
+      expect(mockLoadModel).toHaveBeenCalledWith('author/model-q4', expect.objectContaining({ preferLastWorkingProfile: true }));
+      expect(alertSpy).not.toHaveBeenCalled();
+    } finally {
+      view.unmount(); evidenceSpy.mockRestore(); stage7Gate.mockRestore(); gate.mockRestore();
+    }
+  });
+
   it('blocks input and auto-loads the exact active-thread model without rewriting the thread', async () => {
     registry.saveModels([
       {
@@ -7083,5 +7347,24 @@ describe('ChatScreen', () => {
       expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(loweredCeiling);
       expect(getByTestId('context-size-value').props.children).toBe(String(loweredCeiling));
     });
+  });
+
+  it('shows the ordinary chat and bounded evidence without developer buttons in manual QA mode', () => {
+    const qaGeneration = jest.requireActual('../../src/services/AndroidQaGenerationEvidence');
+    const generationGate = jest.spyOn(qaGeneration, 'isAndroidQaGenerationEvidenceEnabled').mockReturnValue(true);
+    const previous = process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS;
+    process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS = '0';
+    const view = render(React.createElement(ChatScreen));
+    try {
+      expect(view.queryByTestId('chat-qa-arm-before-first-output')).toBeNull();
+      expect(view.queryByTestId('chat-qa-start-background-task')).toBeNull();
+      expect(view.getAllByTestId('chat-qa-tts-playback-state').length).toBeGreaterThan(0);
+      expect(lastChatInputBarProps).toBeTruthy();
+    } finally {
+      view.unmount();
+      generationGate.mockRestore();
+      if (previous === undefined) delete process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS;
+      else process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS = previous;
+    }
   });
 });

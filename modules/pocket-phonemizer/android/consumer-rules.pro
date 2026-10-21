@@ -1,0 +1,2 @@
+-keep class com.github.tah10n.pocketphonemizer.NativeBridge { *; }
+-keep class com.github.tah10n.pocketphonemizer.NativeResult { *; }

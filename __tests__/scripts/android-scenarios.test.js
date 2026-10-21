@@ -36,6 +36,9 @@ const {
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
   captureCoreSurfaceScreenshots,
+  captureThemeFailureEvidence,
+  captureFailedScenarioEvidence,
+  runNativeGlassThemeMatrix,
   captureSettledScenarioScreenshot,
   getScenarioOutcomeScreenshotPath,
   cleanupAndroidLogcatCollector,
@@ -68,6 +71,8 @@ const {
   findPreparedSentMessageContext,
   findResourceIdInSnapshot,
   findResourceIdClearOfOverlays,
+  findReadyThemeModeOption,
+  readSelectedThemeMode,
   findSettledDocumentCancellationSendAction,
   hasConversationHistoryStartAnchor,
   hideChatQaEvidenceForVisualCapture,
@@ -144,6 +149,90 @@ const {
   waitForModelWarmupToSettleIfPresent,
   waitForSettledAttachImageAction,
 } = require('../../scripts/android-scenarios');
+
+describe('theme mode semantic visibility', () => {
+  // Exact relevant geometry/attributes from the API 32 before-restore XML.
+  // The selected option is absent, although five pixels of its parent remain.
+  const clippedXml = `<hierarchy>
+    <node bounds="[0,0][1080,2400]" />
+    <node resource-id="settings-header" bounds="[0,63][1080,192]" />
+    <node resource-id="settings-screen-content" bounds="[0,194][1080,2080]" />
+    <node resource-id="settings-theme-mode-control" content-desc="Light, System, Dark"
+      clickable="false" enabled="true" selected="false" bounds="[67,194][1013,199]" />
+    <node resource-id="settings-visual-style-container" bounds="[37,247][1043,608]" />
+    <node resource-id="bottom-tab-settings" content-desc="Settings" selected="true"
+      bounds="[810,2115][1080,2233]" />
+  </hierarchy>`;
+  const clipped = () => parseUiSnapshot(clippedXml);
+  // Synthetic next snapshot models a successful bounded downward scroll.
+  const exposed = (selected = true, optionBounds = '[80,460][380,560]') => parseUiSnapshot(
+    clippedXml.replace('[67,194][1013,199]', '[67,450][1013,582]')
+      .replace('</hierarchy>', `<node resource-id="settings-theme-mode-light"
+        selected="${selected}" bounds="${optionBounds}" /></hierarchy>`),
+  );
+  const context = () => ({ serial: 'device-1', swipeDown: jest.fn(), swipeUp: jest.fn() });
+  const hasSelectedOption = (snapshot) => Boolean(findResourceIdInSnapshot(
+    snapshot, 'settings-theme-mode-light', { visibleOnly: true },
+  )?.selected);
+
+  it('semantic-ready scroll reveals the selected child instead of accepting the actual API 32 sliver', async () => {
+    const ctx = context();
+    const createSnapshot = jest.fn().mockReturnValueOnce(clipped()).mockReturnValue(exposed());
+    const node = await scrollToResourceId(ctx, 'settings-theme-mode-control', {
+      adbPath: 'adb', createSnapshot, isReady: hasSelectedOption,
+    });
+    expect(node.bounds.top).toBe(450);
+    expect(ctx.swipeDown).toHaveBeenCalledTimes(1);
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+    expect(createSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('semantic-ready scroll reveals an incomplete lower-edge control upward', async () => {
+    const bottom = parseUiSnapshot(clippedXml.replace('[67,194][1013,199]', '[67,2050][1013,2055]'));
+    const ctx = context();
+    await scrollToResourceId(ctx, 'settings-theme-mode-control', {
+      adbPath: 'adb', createSnapshot: jest.fn().mockReturnValueOnce(bottom).mockReturnValue(exposed()),
+      isReady: hasSelectedOption,
+    });
+    expect(ctx.swipeUp).toHaveBeenCalledTimes(1);
+    expect(ctx.swipeDown).not.toHaveBeenCalled();
+  });
+
+  it('semantic-ready scroll fails closed within the existing stall and gesture limits', async () => {
+    const ctx = context();
+    const createSnapshot = jest.fn().mockReturnValue(clipped());
+    await expect(scrollToResourceId(ctx, 'settings-theme-mode-control', {
+      adbPath: 'adb', createSnapshot, isReady: hasSelectedOption, maxSwipes: 4,
+    })).rejects.toThrow('Bounded swipes: down=2, up=2');
+    expect(ctx.swipeDown).toHaveBeenCalledTimes(2);
+    expect(ctx.swipeUp).toHaveBeenCalledTimes(2);
+    expect(createSnapshot).toHaveBeenCalledTimes(5);
+  });
+
+  it('reads the selected mode from the exact ready snapshot after revealing the clipped control', async () => {
+    const ctx = context();
+    const goToSettings = jest.fn();
+    const createSnapshot = jest.fn().mockReturnValueOnce(clipped()).mockReturnValueOnce(exposed());
+    await expect(readSelectedThemeMode(ctx, { adbPath: 'adb', createSnapshot, goToSettings }))
+      .resolves.toBe('light');
+    expect(goToSettings).toHaveBeenCalledWith(ctx);
+    expect(ctx.swipeDown).toHaveBeenCalledTimes(1);
+    expect(createSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('requires the selected option when reading and the requested option when selecting', () => {
+    expect(findReadyThemeModeOption(clipped())).toBeNull();
+    expect(findReadyThemeModeOption(exposed(false))).toBeNull();
+    expect(findReadyThemeModeOption(exposed(false), 'light')?.key).toBe('light');
+    expect(findReadyThemeModeOption(exposed(), 'dark')).toBeNull();
+  });
+
+  it.each(['[80,185][380,250]', '[80,2020][380,2090]', '[-1,460][380,560]'])(
+    'rejects a selected option whose full geometry intersects chrome or the viewport: %s', (bounds) => {
+      expect(findReadyThemeModeOption(exposed(true, bounds))).toBeNull();
+    },
+  );
+});
 
 describe('catalog sort selection smoke', () => {
   function sortSnapshot(label, { panelBounds, toggleBounds = '[500,100][1000,200]' } = {}) {
@@ -519,9 +608,12 @@ describe('Android scenario route deep links', () => {
 describe('app image picker configuration', () => {
   const appConfig = require('../../app.json');
 
-  it('declares gallery-only image picker permissions explicitly', () => {
+  it('preserves gallery/camera restrictions while allowing only explicit recorder microphone permission', () => {
     const imagePickerPlugin = appConfig.expo.plugins.find(
       (plugin) => Array.isArray(plugin) && plugin[0] === 'expo-image-picker'
+    );
+    const audioPlugin = appConfig.expo.plugins.find(
+      (plugin) => Array.isArray(plugin) && plugin[0] === 'expo-audio'
     );
 
     expect(imagePickerPlugin).toEqual([
@@ -529,25 +621,26 @@ describe('app image picker configuration', () => {
       expect.objectContaining({
         photosPermission: expect.stringContaining('attach images'),
         cameraPermission: false,
-        microphonePermission: false,
+        microphonePermission: audioPlugin[1].microphonePermission,
       }),
     ]);
+    expect(imagePickerPlugin[1].microphonePermission).toContain('tap Record');
     expect(appConfig.expo.plugins).toContain('./plugins/withIosPhotoLibraryPermissionLocalization');
     expect(appConfig.expo.android.permissions).not.toContain('CAMERA');
-    expect(appConfig.expo.android.permissions).not.toContain('RECORD_AUDIO');
+    expect(appConfig.expo.android.permissions).toContain('RECORD_AUDIO');
     expect(appConfig.expo.android.permissions).toContain('READ_EXTERNAL_STORAGE');
     expect(appConfig.expo.android.permissions).not.toContain('WRITE_EXTERNAL_STORAGE');
     expect(appConfig.expo.android.blockedPermissions).toEqual(
       expect.arrayContaining([
         'android.permission.CAMERA',
-        'android.permission.RECORD_AUDIO',
         'android.permission.WRITE_EXTERNAL_STORAGE',
       ])
     );
     expect(appConfig.expo.android.blockedPermissions).not.toContain('android.permission.READ_EXTERNAL_STORAGE');
+    expect(appConfig.expo.android.blockedPermissions).not.toContain('android.permission.RECORD_AUDIO');
   });
 
-  it('release config plugin removes blocked Android capture/write permissions and caps legacy gallery read', () => {
+  it('release config keeps explicit microphone permission, removes blocked camera/write permissions and caps legacy gallery read', () => {
     const nextConfig = {
       modResults: {
         manifest: {
@@ -573,11 +666,13 @@ describe('app image picker configuration', () => {
     expect(permissionNames).toEqual([
       'android.permission.INTERNET',
       'android.permission.CAMERA',
+      'android.permission.RECORD_AUDIO',
       'android.permission.READ_EXTERNAL_STORAGE',
     ]);
     expect(result.modResults.manifest['uses-permission']).toEqual([
       { $: { 'android:name': 'android.permission.INTERNET' } },
       { $: { 'android:name': 'android.permission.CAMERA', 'tools:node': 'remove' } },
+      { $: { 'android:name': 'android.permission.RECORD_AUDIO' } },
       {
         $: {
           'android:name': 'android.permission.READ_EXTERNAL_STORAGE',
@@ -4493,6 +4588,8 @@ describe('android-scenarios pack selection', () => {
       <hierarchy>
         <node bounds="[0,0][1080,2412]" />
         <node resource-id="settings-header" bounds="[0,96][1080,243]" />
+        <node resource-id="bottom-tab-settings" selected="true" bounds="[810,2200][1080,2400]" />
+        <node resource-id="settings-screen-content" bounds="[0,96][1080,2200]" />
         <node resource-id="settings-theme-mode-control" bounds="${bounds}" />
       </hierarchy>
     `);
@@ -4667,6 +4764,12 @@ describe('android-scenarios pack selection', () => {
         'runtime-local-tts-tokens',
         'runtime-local-tts-continuous',
         'runtime-local-tts-playback',
+        'runtime-stage7-recording',
+        'runtime-stage7-import',
+        'runtime-stage7-audio-input',
+        'runtime-stage7-voices',
+        'runtime-stage7-phonemizer',
+        'runtime-stage7-reference',
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));
@@ -4697,6 +4800,39 @@ describe('android-scenarios pack selection', () => {
       expect(selectScenarios(scenarios, parseCliOptions(['--pack', pack])).map(item => item.id))
         .not.toEqual(expect.arrayContaining(['runtime-local-tts-tokens', 'runtime-local-tts-continuous']));
     }
+  });
+
+  it('forwards one named QA instance and binds the actual scenario build environment', () => {
+    const options = parseCliOptions(['--isolated-qa-install', '--qa-instance', 'stage7', '--pack', 'audio-voices']);
+    expect(buildSmokeLaunchArgs(options, 'physical-device')).toEqual(
+      expect.arrayContaining(['--isolated-qa-install', '--qa-instance', 'stage7', '--serial', 'physical-device']),
+    );
+    const env = { ANDROID_SMOKE_APK_VARIANT: 'release' };
+    configureScenarioBuildEnvironment(options, true, env);
+    expect(env).toMatchObject({ POCKET_AI_ANDROID_QA_INSTANCE: 'stage7', EXPO_PUBLIC_ANDROID_QA: '1',
+      POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1' });
+    expect(() => parseCliOptions(['--qa-instance', 'stage7'])).toThrow(/requires --isolated-qa-install/);
+    expect(() => parseCliOptions(['--isolated-qa-install', '--qa-instance', 'other.stage7'])).toThrow(/QA instance/);
+    expect(() => configureScenarioBuildEnvironment({ pack: 'audio-voices' }, true,
+      { POCKET_AI_ANDROID_QA_INSTANCE: 'stage7' })).toThrow(/requires --isolated-qa-install/);
+  });
+
+  it('keeps Stage7 import storage/cold proof explicit and requires its isolated native build', () => {
+    const options = parseCliOptions(['--scenario', 'runtime-stage7-import', '--apk-variant', 'release', '--isolated-qa-install']);
+    const selected = selectScenarios(scenarios, options);
+    expect(selected.map(item => item.id)).toEqual(['runtime-stage7-import']);
+    expect(selected[0]).toMatchObject({ requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true });
+    const env = {};
+    configureScenarioBuildEnvironment(options, true, env);
+    expect(env).toMatchObject({ EXPO_PUBLIC_ANDROID_QA: '1', EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1', POCKET_AI_QA_PRIVATE_FILE_ACCESS: '1' });
+    expect(() => configureScenarioBuildEnvironment({ scenario: 'runtime-stage7-import', apkVariant: 'release' }, true, {}))
+      .toThrow(/isolated-qa-install/);
+  });
+
+  it('keeps Stage7 capture, audio input and voices in one explicit bounded pack', () => {
+    const selected = selectScenarios(scenarios, parseCliOptions(['--pack', 'audio-voices', '--apk-variant', 'release', '--isolated-qa-install']));
+    expect(selected.map(item => item.id)).toEqual(['runtime-stage7-recording', 'runtime-stage7-audio-input', 'runtime-stage7-voices']);
+    expect(selected.every(item => item.requiresCurrentHeadProvenance && item.requiresIsolatedQaInstall)).toBe(true);
   });
 });
 
@@ -6442,5 +6578,157 @@ describe('android-scenarios report path serialization', () => {
         },
       ])[0].screenshotPath
     ).toBe('nested/capture.png');
+  });
+});
+
+
+describe('Glass Settings navigation and failure evidence regression', () => {
+  const settingsSnapshot = (targetBounds, markerY = 500) => parseUiSnapshot(`
+    <hierarchy>
+      <node bounds="[0,0][720,1600]" />
+      <node resource-id="bottom-tab-settings" selected="true" bounds="[540,1450][720,1560]" />
+      <node resource-id="settings-screen-content" bounds="[0,100][720,1450]" />
+      <node resource-id="settings-header" bounds="[0,40][720,180]" />
+      <node resource-id="progress-row" bounds="[30,${markerY}][690,${markerY + 80}]" />
+      ${targetBounds ? `<node resource-id="settings-visual-style-container" bounds="${targetBounds}" />` : ''}
+    </hierarchy>
+  `);
+
+  it('searches above a retained Settings position beyond three progressing downward swipes', async () => {
+    let position = 0;
+    const ctx = {
+      serial: 'test-only',
+      swipeDown: jest.fn(async () => { position += 1; }),
+      swipeUp: jest.fn(async () => {}),
+    };
+    const createSnapshot = jest.fn(() => settingsSnapshot(
+      position >= 4 ? '[30,400][690,700]' : null,
+      400 + position * 50,
+    ));
+    await expect(scrollToResourceId(ctx, 'settings-visual-style-container', {
+      adbPath: 'unused', createSnapshot,
+    })).resolves.toEqual(expect.objectContaining({ resourceId: 'settings-visual-style-container' }));
+    expect(ctx.swipeDown).toHaveBeenCalledTimes(4);
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+    expect(ctx.swipeDown.mock.calls[0][0].snapshot).toEqual(settingsSnapshot(null, 400));
+  });
+
+  it('moves a known target above the bottom overlay without first swiping the wrong direction', async () => {
+    const covered = settingsSnapshot('[30,1350][690,1550]');
+    const clear = settingsSnapshot('[30,500][690,800]');
+    const ctx = { serial: 'test-only', swipeDown: jest.fn(), swipeUp: jest.fn() };
+    await scrollToResourceId(ctx, 'settings-visual-style-container', {
+      adbPath: 'unused', createSnapshot: jest.fn().mockReturnValueOnce(covered).mockReturnValue(clear),
+    });
+    expect(ctx.swipeDown).not.toHaveBeenCalled();
+    expect(ctx.swipeUp).toHaveBeenCalledWith(expect.objectContaining({ snapshot: covered }));
+    const gesture = resolveScenarioVerticalSwipeGesture(covered, 'up');
+    expect(gesture.startX).toBe(360);
+    expect(gesture.startY).toBeLessThan(1376);
+    expect(gesture.endY).toBeGreaterThan(180);
+  });
+
+  it('stops a stationary Settings search and preserves its last snapshot without another adb dump', async () => {
+    const snapshot = settingsSnapshot(null);
+    const ctx = { serial: 'test-only', swipeDown: jest.fn(), swipeUp: jest.fn() };
+    const createSnapshot = jest.fn(() => snapshot);
+    let failure;
+    try {
+      await scrollToResourceId(ctx, 'settings-visual-style-container', { adbPath: 'unused', createSnapshot });
+    } catch (error) { failure = error; }
+    expect(failure.message).toContain('settings-visual-style-container');
+    expect(failure.uiSnapshot).toBe(snapshot);
+    expect(ctx.swipeDown.mock.calls.length + ctx.swipeUp.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(createSnapshot.mock.calls.length).toBeLessThanOrEqual(5);
+  });
+
+  it('keeps the thirteen-gesture cap even while every snapshot changes', async () => {
+    let reads = 0;
+    const ctx = { serial: 'test-only', swipeDown: jest.fn(), swipeUp: jest.fn() };
+    await expect(scrollToResourceId(ctx, 'settings-visual-style-container', {
+      adbPath: 'unused', createSnapshot: () => settingsSnapshot(null, 300 + reads++),
+    })).rejects.toThrow('Bounded swipes: down=10, up=3');
+    expect(ctx.swipeDown.mock.calls.length + ctx.swipeUp.mock.calls.length).toBe(13);
+  });
+
+  it('does not reset the elapsed search bound after a progressing gesture', async () => {
+    let time = 0;
+    const now = jest.spyOn(Date, 'now').mockImplementation(() => time);
+    const ctx = {
+      serial: 'test-only', swipeDown: jest.fn(async () => { time = 1001; }), swipeUp: jest.fn(),
+    };
+    try {
+      await expect(scrollToResourceId(ctx, 'settings-visual-style-container', {
+        timeoutMs: 1000, adbPath: 'unused', createSnapshot: () => settingsSnapshot(null, 400 + time),
+      })).rejects.toThrow('Bounded swipes: down=1, up=0');
+      expect(ctx.swipeDown).toHaveBeenCalledTimes(1);
+      expect(ctx.swipeUp).not.toHaveBeenCalled();
+    } finally { now.mockRestore(); }
+  });
+
+  it('refuses a Settings swipe when the selected tab or destination is missing', () => {
+    const wrongRoute = parseUiSnapshot('<hierarchy><node bounds="[0,0][720,1600]" /><node resource-id="settings-header" bounds="[0,40][720,180]" /></hierarchy>');
+    expect(() => resolveScenarioVerticalSwipeGesture(wrongRoute, 'down')).toThrow(/Settings/);
+  });
+
+  const themeOptions = (calls, primary, restoreFailure) => ({
+    readSelectedThemeMode: async () => 'system',
+    readSelectedThemeStyle: async () => 'default',
+    selectThemeStyle: async () => {},
+    selectThemeMode: async () => {},
+    captureCoreSurfaceScreenshots: async () => { calls.push('body'); if (primary) throw primary; return { screenshotPath: 'done.png' }; },
+    captureThemeFailureEvidence: () => { calls.push('failure-capture'); return { screenshotPath: 'before.png', uiDumpPath: 'before.xml' }; },
+    restoreThemePreferences: async () => { calls.push('restore'); if (restoreFailure) throw restoreFailure; },
+  });
+
+  it('captures failure before restoring theme and prevents the outer handler from replacing it with Home', async () => {
+    const calls = [];
+    const primary = new Error('original locator failure');
+    let caught;
+    try { await runNativeGlassThemeMatrix({}, themeOptions(calls, primary)); } catch (error) { caught = error; }
+    expect(calls).toEqual(['body', 'failure-capture', 'restore']);
+    expect(caught).toBe(primary);
+    const context = { captureScreenshot: jest.fn(() => 'home-after-restore.png') };
+    expect(captureFailedScenarioEvidence({ scenario: { id: 'native-glass-theme-matrix' }, context, error: caught }))
+      .toEqual(expect.objectContaining({ screenshotPath: 'before.png', uiDumpPath: 'before.xml' }));
+    expect(context.captureScreenshot).not.toHaveBeenCalled();
+  });
+
+  it('retains the primary failure when both evidence capture and restoration fail', async () => {
+    const calls = [];
+    const primary = new Error('original locator failure');
+    const cleanup = new Error('restore failed');
+    const options = themeOptions(calls, primary, cleanup);
+    options.captureThemeFailureEvidence = () => { calls.push('failure-capture'); throw new Error('capture failed'); };
+    let caught;
+    try { await runNativeGlassThemeMatrix({}, options); } catch (error) { caught = error; }
+    expect(calls).toEqual(['body', 'failure-capture', 'restore']);
+    expect(caught.message).toContain(primary.message);
+    expect(caught.cause).toBe(primary);
+    expect(caught.errors).toEqual([primary, cleanup]);
+    expect(caught.themeFailureEvidence.evidenceCaptureError).toContain('capture failed');
+  });
+
+  it('writes failure-time XML and bounds even if screenshot capture fails', () => {
+    const snapshot = settingsSnapshot('[30,0][690,150]');
+    const writeFileSync = jest.fn();
+    const evidence = captureThemeFailureEvidence({
+      serial: 'test-only', captureScreenshot: () => { throw new Error('screenshot unavailable'); },
+    }, 'select-glass', snapshot, {
+      mkdirSync: jest.fn(), writeFileSync, outputRoot: '/test-artifacts',
+      createSnapshot: () => { throw new Error('must reuse exact failure snapshot'); },
+    });
+    expect(writeFileSync).toHaveBeenCalledWith(expect.stringContaining('before-restore.xml'), snapshot.xml);
+    expect(evidence.failurePhase).toBe('select-glass');
+    expect(evidence.failureBounds.header.bottom).toBe(180);
+    expect(evidence.failureBounds.target.bottom).toBe(150);
+    expect(evidence.evidenceCaptureError).toContain('screenshot unavailable');
+  });
+
+  it('restores theme after a successful full light/dark matrix without failure artifacts', async () => {
+    const calls = [];
+    const options = themeOptions(calls);
+    await expect(runNativeGlassThemeMatrix({}, options)).resolves.toEqual({ screenshotPath: 'done.png' });
+    expect(calls).toEqual(['body', 'body', 'restore']);
   });
 });

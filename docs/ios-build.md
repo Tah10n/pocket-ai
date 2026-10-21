@@ -1,6 +1,9 @@
 # iOS Release Build
 
-This guide covers building and distributing Pocket AI for iOS via Xcode.
+The current eSpeak-enabled configuration is for **iOS development builds only**.
+Do not use App Store distribution steps for this configuration; see
+[distribution and source requirements](../DISTRIBUTION.md). This guide also retains the
+project's general Xcode build workflow.
 
 For general development setup, see the main [README](../README.md).
 
@@ -9,6 +12,7 @@ For general development setup, see the main [README](../README.md).
 - macOS with Xcode 26 or newer installed (Expo SDK 55 requires Xcode 26)
 - An [Apple Developer](https://developer.apple.com/) account enrolled in the Apple Developer Program
 - CocoaPods (`sudo gem install cocoapods` or via Homebrew)
+- CMake 3.22 or newer on `PATH` for the pinned offline phonemizer source preparation
 - Rust through `rustup`; the repository pins Rust 1.97.1 and the device, Apple Silicon
   simulator, and Intel simulator targets used by the local document module
 

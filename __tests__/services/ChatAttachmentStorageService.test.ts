@@ -302,52 +302,22 @@ describe('ChatAttachmentStorageService', () => {
     expect(FileSystem.copyAsync).not.toHaveBeenCalled();
   });
 
-  it('copies picked WAV/MP3 audio into app-owned chat attachment storage', async () => {
-    (FileSystem.getInfoAsync as jest.Mock)
-      .mockResolvedValueOnce({ exists: false })
-      .mockResolvedValueOnce({ exists: true, size: 4096 });
-    const service = new ChatAttachmentStorageService({
-      now: () => 123,
-      random: () => 0.456,
-    });
-
-    const draft = await service.copyAudioAssetToDraft({
-      uri: 'content://documents/voice',
-      name: 'voice.mp3',
-      size: 4096,
-      mimeType: 'audio/mpeg',
-    });
-
-    expect(FileSystem.copyAsync).toHaveBeenCalledWith({
-      from: 'content://documents/voice',
-      to: 'test-dir/chat-attachments/draft-123-gez4w9.mp3',
-    });
-    expect(draft).toEqual(expect.objectContaining({
-      kind: 'audio',
-      localUri: 'test-dir/chat-attachments/draft-123-gez4w9.mp3',
-      mimeType: 'audio/mpeg',
-      sizeBytes: 4096,
-      copyStatus: 'copied',
-      audio: { format: 'mp3' },
-    }));
-
-    expect(materializeMediaDraftsForMessage({
-      threadId: 'thread-1',
-      messageId: 'message-1',
-      drafts: [draft],
-      now: () => 200,
-    })).toEqual([
-      expect.objectContaining({
-        id: 'draft-123-gez4w9',
-        kind: 'audio',
-        threadId: 'thread-1',
-        messageId: 'message-1',
-        localUri: 'test-dir/chat-attachments/draft-123-gez4w9.mp3',
-        mimeType: 'audio/mpeg',
-        source: 'document_picker',
-        audio: { format: 'mp3' },
-      }),
-    ]);
+  it('copies a prepared microphone output into attachment storage without taking source ownership', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: false })
+      .mockResolvedValueOnce({ exists: true, size: 2044 });
+    const prepared = { uri: 'test-cache/audio-preparation/123.wav', sourceSha256: 'a'.repeat(64),
+      identity: 'bounded-audio-preparation', sampleRate: 16_000, channels: 1 as const, sampleCount: 1000,
+      durationMs: 62.5, sizeBytes: 2044 };
+    const service = new ChatAttachmentStorageService({ now: () => 123, random: () => 0.456 });
+    const draft = await service.copyPreparedAudioToDraft(prepared, 'microphone');
+    expect(FileSystem.copyAsync).toHaveBeenCalledWith({ from: prepared.uri,
+      to: 'test-dir/chat-attachments/draft-123-gez4w9.wav' });
+    expect(draft).toMatchObject({ kind: 'audio', source: 'microphone', mimeType: 'audio/wav', sizeBytes: 2044,
+      audio: { format: 'wav', sampleRate: 16_000, sampleCount: 1000, sourceSha256: prepared.sourceSha256 } });
+    expect(materializeMediaDraftsForMessage({ threadId: 'thread-1', messageId: 'message-1', drafts: [draft] }))
+      .toEqual([expect.objectContaining({ kind: 'audio', source: 'microphone',
+        audio: expect.objectContaining({ preparationIdentity: prepared.identity }) })]);
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
   });
 
   it('materializes copied document drafts for processor input and failed metadata for previews', () => {

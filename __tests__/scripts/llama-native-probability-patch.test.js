@@ -1,9 +1,10 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const vm = require('node:vm');
 const { sync: globSync } = require('glob');
 const {
-  AFTER, AFTER_SHA256, BEFORE, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION,
+  AFTER, AFTER_SHA256, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION,
   hashSource, patchLlamaBridge, SOURCE_PATCHES, PARAMS_SOURCE, PARAMS_AFTER_SHA256, applyReplacements,
   CLOCK_SOURCE, CLOCK_BEFORE_SHA256, CLOCK_AFTER_SHA256, CLOCK_BEFORE, CLOCK_AFTER, CLOCK_PREVIOUS_SHA256, CLOCK_PRIVACY_REPLACEMENTS,
   GRAMMAR_SOURCE, GRAMMAR_BEFORE_SHA256, GRAMMAR_AFTER_SHA256,
@@ -36,6 +37,180 @@ describe('pinned serial sampling and template clock corrections', () => {
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it('adds the DAC decode thread repair to an earlier fully patched installation without changing other sources', () => {
+    const relative = 'cpp/codec/src/models/dac.cpp';
+    const file = path.join(root, 'node_modules/llama.rn', relative);
+    const original = fs.readFileSync(file, 'utf8');
+    patchLlamaBridge(root);
+    const patched = fs.readFileSync(file, 'utf8');
+    const others = SOURCE_PATCHES.filter(entry => entry.source !== relative).map(entry => {
+      const other = path.join(root, 'node_modules/llama.rn', entry.source);
+      return [other, fs.readFileSync(other)];
+    });
+    // A previous app install already has every existing guarded patch, but
+    // this newly registered source is still the exact upstream DAC file.
+    fs.writeFileSync(file, original);
+    expect(() => patchLlamaBridge(root, { check: true })).toThrow(/patch is missing/u);
+    expect(patchLlamaBridge(root).status).toBe('applied');
+    expect(fs.readFileSync(file, 'utf8')).toBe(patched);
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+    for (const [other, bytes] of others) expect(fs.readFileSync(other)).toEqual(bytes);
+    const patch = SOURCE_PATCHES.find(entry => entry.source === relative);
+    expect(hashSource(patched)).toBe(patch.afterSha256);
+    let reversed = patched;
+    for (const [before, after] of [...patch.replacements].reverse()) reversed = reversed.replace(after, before);
+    expect(reversed).toBe(original);
+    // No init, encoder, model default or other codec change is part of this fix.
+    expect(patched.slice(patched.indexOf('enum codec_status codec_dac_encode(')))
+      .toBe(original.slice(original.indexOf('enum codec_status codec_dac_encode(')));
+    expect(patched.slice(0, patched.indexOf('static enum codec_status codec_dac_decode_tokens_graph(')))
+      .toBe(original.slice(0, original.indexOf('static enum codec_status codec_dac_decode_tokens_graph(')));
+  });
+
+  it.each(['pristine', 'applied'])('rejects unknown %s DAC source without changing any guarded source', state => {
+    if (state === 'applied') patchLlamaBridge(root);
+    const file = path.join(root, 'node_modules/llama.rn/cpp/codec/src/models/dac.cpp');
+    fs.appendFileSync(file, '\n// unknown DAC source drift\n');
+    const before = SOURCE_PATCHES.map(entry => {
+      const guarded = path.join(root, 'node_modules/llama.rn', entry.source);
+      return [guarded, fs.readFileSync(guarded)];
+    });
+    expect(() => patchLlamaBridge(root)).toThrow(/source fingerprint mismatch: cpp\/codec\/src\/models\/dac\.cpp/u);
+    for (const [guarded, bytes] of before) expect(fs.readFileSync(guarded)).toEqual(bytes);
+  });
+
+  it('migrates the exact previous audio guard and remains idempotent without changing other sources', () => {
+    const relative = 'cpp/tools/mtmd/mtmd-helper.cpp';
+    const patch = SOURCE_PATCHES.find(entry => entry.source === relative);
+    const previousHash = 'c9a29e969cbba13599e169f99b7c5a340008e11a963030f6004d67d4efac934d';
+    const migration = patch.intermediates.find(entry => entry.sha256 === previousHash);
+    patchLlamaBridge(root);
+    const file = path.join(root, 'node_modules/llama.rn', relative);
+    const final = fs.readFileSync(file, 'utf8');
+    const otherSources = SOURCE_PATCHES.filter(entry => entry.source !== relative).map(entry => {
+      const other = path.join(root, 'node_modules/llama.rn', entry.source);
+      return [other, fs.readFileSync(other)];
+    });
+    let previous = final;
+    for (const [before, after] of [...migration.replacements].reverse()) previous = previous.replace(after, before);
+    expect(hashSource(previous)).toBe(previousHash);
+    fs.writeFileSync(file, previous);
+    expect(() => patchLlamaBridge(root, { check: true })).toThrow(/patch is missing/u);
+    expect(patchLlamaBridge(root).status).toBe('applied');
+    expect(fs.readFileSync(file, 'utf8')).toBe(final);
+    expect(hashSource(final)).toBe(patch.afterSha256);
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+    for (const [other, bytes] of otherSources) expect(fs.readFileSync(other)).toEqual(bytes);
+  });
+
+  it('bounds actual input decoder allocations and rejects truncated/nonfinite PCM before bitmap publication', () => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn/cpp/tools/mtmd/mtmd-helper.cpp'), 'utf8');
+    const decode = source.slice(source.indexOf('static bool decode_audio_from_buf('), source.indexOf('} // namespace audio_helpers'));
+    const inputLimit = Number(decode.match(/max_input_bytes = (\d+) \* 1024 \* 1024/u)[1]) * 1024 * 1024;
+    const frameLimit = Number(decode.match(/max_pcm_frames = (\d+) \* 1024 \* 1024/u)[1]) * 1024 * 1024;
+    // Execute the real C++ numeric guard expressions, whose syntax is also JavaScript.
+    const inputGuard = decode.match(/if \((len > max_input_bytes)\)/u)[1];
+    const frameGuard = decode.match(/if \((frame_count > max_pcm_frames)\)/u)[1];
+    for (const [bytes, rejected] of [[25 * 1024 * 1024, false], [25 * 1024 * 1024 + 1, true]]) {
+      expect(vm.runInNewContext(inputGuard, { len: bytes, max_input_bytes: inputLimit })).toBe(rejected);
+    }
+    for (const [frames, rejected] of [[140 * 16000, false], [40 * 16000, false],
+      [8 * 1024 * 1024, false], [8 * 1024 * 1024 + 1, true], [0xffffffff, true]]) {
+      expect(vm.runInNewContext(frameGuard, { frame_count: frames, max_pcm_frames: frameLimit })).toBe(rejected);
+    }
+    expect(decode.indexOf('len > max_input_bytes')).toBeLessThan(decode.indexOf('ma_decoder_init_memory('));
+    expect(decode.indexOf('frame_count > max_pcm_frames')).toBeLessThan(decode.indexOf('pcmf32_mono.resize('));
+    expect(decode).toContain('result != MA_SUCCESS || frame_count == 0');
+    expect(decode).toContain('frames_read == 0 || frames_read > frame_count');
+    expect(decode).toContain('extra_frames != 0 || result != MA_AT_END');
+    expect(decode).toContain('source_cursor != source_length');
+    expect(decode).toContain('pcmf32_mono.resize(static_cast<size_t>(frames_read))');
+    expect(decode).toContain('!std::isfinite(sample)');
+    expect(decode).toContain('~decoder_guard() { ma_decoder_uninit(value); }');
+    expect(decode).toContain('audio_decoder_duration_limit');
+    const file = source.slice(source.indexOf('mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_file('));
+    expect(file.indexOf('audio_helpers::is_audio_file(')).toBeLessThan(file.indexOf('buf.resize(file_size)'));
+    expect(file).toContain('fclose(f);\n            throw std::runtime_error("audio_decoder_size_limit")');
+  });
+
+  it.each(['pristine', 'applied'])('rejects unknown %s input decoder source before writing guarded files', state => {
+    if (state === 'applied') patchLlamaBridge(root);
+    const file = path.join(root, 'node_modules/llama.rn/cpp/tools/mtmd/mtmd-helper.cpp');
+    fs.appendFileSync(file, '\n// unknown audio decoder drift\n');
+    const jsiBefore = fs.readFileSync(sourcePath, 'utf8');
+    expect(() => patchLlamaBridge(root)).toThrow(/source fingerprint mismatch/u);
+    expect(fs.readFileSync(sourcePath, 'utf8')).toBe(jsiBefore);
+  });
+
+  it('removes actual multimodal text-log arguments while retaining event and media-count metadata', () => {
+    const paths = ['cpp/tools/mtmd/mtmd.cpp', 'cpp/rn-mtmd.hpp'];
+    const originals = new Map(paths.map(relative => [relative, fs.readFileSync(path.join(root, 'node_modules/llama.rn', relative), 'utf8')]));
+    const secrets = ['synthetic-lazy-private', 'synthetic-input-private', 'synthetic-full-prompt-private', 'synthetic-prompt-private'];
+    const runLogs = sources => {
+      const cpp = sources.get(paths[0]);
+      const header = sources.get(paths[1]);
+      const lazy = cpp.match(/LOG_DBG\("%s: lazy callback returned text[^\n]*\);/u)[0];
+      const addText = cpp.slice(cpp.indexOf('void add_text(const std::string & txt, bool parse_special)')).match(/LOG_DBG\([^\n]*\);/u)[0];
+      const processing = header.match(/LOG_INFO\("\[DEBUG\] Processing[^\n]*\);/gu);
+      expect(processing).toHaveLength(2);
+      const emitted = [];
+      const log = (format, ...args) => {
+        let index = 0;
+        emitted.push(format.replace(/%s|%zu/gu, () => String(args[index++])));
+      };
+      // These four actual C++ calls share JavaScript's function-call syntax.
+      // Execute only the log expressions, with synthetic values for their arguments.
+      vm.runInNewContext([lazy, addText, ...processing].join('\n'), {
+        LOG_DBG: log, LOG_INFO: log, __func__: 'synthetic_function',
+        out_str: secrets[0], txt: { c_str: () => secrets[1] },
+        full_prompt: { c_str: () => secrets[2] }, prompt: { c_str: () => secrets[3] },
+        media_paths: { size: () => 2 },
+      });
+      return emitted;
+    };
+    expect(runLogs(originals)).toHaveLength(4);
+    runLogs(originals).forEach((entry, index) => expect(entry).toContain(secrets[index]));
+    patchLlamaBridge(root);
+    const updated = new Map(paths.map(relative => [relative, fs.readFileSync(path.join(root, 'node_modules/llama.rn', relative), 'utf8')]));
+    expect(runLogs(updated)).toEqual([
+      'synthetic_function: lazy callback returned text\n',
+      'synthetic_function: added text chunk\n',
+      '[DEBUG] Processing message with role=user',
+      '[DEBUG] Processing 2 media',
+    ]);
+    for (const entry of runLogs(updated)) for (const secret of secrets) expect(entry).not.toContain(secret);
+    for (const relative of paths) {
+      const patch = SOURCE_PATCHES.find(entry => entry.source === relative);
+      let reversed = updated.get(relative);
+      for (const [before, after] of [...patch.replacements].reverse()) reversed = reversed.replace(after, before);
+      expect(reversed).toBe(originals.get(relative));
+      expect(hashSource(updated.get(relative))).toBe(patch.afterSha256);
+    }
+  });
+
+  it.each(['cpp/tools/mtmd/mtmd.cpp', 'cpp/rn-mtmd.hpp'])('checks and reapplies the exact multimodal privacy patch idempotently: %s', relative => {
+    const file = path.join(root, 'node_modules/llama.rn', relative);
+    const original = fs.readFileSync(file, 'utf8');
+    patchLlamaBridge(root);
+    fs.writeFileSync(file, original);
+    expect(() => patchLlamaBridge(root, { check: true })).toThrow(/patch is missing/u);
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
+    expect(patchLlamaBridge(root).status).toBe('applied');
+    const patched = fs.readFileSync(file, 'utf8');
+    expect(patchLlamaBridge(root, { check: true }).status).toBe('already-applied');
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+    expect(fs.readFileSync(file, 'utf8')).toBe(patched);
+  });
+
+  it.each(['pristine', 'applied'].flatMap(state => ['cpp/tools/mtmd/mtmd.cpp', 'cpp/rn-mtmd.hpp'].map(relative => [state, relative])))('rejects unknown %s multimodal source before every write: %s', (state, relative) => {
+    if (state === 'applied') patchLlamaBridge(root);
+    fs.appendFileSync(path.join(root, 'node_modules/llama.rn', relative), '\n// unexpected multimodal source drift\n');
+    const before = SOURCE_PATCHES.map(patch => [patch.source, fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source))]);
+    expect(() => patchLlamaBridge(root)).toThrow(`fingerprint mismatch: ${relative}`);
+    for (const [source, bytes] of before) expect(fs.readFileSync(path.join(root, 'node_modules/llama.rn', source))).toEqual(bytes);
+  });
+
   it('removes reconstructible token IDs and text from serial completion and batch diagnostics', () => {
     patchLlamaBridge(root);
     const read = source => fs.readFileSync(path.join(root, 'node_modules/llama.rn', source), 'utf8');
@@ -51,6 +226,23 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(completion).not.toContain('ss << token');
     expect(completion).toContain('LOG_INFO("prompt token count: %zu", num_prompt_tokens);');
     expect(patchLlamaBridge(root).status).toBe('already-applied');
+  });
+
+  it('migrates the accepted JSI source and exposes only an actual successful native lazy-speaker receipt', () => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === SOURCE);
+    const migration = patch.intermediates.find(entry => entry.sha256 === '4f4c6254c3cefecabe19110efd18dd6d70078083a88b29adf1e73ab083a667a1');
+    let previous = applyReplacements(fs.readFileSync(sourcePath, 'utf8'), patch.replacements);
+    for (const [before, after] of [...migration.replacements].reverse()) previous = previous.replace(after, before);
+    expect(hashSource(previous)).toBe(migration.sha256);
+    fs.writeFileSync(sourcePath, previous);
+    patchLlamaBridge(root);
+    const updated = fs.readFileSync(sourcePath, 'utf8');
+    expect(updated).toContain('ctx->tts_wrapper->getSpeaker(speakerId)');
+    expect(updated).toContain('formatted_speaker == nullptr || !formatted_speaker->baked');
+    expect(updated).toContain('formatted_speaker->rows <= 0');
+    expect(updated).toContain('"Reference speaker encoding failed"');
+    expect(updated).toContain('res.setProperty(rt, "speakerRows", jsi::Value((double) speaker_rows))');
+    expect(hashSource(updated)).toBe(AFTER_SHA256);
   });
 
   it.each([COMPLETION_SOURCE, SAMPLING_SOURCE])('migrates the exact accepted stage 3 privacy source: %s', source => {
@@ -110,6 +302,11 @@ describe('pinned serial sampling and template clock corrections', () => {
     ['cpp/rn-completion.cpp', '014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc'],
     ['cpp/rn-tts.cpp', '147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f'],
     ['cpp/rn-tts.cpp', '30c41e9ee214171f20ab11191317954c7f13d3bc3c8508d4f14901d27f05abe0'],
+    ['cpp/rn-tts.cpp', 'ac3acbe44c5a84b60144f79105cbd6902af0e3548a5f3ac53c4a9e1ce2546ad3'],
+    ['cpp/rn-tts.cpp', 'dc55dac2ee2da8d49f4a04c2a82f647b4d0ee9e37e3da271dbf9d90ae8129fdb'],
+    ['cpp/rn-tts.cpp', '5b2759c889c37641ce41e350f5a4a4d522c7c0f95fc251c4ab751255db1ea164'],
+    ['cpp/rn-tts.cpp', 'fd32040a76cbf769242c686fed5493647d1cb85ca0e37b448c7a814709e0ba9c'],
+    ['cpp/rn-tts.cpp', '4bca3e40a29ad8ef073deb927ef7900f20dd1ce27c51f7bb05b880bf6a7fc3f5'],
   ])('upgrades the exact accepted pre-TTS privacy source: %s', (source, previousHash) => {
     const patch = SOURCE_PATCHES.find(entry => entry.source === source);
     const migration = patch.intermediates.find(entry => entry.sha256 === previousHash);
@@ -122,6 +319,91 @@ describe('pinned serial sampling and template clock corrections', () => {
     patchLlamaBridge(root);
     expect(hashSource(fs.readFileSync(file, 'utf8'))).toBe(patch.afterSha256);
     expect(patchLlamaBridge(root).status).toBe('already-applied');
+  });
+
+  it('applies the exact pristine TTS source and keeps the direct decoder owner idempotently', () => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === 'cpp/rn-tts.cpp');
+    const file = path.join(root, 'node_modules/llama.rn', patch.source);
+    const original = fs.readFileSync(file, 'utf8');
+    expect(hashSource(original)).toBe(patch.beforeSha256);
+    const expected = applyReplacements(original, patch.replacements);
+    expect(hashSource(expected)).toBe(patch.afterSha256);
+    patchLlamaBridge(root);
+    expect(fs.readFileSync(file, 'utf8')).toBe(expected);
+    const constructor = expected.slice(expected.indexOf('llama_rn_context_tts::llama_rn_context_tts('),
+      expected.indexOf('llama_rn_context_tts::~llama_rn_context_tts()'));
+    const guard = constructor.indexOf('if (rn_tts_needs_audio_lm(codec_model)) {');
+    expect(guard).toBeGreaterThan(constructor.indexOf('codec_ctx = codec_init_from_model(codec_model, context_params);'));
+    expect(guard).toBeLessThan(constructor.indexOf('audio_lm_ctx = codec_common::audio_lm_init(alm_params, &alm_err);'));
+    expect(expected).toContain('codec_decode(codec_ctx, &token_buffer, &pcm, decode_params)');
+    expect(patchLlamaBridge(root, { check: true }).status).toBe('already-applied');
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+    expect(fs.readFileSync(file, 'utf8')).toBe(expected);
+    let reversed = expected;
+    for (const [before, after] of [...patch.replacements].reverse()) reversed = reversed.replace(after, before);
+    expect(reversed).toBe(original);
+  });
+
+  it.each([
+    ['plain DAC', { arch: 'dac', meta: { items: [{ key: 'codec.architecture' }, { key: 'codec.dac.hop_size' }], n_items: 2 } }, false],
+    ['plain WavTokenizer', { arch: 'wavtokenizer_large', meta: { items: [
+      { key: 'general.architecture', value: 'wavtokenizer_large' },
+      { key: 'general.name', value: 'WavTokenizer' },
+      { key: 'codec.sample_rate', value: '24000' },
+      { key: 'codec.hop_size', value: '320' },
+      { key: 'codec.has_encoder', value: 'true' },
+      { key: 'codec.has_decoder', value: 'true' },
+    ], n_items: 6 } }, false],
+    ['other codec', { arch: 'neucodec', meta: { items: [{ key: 'codec.architecture' }], n_items: 1 } }, true],
+    ['unknown codec architecture', { arch: 'unknown', meta: { items: [{ key: 'general.architecture' }], n_items: 1 } }, true],
+    ['unknown model', null, true],
+    ['missing metadata', { arch: 'dac', meta: null }, true],
+    ['missing metadata items', { arch: 'dac', meta: { items: null, n_items: 1 } }, true],
+    ['empty metadata', { arch: 'dac', meta: { items: [], n_items: 0 } }, true],
+    ['unreadable metadata key', { arch: 'dac', meta: { items: [{ key: null }], n_items: 1 } }, true],
+    ['DAC with LM first', { arch: 'dac', meta: { items: [{ key: 'codec.lm.type' }, { key: 'codec.dac.hop_size' }], n_items: 2 } }, true],
+    ['DAC with LM last', { arch: 'dac', meta: { items: [{ key: 'codec.dac.hop_size' }, { key: 'codec.lm.hidden_size', value: null }], n_items: 2 } }, true],
+    ['DAC with a different prefix', { arch: 'dac', meta: { items: [{ key: 'codec.lm_extra' }], n_items: 1 } }, false],
+    ['WavTokenizer missing metadata', { arch: 'wavtokenizer_large', meta: null }, true],
+    ['WavTokenizer missing metadata items', { arch: 'wavtokenizer_large', meta: { items: null, n_items: 1 } }, true],
+    ['WavTokenizer empty metadata', { arch: 'wavtokenizer_large', meta: { items: [], n_items: 0 } }, true],
+    ['WavTokenizer unreadable metadata key', { arch: 'wavtokenizer_large', meta: { items: [{ key: null }], n_items: 1 } }, true],
+    ['WavTokenizer with an explicit false LM flag', { arch: 'wavtokenizer_large', meta: { items: [{ key: 'codec.lm.has_adaptor', value: 'false' }], n_items: 1 } }, true],
+    ['WavTokenizer with LM first', { arch: 'wavtokenizer_large', meta: { items: [{ key: 'codec.lm.kind' }, { key: 'codec.hop_size' }], n_items: 2 } }, true],
+    ['WavTokenizer with LM last', { arch: 'wavtokenizer_large', meta: { items: [{ key: 'codec.hop_size' }, { key: 'codec.lm.hidden_dim', value: null }], n_items: 2 } }, true],
+  ])('uses actual native metadata and retains optional LM initialization for %s', (_label, model, needsAudioLm) => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn/cpp/rn-tts.cpp'), 'utf8');
+    const match = source.match(/static bool rn_tts_needs_audio_lm\(::codec_model \*model\) \{([\s\S]*?)\n\}/u);
+    expect(match).not.toBeNull();
+    // Execute the native guard's actual branch body, translating only C++ declarations/access.
+    const body = match[1]
+      .replace(/::codec_model_arch/gu, 'codec_model_arch')
+      .replace(/const ::codec_arch arch/gu, 'const arch')
+      .replace(/const struct codec_lm_gguf_metadata \*meta/gu, 'const meta')
+      .replace(/const char \*key/gu, 'const key')
+      .replace(/for \(size_t i/gu, 'for (let i')
+      .replace(/meta->/gu, 'meta.')
+      .replace(/std::strncmp/gu, 'strncmp')
+      .replace(/\bnullptr\b/gu, 'null');
+    const actual = vm.runInNewContext('(function(model) {' + body + '\n})(model)', {
+      model, CODEC_ARCH_DAC: 'dac', CODEC_ARCH_WAVTOKENIZER_LARGE: 'wavtokenizer_large',
+      codec_model_arch: value => value.arch,
+      codec_model_metadata: value => value.meta,
+      strncmp: (left, right, length) => left.slice(0, length).localeCompare(right.slice(0, length)),
+    });
+    expect(actual).toBe(needsAudioLm);
+  });
+
+  it('destroys registry speakers and pending selection before fallback context codec teardown', () => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn/cpp/rn-tts.cpp'), 'utf8');
+    const destructor = source.slice(source.indexOf('llama_rn_context_tts::~llama_rn_context_tts() {'));
+    expect(destructor.indexOf('speakers.clear();')).toBeGreaterThan(0);
+    expect(destructor.indexOf('pending_speaker_id = -1;')).toBeGreaterThan(destructor.indexOf('speakers.clear();'));
+    for (const release of ['audio_lm_free(', 'codec_lm_state_free(', 'codec_lm_free(', 'codec_free(', 'codec_model_free(']) {
+      expect(destructor.indexOf('speakers.clear();')).toBeLessThan(destructor.indexOf(release));
+    }
   });
 
   it('bounds token/latent frames before native copies, transpose and codec graph calls', () => {
@@ -176,13 +458,11 @@ describe('pinned serial sampling and template clock corrections', () => {
 
   it.each(['pristine', 'applied'])('rejects unknown %s TTS bounds source before writing any guarded file', state => {
     if (state === 'applied') patchLlamaBridge(root);
-    const before = fs.readFileSync(sourcePath);
     const file = path.join(root, 'node_modules/llama.rn/cpp/rn-tts.cpp');
     fs.appendFileSync(file, '\n// unreviewed TTS decode drift\n');
-    const drifted = fs.readFileSync(file);
+    const before = SOURCE_PATCHES.map(patch => [patch.source, fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source))]);
     expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch: cpp\/rn-tts\.cpp/u);
-    expect(fs.readFileSync(sourcePath)).toEqual(before);
-    expect(fs.readFileSync(file)).toEqual(drifted);
+    for (const [source, bytes] of before) expect(fs.readFileSync(path.join(root, 'node_modules/llama.rn', source))).toEqual(bytes);
   });
 
   it.each(['pristine', 'applied'])('preflights unknown %s backbone privacy source before every write', state => {
@@ -213,7 +493,11 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(hashSource(original)).toBe(BEFORE_SHA256);
     expect(patchLlamaBridge(root)).toEqual({ status: 'applied', sources: Object.fromEntries(SOURCE_PATCHES.map((p) => [p.source, p.afterSha256])) });
     const patched = fs.readFileSync(sourcePath, 'utf8');
-    expect(patched.replace(AFTER, BEFORE)).toBe(original);
+    let reversed = patched;
+    for (const [before, after] of [...SOURCE_PATCHES.find(entry => entry.source === SOURCE).replacements].reverse()) {
+      reversed = reversed.replace(after, before);
+    }
+    expect(reversed).toBe(original);
     expect(patched).toContain(`throwIfContextBusy(ctx);\n${AFTER}\n                parseCompletionParams`);
     expect(patchLlamaBridge(root)).toEqual({ status: 'already-applied', sources: Object.fromEntries(SOURCE_PATCHES.map((p) => [p.source, p.afterSha256])) });
     expect(fs.readFileSync(sourcePath, 'utf8')).toBe(patched);
@@ -283,7 +567,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
     expect(hashSource(fs.readFileSync(sourcePath, 'utf8'))).toBe(BEFORE_SHA256);
     fs.writeFileSync(paramsPath, paramsOriginal);
-    const probabilityPatch = SOURCE_PATCHES[0];
+    const probabilityPatch = SOURCE_PATCHES.find(patch => patch.source === SOURCE);
     fs.writeFileSync(sourcePath, applyReplacements(fs.readFileSync(sourcePath, 'utf8'), probabilityPatch.replacements));
     expect(patchLlamaBridge(root).status).toBe('applied');
     expect(patchLlamaBridge(root, { check: true }).sources[PARAMS_SOURCE]).toBe(PARAMS_AFTER_SHA256);
@@ -312,20 +596,20 @@ describe('pinned serial sampling and template clock corrections', () => {
     const clockPath = path.join(root, 'node_modules/llama.rn', CLOCK_SOURCE);
     fs.appendFileSync(clockPath, '\n// clock source drift\n');
     expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
-    for (const patch of SOURCE_PATCHES.slice(0, 2)) {
+    for (const patch of SOURCE_PATCHES.filter(patch => [SOURCE, PARAMS_SOURCE].includes(patch.source))) {
       expect(hashSource(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8'))).toBe(patch.beforeSha256);
     }
   });
 
   it('adds the core fix to an already-corrected bridge installation without changing bridge bytes', () => {
-    const bridgeBytes = SOURCE_PATCHES.slice(0, 2).map((patch) => {
+    const bridgeBytes = SOURCE_PATCHES.filter(patch => [SOURCE, PARAMS_SOURCE].includes(patch.source)).map((patch) => {
       const file = path.join(root, 'node_modules/llama.rn', patch.source);
       const text = applyReplacements(fs.readFileSync(file, 'utf8'), patch.replacements);
       fs.writeFileSync(file, text);
       return text;
     });
     expect(patchLlamaBridge(root).status).toBe('applied');
-    SOURCE_PATCHES.slice(0, 2).forEach((patch, index) => {
+    SOURCE_PATCHES.filter(patch => [SOURCE, PARAMS_SOURCE].includes(patch.source)).forEach((patch, index) => {
       expect(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8')).toBe(bridgeBytes[index]);
     });
     expect(patchLlamaBridge(root, { check: true }).sources[CLOCK_SOURCE]).toBe(CLOCK_AFTER_SHA256);
@@ -426,7 +710,7 @@ describe('pinned serial sampling and template clock corrections', () => {
       expect(hashSource(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8'))).toBe(patch.beforeSha256);
     }
     fs.writeFileSync(file, original);
-    const previous = SOURCE_PATCHES.slice(0, 3).map((patch) => {
+    const previous = SOURCE_PATCHES.filter(patch => [SOURCE, PARAMS_SOURCE, CLOCK_SOURCE].includes(patch.source)).map((patch) => {
       const target = path.join(root, 'node_modules/llama.rn', patch.source);
       const text = applyReplacements(fs.readFileSync(target, 'utf8'), patch.replacements);
       fs.writeFileSync(target, text);
@@ -459,7 +743,7 @@ describe('pinned serial sampling and template clock corrections', () => {
   it('preflights sixth-source drift before changing any of the five earlier sources', () => {
     fs.appendFileSync(path.join(root, 'node_modules/llama.rn', GRAMMAR_SOURCE), '\n// drift\n');
     expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
-    for (const patch of SOURCE_PATCHES.slice(0, 5)) {
+    for (const patch of SOURCE_PATCHES.filter(patch => [SOURCE, PARAMS_SOURCE, CLOCK_SOURCE, COMPLETION_SOURCE, SAMPLING_SOURCE].includes(patch.source))) {
       expect(hashSource(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8'))).toBe(patch.beforeSha256);
     }
   });
@@ -667,7 +951,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     const projectRoot = path.resolve(__dirname, '../..');
     const relative = 'patches/llama-rn-0.13.0-rc.3.js';
     const packageConfig = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
-    expect(packageConfig.scripts.postinstall).toBe(`node ./${relative} && node ./patches/expo-audio-55.0.18.js`);
+    expect(packageConfig.scripts.postinstall).toBe(`node ./${relative} && node ./patches/expo-audio-55.0.18.js && node ./patches/phonemize-2.0.1.js && node ./patches/llama-rn-neu-assets.js && node ./modules/pocket-phonemizer/scripts/verify-data.mjs`);
     fs.mkdirSync(path.join(root, 'patches'));
     fs.copyFileSync(path.join(projectRoot, relative), path.join(root, relative));
     const before = collectPrebuildInputState(root);
@@ -675,5 +959,20 @@ describe('pinned serial sampling and template clock corrections', () => {
     const after = collectPrebuildInputState(root);
     expect(after.digest).not.toBe(before.digest);
     expect(before.entries.some((entry) => entry.path === relative)).toBe(true);
+  });
+});
+
+describe('Neu termination receipt exact native migrations', () => {
+  it.each(['cpp/rn-completion.cpp', 'cpp/rn-completion.h', 'cpp/jsi/JSICompletion.h'])('retains pristine and every accepted migration for %s', relative => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === relative);
+    const final = fs.readFileSync(path.resolve(__dirname, '../../node_modules/llama.rn', relative), 'utf8').replace(/\r\n/gu, '\n');
+    expect(hashSource(final)).toBe(patch.afterSha256);
+    for (const route of [{ sha256: patch.beforeSha256, replacements: patch.replacements }, ...(patch.intermediates || [])]) {
+      let before = final;
+      for (const [old, updated] of [...route.replacements].reverse()) before = applyReplacements(before, [[updated, old]]);
+      expect(hashSource(before)).toBe(route.sha256);
+      expect(hashSource(applyReplacements(before, route.replacements))).toBe(patch.afterSha256);
+    }
+    if (relative === COMPLETION_SOURCE) expect(patch.afterSha256).toBe(COMPLETION_AFTER_SHA256);
   });
 });

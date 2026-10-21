@@ -31,6 +31,18 @@ import type { ChatDocumentAttachmentDraft } from '../../src/types/attachments';
 import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 
 describe('chatAttachments generic attachment helpers', () => {
+  it('cold-hydrates microphone audio provenance while dropping unbounded or native fields', () => {
+    const attachment = normalizePersistedChatAttachment({ id: 'recorded', kind: 'audio', state: 'ready',
+      threadId: 'chat-a', messageId: 'message-a', localUri: 'test-dir/chat-attachments/recorded.wav',
+      pathCategory: 'chat_attachment', fileName: 'recorded.wav', mimeType: 'audio/wav', sizeBytes: 32_044,
+      source: 'microphone', createdAt: 1, audio: { format: 'wav', durationMs: 1000, sampleRate: 16_000,
+        channels: 1, sampleCount: 16_000, sourceSha256: 'a'.repeat(64), preparationIdentity: 'bounded-v1',
+        nativeHandle: 42, pcm: [1, 2, 3] } });
+    expect(attachment).toEqual(expect.objectContaining({ source: 'microphone', audio: {
+      format: 'wav', durationMs: 1000, sampleRate: 16_000, channels: 1, sampleCount: 16_000,
+      sourceSha256: 'a'.repeat(64), preparationIdentity: 'bounded-v1',
+    } }));
+  });
   it('includes controlled generic Android provider MIME types in the document picker', () => {
     expect(CHAT_DOCUMENT_PICKER_MIME_TYPES).toEqual(expect.arrayContaining([
       'application/octet-stream',

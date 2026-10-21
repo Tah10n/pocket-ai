@@ -4,7 +4,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createAutolinkingOptionsLoader } = require('expo-modules-autolinking/build/commands/autolinkingOptions');
 
-const { run, assertExpoAudioNativePatch } = require('../../scripts/verify-native-config');
+const { run, assertExpoAudioNativePatch, assertSourceConfig, inspectComposedAudioPermissions,
+  assertComposedAudioPermissions } = require('../../scripts/verify-native-config');
 const { copyLlamaPatchSources } = require('../fixtures/llama-native-patch');
 const { patches: audioPatches, VERSION: audioVersion } = require('../../patches/expo-audio-55.0.18');
 
@@ -81,6 +82,7 @@ function createProject() {
     '<plist><dict>',
     '<key>CFBundleIdentifier</key><string>com.github.tah10n.pocketai</string>',
     '<key>CFBundleVersion</key><string>1</string>',
+    '<key>NSMicrophoneUsageDescription</key><string>Record only after tapping Record.</string>',
     '</dict></plist>',
   ].join(''));
   fs.writeFileSync(
@@ -112,6 +114,7 @@ function createProject() {
     '<manifest>',
     '<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />',
     '<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />',
+    '<uses-permission android:name="android.permission.RECORD_AUDIO" />',
     '<application>',
     '<service android:name="com.asterinet.react.bgactions.RNBackgroundActionsTask" android:foregroundServiceType="dataSync" />',
     '</application>',
@@ -129,7 +132,7 @@ function addGuardedAudio(root) {
   writeJson(packageFile, packageConfig);
   const configFile = path.join(root, 'app.json');
   const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
-  config.expo.plugins.push(['expo-audio', { microphonePermission: false, recordAudioAndroid: false,
+  config.expo.plugins.push(['expo-audio', { microphonePermission: 'Record only after tapping Record.', recordAudioAndroid: true,
     enableBackgroundRecording: false, enableBackgroundPlayback: false }]);
   writeJson(configFile, config);
   const lockFile = path.join(root, 'package-lock.json');
@@ -153,6 +156,81 @@ function addGuardedAudio(root) {
 }
 
 describe('native configuration contract', () => {
+  const currentExpoConfig = () => JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../app.json'), 'utf8')).expo;
+  const recordingUsage = config => config.plugins.find(entry => Array.isArray(entry) && entry[0] === 'expo-audio')[1].microphonePermission;
+  const imagePickerOptions = config => config.plugins.find(entry => Array.isArray(entry) && entry[0] === 'expo-image-picker')[1];
+
+  it('composes the actual configured installed plugins into Android and iOS explicit recording permissions without native writes', async () => {
+    const config = currentExpoConfig();
+    const nativeFiles = ['android/app/src/main/AndroidManifest.xml', 'app.json'].map(file => path.resolve(__dirname, '../..', file));
+    const before = nativeFiles.map(file => fs.existsSync(file) ? fs.readFileSync(file) : null);
+    const result = await assertComposedAudioPermissions(config);
+    const permissions = result.androidManifest.manifest['uses-permission'];
+    expect(permissions.filter(permission => permission.$['android:name'] === 'android.permission.RECORD_AUDIO'))
+      .toEqual([{ $: { 'android:name': 'android.permission.RECORD_AUDIO' } }]);
+    expect(result.iosInfoPlist.NSMicrophoneUsageDescription).toBe(recordingUsage(config));
+    expect(result.iosInfoPlist.NSCameraUsageDescription).toBeUndefined();
+    expect(permissions.find(permission => permission.$['android:name'] === 'android.permission.CAMERA').$['tools:node']).toBe('remove');
+    expect(nativeFiles.map(file => fs.existsSync(file) ? fs.readFileSync(file) : null)).toEqual(before);
+  });
+
+  it('reproduces the real image-picker false override blocking RECORD_AUDIO despite expo-audio and declared permission', async () => {
+    const config = currentExpoConfig();
+    imagePickerOptions(config).microphonePermission = false;
+    expect(config.android.permissions).toContain('RECORD_AUDIO');
+    const result = await inspectComposedAudioPermissions(config);
+    expect(result.androidManifest.manifest['uses-permission'].find(permission => permission.$['android:name'] === 'android.permission.RECORD_AUDIO'))
+      .toEqual({ $: { 'android:name': 'android.permission.RECORD_AUDIO', 'tools:node': 'remove' } });
+    await expect(assertComposedAudioPermissions(config)).rejects.toThrow(/Composed Expo permission mods/);
+  });
+
+  it.each([false, true])('preserves both permission outputs with matching strings independent of image-picker/audio registration order (reversed=%s)', async reverse => {
+    const config = currentExpoConfig();
+    imagePickerOptions(config).microphonePermission = recordingUsage(config);
+    if (reverse) {
+      const audio = config.plugins.findIndex(entry => Array.isArray(entry) && entry[0] === 'expo-audio');
+      const picker = config.plugins.findIndex(entry => Array.isArray(entry) && entry[0] === 'expo-image-picker');
+      [config.plugins[audio], config.plugins[picker]] = [config.plugins[picker], config.plugins[audio]];
+    }
+    await expect(assertComposedAudioPermissions(config)).resolves.toEqual(expect.objectContaining({
+      iosInfoPlist: expect.objectContaining({ NSMicrophoneUsageDescription: recordingUsage(config) }),
+    }));
+  });
+
+  it('also reproduces iOS key deletion when the false image-picker mod runs after the audio mod', async () => {
+    const config = currentExpoConfig();
+    imagePickerOptions(config).microphonePermission = false;
+    const audio = config.plugins.findIndex(entry => Array.isArray(entry) && entry[0] === 'expo-audio');
+    const picker = config.plugins.findIndex(entry => Array.isArray(entry) && entry[0] === 'expo-image-picker');
+    [config.plugins[audio], config.plugins[picker]] = [config.plugins[picker], config.plugins[audio]];
+    const result = await inspectComposedAudioPermissions(config);
+    expect(result.iosInfoPlist.NSMicrophoneUsageDescription).toBeUndefined();
+  });
+
+  it('rejects conflicting image-picker microphone options during source preflight before prebuild', () => {
+    const root = createProject();
+    try {
+      addGuardedAudio(root);
+      const file = path.join(root, 'app.json');
+      const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+      config.expo.plugins.push(['expo-image-picker', { microphonePermission: false, cameraPermission: false }]);
+      writeJson(file, config);
+      expect(() => assertSourceConfig(root)).toThrow(/image-picker.*false blocks recording globally/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each(['RECORD_AUDIO', 'android.permission.RECORD_AUDIO'])('rejects explicit Android source blocker %s', permission => {
+    const root = createProject();
+    try {
+      addGuardedAudio(root);
+      const file = path.join(root, 'app.json');
+      const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+      config.expo.android = { blockedPermissions: [permission] };
+      writeJson(file, config);
+      expect(() => assertSourceConfig(root)).toThrow(/recording cannot be blocked/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it.each([
     ['global source list', { buildFromSource: ['expo-audio', 'expo-file-system'] }],
     ['platform source lists', { android: { buildFromSource: ['expo-audio', 'expo-file-system'] },
@@ -287,7 +365,7 @@ describe('native configuration contract', () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('rejects native audio source drift even when versions and playback-only permissions are correct', () => {
+  it('rejects native audio source drift even when versions and explicit-recording permissions are correct', () => {
     const root = createProject();
     try {
       const audioRoot = addGuardedAudio(root);
@@ -346,7 +424,7 @@ describe('native configuration contract', () => {
       fs.writeFileSync(appConfigPath, JSON.stringify({ expo: { updates: { enabled: false }, ios: { infoPlist: {} }, plugins: ['./plugins/withLlamaSourceBuild'] } }));
       fs.writeFileSync(
         path.join(root, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'),
-        '<manifest><application /></manifest>',
+        '<manifest><uses-permission android:name="android.permission.RECORD_AUDIO" /><application /></manifest>',
       );
       expect(() => run(['--require-android'], root)).toThrow(/FOREGROUND_SERVICE/);
     } finally {

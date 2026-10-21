@@ -9,6 +9,9 @@ import {
 } from '@/types/multimodal';
 import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '@/types/attachments';
 import type { ChatThread } from '@/types/chat';
+import { AudioPreparationError, isPreparedAudioUri, type PreparedAudio } from './AudioPreparationService';
+import { validateImportedAudio, ImportedAudioValidationError } from '@/utils/importedAudioValidation';
+import { assertPrivateStorageWritable } from './storage';
 import {
   MAX_CHAT_AUDIO_ATTACHMENT_BYTES,
   isSupportedChatDocumentDraftFormat,
@@ -701,9 +704,11 @@ export function materializeMediaDraftsForMessage({
         fileName,
         mimeType,
         sizeBytes,
-        source: 'document_picker',
+        ...(readNonEmptyString(draft.displayName) ? { displayName: readNonEmptyString(draft.displayName)! } : null),
+        source: draft.source === 'microphone' ? 'microphone' : 'document_picker',
         createdAt: draft.createdAt ?? createdAt,
         audio: {
+          ...draft.audio,
           format,
           ...(normalizePositiveInteger(draft.audio?.durationMs) ? { durationMs: normalizePositiveInteger(draft.audio?.durationMs) } : null),
         },
@@ -720,6 +725,8 @@ export function materializeMediaDraftsForMessage({
 export class ChatAttachmentStorageService {
   private readonly now: () => number;
   private readonly random: () => number;
+  // Failed rollback files stay owned here and block publication until their cleanup succeeds.
+  private readonly failedAudioCopies = new Set<string>();
 
   constructor(options: ChatAttachmentStorageServiceOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -1012,75 +1019,82 @@ export class ChatAttachmentStorageService {
     };
   }
 
-  public async copyAudioAssetToDraft(asset: CopyableDocumentAsset): Promise<ChatMediaAttachmentDraft> {
+  private async rollbackAudioCopy(localUri: string): Promise<void> {
+    this.failedAudioCopies.add(localUri);
+    try {
+      await FileSystem.deleteAsync(localUri, { idempotent: true });
+      this.failedAudioCopies.delete(localUri);
+    } catch { throw new AudioPreparationError('cleanup_failed'); }
+  }
+
+  public async cleanupFailedAudioCopies(): Promise<void> {
+    for (const uri of this.failedAudioCopies) await this.rollbackAudioCopy(uri);
+  }
+
+  public async copyAudioAssetToDraft(asset: CopyableDocumentAsset, options: { assertCurrent?: () => void } = {}): Promise<ChatMediaAttachmentDraft> {
+    const check = () => { assertPrivateStorageWritable(); options.assertCurrent?.(); };
+    check();
+    await this.cleanupFailedAudioCopies();
     const sourceUri = asset.uri.trim();
-    if (!sourceUri) {
-      throw new Error('Selected audio URI is empty.');
-    }
-
-    const copyFormat = resolveAudioCopyFormat(asset);
-    if (!copyFormat) {
-      throw new ChatMediaAttachmentUnsupportedTypeError('audio');
-    }
-
-    const assetSize = normalizePositiveInteger(asset.size);
-    if (assetSize && assetSize > MAX_CHAT_AUDIO_ATTACHMENT_BYTES) {
-      throw new ChatMediaAttachmentTooLargeError('audio');
-    }
-
+    if (!sourceUri) throw new Error('Selected audio URI is empty.');
+    const format = resolveAudioCopyFormat(asset);
+    if (!format) throw new ChatMediaAttachmentUnsupportedTypeError('audio');
+    if (asset.size && asset.size > MAX_CHAT_AUDIO_ATTACHMENT_BYTES) throw new ChatMediaAttachmentTooLargeError('audio');
     const directory = await this.ensureBaseDirectory();
+    check();
     const draftId = createDraftId(this.now(), this.random());
-    const fileName = `${draftId}.${copyFormat.extension}`;
+    const fileName = `${draftId}.${format.format}`;
     const localUri = `${directory}${fileName}`;
-
     try {
       await FileSystem.copyAsync({ from: sourceUri, to: localUri });
+      check();
+      const copied = await FileSystem.getInfoAsync(localUri);
+      check();
+      if (!copied.exists || copied.isDirectory || !Number.isSafeInteger(copied.size) || copied.size < 1) {
+        throw new ChatMediaAttachmentUnsupportedTypeError('audio');
+      }
+      if (copied.size > MAX_CHAT_AUDIO_ATTACHMENT_BYTES) throw new ChatMediaAttachmentTooLargeError('audio');
+      const audio = await validateImportedAudio(localUri, copied.size, format.format, check);
+      check();
+      return { id: draftId, kind: 'audio', pickerUri: sourceUri, localUri, pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+        fileName, displayName: readNonEmptyString(asset.name) ?? fileName, mimeType: format.format === 'wav' ? 'audio/wav' : 'audio/mpeg',
+        sizeBytes: copied.size, source: 'document_picker', createdAt: this.now(), copyStatus: 'copied', audio };
     } catch (error) {
-      await this.deleteLocalUriQuietly(localUri, 'partial_audio_copy_cleanup');
+      await this.rollbackAudioCopy(localUri);
+      if (error instanceof ImportedAudioValidationError) {
+        if (error.code === 'audio_limit') throw new ChatMediaAttachmentTooLargeError('audio');
+        throw new ChatMediaAttachmentUnsupportedTypeError('audio');
+      }
       throw error;
     }
+  }
 
-    let copiedInfo: Awaited<ReturnType<typeof FileSystem.getInfoAsync>>;
+  /** The prepared file is borrowed. Only the copied draft belongs to the attachment lifecycle. */
+  public async copyPreparedAudioToDraft(prepared: PreparedAudio, source: 'document_picker' | 'microphone'): Promise<ChatMediaAttachmentDraft> {
+    await this.cleanupFailedAudioCopies();
+    if (!isPreparedAudioUri(prepared.uri) || prepared.channels !== 1 || !Number.isSafeInteger(prepared.sampleRate) || prepared.sampleRate < 8_000
+      || prepared.sampleRate > 48_000 || !Number.isSafeInteger(prepared.sampleCount) || prepared.sampleCount < 1
+      || prepared.sampleCount > prepared.sampleRate * 30 || prepared.sizeBytes !== 44 + prepared.sampleCount * 2
+      || !/^[a-f0-9]{64}$/u.test(prepared.sourceSha256) || prepared.identity.length > 2048) {
+      throw new ChatMediaAttachmentUnsupportedTypeError('audio');
+    }
+    const directory = await this.ensureBaseDirectory();
+    const draftId = createDraftId(this.now(), this.random());
+    const fileName = `${draftId}.wav`;
+    const localUri = `${directory}${fileName}`;
     try {
-      copiedInfo = await FileSystem.getInfoAsync(localUri);
+      await FileSystem.copyAsync({ from: prepared.uri, to: localUri });
+      const copied = await FileSystem.getInfoAsync(localUri);
+      if (!copied.exists || copied.isDirectory || copied.size !== prepared.sizeBytes) throw new Error('Copied audio file is invalid.');
     } catch (error) {
-      await this.deleteLocalUriQuietly(localUri, 'unknown_size_audio_copy_cleanup');
-      console.warn('[ChatAttachmentStorage] Failed to inspect copied audio attachment', {
-        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
-        context: 'copied_audio_file_size_inspection',
-        ...getSanitizedErrorDetails(error),
-      });
-      throw new Error('Copied chat audio file size is unknown.');
+      await this.rollbackAudioCopy(localUri);
+      throw error;
     }
-
-    const copiedSize = copiedInfo.exists ? normalizePositiveInteger(copiedInfo.size) : undefined;
-    if (!copiedSize) {
-      await this.deleteLocalUriQuietly(localUri, 'unknown_size_audio_copy_cleanup');
-      throw new Error('Copied chat audio file size is unknown.');
-    }
-
-    if (copiedSize > MAX_CHAT_AUDIO_ATTACHMENT_BYTES) {
-      await this.deleteLocalUriQuietly(localUri, 'oversized_audio_copy_cleanup');
-      throw new ChatMediaAttachmentTooLargeError('audio');
-    }
-
-    return {
-      id: draftId,
-      kind: 'audio',
-      pickerUri: sourceUri,
-      localUri,
-      pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
-      fileName,
-      displayName: readNonEmptyString(asset.name) ?? fileName,
-      mimeType: copyFormat.mimeType,
-      sizeBytes: copiedSize,
-      source: 'document_picker',
-      createdAt: this.now(),
-      copyStatus: 'copied',
-      audio: {
-        format: copyFormat.format,
-      },
-    };
+    return { id: draftId, kind: 'audio', pickerUri: prepared.uri, localUri, pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+      fileName, displayName: fileName, mimeType: 'audio/wav', sizeBytes: prepared.sizeBytes, source,
+      createdAt: this.now(), copyStatus: 'copied', audio: { format: 'wav', durationMs: Math.ceil(prepared.durationMs),
+        sampleRate: prepared.sampleRate, channels: 1, sampleCount: prepared.sampleCount,
+        sourceSha256: prepared.sourceSha256, preparationIdentity: prepared.identity } };
   }
 
   public async discardDrafts(drafts: readonly AttachmentDraft[]): Promise<void> {

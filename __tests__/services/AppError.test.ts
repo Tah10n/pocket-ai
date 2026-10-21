@@ -14,6 +14,14 @@ import {
 } from '../../src/services/AppError';
 
 describe('AppError', () => {
+  it.each([
+    ['audio_decoder_size_limit', 'audio_decoder_size_limit'],
+    ['audio_decoder_duration_limit', 'audio_decoder_duration_limit'],
+    ['audio_decoder_invalid_format', 'chat_attachment_unsupported_type'],
+  ])('preserves the closed native audio decoder failure %s', (marker, code) => {
+    expect(toAppError(new Error(marker)).code).toBe(code);
+    expect(toAppError(new Error(`Exception in HostFunction: ${marker}`)).code).toBe(code);
+  });
   it('keeps existing AppError instances', () => {
     const appError = new AppError('engine_busy', 'already being generated');
     expect(toAppError(appError)).toBe(appError);

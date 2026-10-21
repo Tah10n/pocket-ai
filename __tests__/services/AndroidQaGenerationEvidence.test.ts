@@ -6,6 +6,7 @@ import {
   buildAndroidQaPreparedGenerationEvidence,
   getAndroidQaGenerationEvidenceSnapshot,
   isAndroidQaGenerationGateArmed,
+  isAndroidQaUiControlsVisible,
   recordAndroidQaPreparedGenerationEvidence,
   releaseAndroidQaGenerationGate,
   resetAndroidQaGenerationEvidenceForTests,
@@ -18,6 +19,21 @@ import type { LlmChatMessage } from '../../src/types/chat';
 describe('AndroidQaGenerationEvidence', () => {
   beforeEach(() => {
     resetAndroidQaGenerationEvidenceForTests();
+  });
+
+  it('hides manual QA controls without disabling generation evidence or gates', () => {
+    const previous = process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS;
+    try {
+      process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS = '0';
+      expect(isAndroidQaUiControlsVisible()).toBe(false);
+      expect(getAndroidQaGenerationEvidenceSnapshot().enabled).toBe(true);
+      expect(armAndroidQaGenerationGate('before-first-output')).toBe(true);
+      process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS = '1';
+      expect(isAndroidQaUiControlsVisible()).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS;
+      else process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS = previous;
+    }
   });
 
   it('holds the first native output until the matching operation is released', async () => {

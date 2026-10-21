@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "id": "pocket-synthetic-en-v1",
+  "payloadSha256": "2d80b34675fb03b5a5f2af86738d0549cce00bd08a165fc6badc5a9ba88473b0",
+  "description": "New synthetic English reference; not a human speaker or upstream Neu sample.",
+  "transcript": "The quiet river flows beside the old bridge.",
+  "sourceAudio": {
+    "sha256": "7a6668e6184eba856b5f324f5388cdf03e9fd76cd9d7b06b27948da98ea8aa70",
+    "bytes": 158748,
+    "sampleRate": 24000,
+    "samples": 79352,
+    "channels": 1,
+    "pcmBits": 16,
+    "generation": "Speakerless OuteTTS1.0, no imported or built-in reference clip",
+    "backbone": {
+      "repository": "OuteAI/OuteTTS-1.0-0.6B-GGUF",
+      "revision": "7e8de3b4d95e100812fd7e6f4372510d0830a798",
+      "sha256": "a0e2afa131b8a5029de0c653d55b71aab99744226234fcf1d80c55dade21020b",
+      "license": "Apache-2.0"
+    },
+    "codec": {
+      "repository": "BricksDisplay/codec.cpp-gguf",
+      "revision": "4cd6ecf17367ebc03bba4b2ce8186268a6ce7436",
+      "sha256": "f58e57eabef8d574f4d08828f0116d93341bd91a26413390b780c6f1e8491337",
+      "upstream": "ibm-research/DAC.speech.v1.0",
+      "upstreamLicense": "CDLA-Permissive-2.0"
+    }
+  },
+  "encoding": {
+    "repository": "KevinAHM/distill-neucodec-onnx",
+    "revision": "2cd5cf022b7a1e689e561f0492787768cfe8395d",
+    "license": "Apache-2.0",
+    "files": [
+      {
+        "file": "onnx/distill_neucodec_encoder.onnx",
+        "bytes": 276970840,
+        "sha256": "04af54f6af51a7573a8bbcfd691b4f2c68b6dbd03aef72b983cbb4e5140c3a23"
+      },
+      {
+        "file": "onnx/distill_neucodec_encoder.onnx.data",
+        "bytes": 241565696,
+        "sha256": "935859ed7904671dc82da1c533b9bf2fd8bcf6d8fc702bdba5bc25c8f7329e4f"
+      }
+    ],
+    "resampler": {
+      "implementation": "scipy.signal.resample_poly",
+      "version": "1.18.1",
+      "up": 2,
+      "down": 3,
+      "sampleRate": 16000,
+      "samples": 52902,
+      "pcmFloat32Sha256": "0d8e90ae21f3dcb162906d9f2e42cfa6e4049999b204a0ba969492dac9a4035c",
+      "paddingSamples": 218
+    },
+    "runtime": {
+      "onnxruntime": "1.31.0",
+      "numpy": "2.5.4",
+      "cpuThreads": 2
+    },
+    "codeCount": 166,
+    "codesInt32Sha256": "609269314e08918153a856d285118f3d00cd054ce09e7fdd9ffe626cfdcf7265"
+  },
+  "verification": {
+    "actualCpuEncoding": true,
+    "upstreamOnnxParity": "publisher_claim_not_independently_reproduced",
+    "nativeNeuSynthesis": "not_run_at_asset_creation",
+    "noCanonicalPhoneOverride": true
+  },
+  "notices": [
+    "Preserve original project MIT notices. This generated asset contains no Jo/Dave/Greta/Juliette payload or recorded human voice.",
+    "The source model weights and encoder are not bundled with this JSON. Their licenses and the application combination license retain their separate scopes."
+  ]
+}

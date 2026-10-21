@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "scope": "physical Android UI handoff; Stage 7 native voice acceptance remains incomplete",
+  "checkedAtUtc": "2026-10-05T22:18:27.5833554Z",
+  "publicSource": "c6cbb5de27be493982da11201db1396ca3c5bcf4",
+  "appTree": "73f7923a27f2461eba4d9a7f2afcebf8568def37",
+  "sourcePatchSha256": "a5b3e11cf04ffcff7cbb495831b6d207ceef40734a55d5b4bfadc989119ba751",
+  "sourcePatchDefinition": "git diff --no-ext-diff --binary 25c06a9458edcc39ec1fefef980120e43cb5d73d c6cbb5de27be493982da11201db1396ca3c5bcf4; UTF-8 without BOM; CRLF normalized to LF",
+  "apk": {
+    "sha256": "3c787a2e2d5ff2b6cfde672aa73c611c990e42091f8f12bb38c22b996b4bd3e0",
+    "bytes": 145676133,
+    "abis": [
+      "arm64-v8a"
+    ],
+    "compile": "passed",
+    "install": "passed",
+    "installMode": "-r",
+    "dataReset": false,
+    "packageUidPreserved": true,
+    "provenanceDigest": "9ab700da2ebceb51bfb7a19ec5568a2136acd024f22f7351f2f814e1b58422f6",
+    "manualQaControls": false
+  },
+  "device": {
+    "model": "OnePlus 9 Pro",
+    "api": 34,
+    "backend": "CPU",
+    "interfaceLocale": "en"
+  },
+  "hostVerification": {
+    "broadRelease": {
+      "jestTests": 6749,
+      "jestSuites": 293,
+      "result": "passed",
+      "scope": "before final small QA flag and voice UI fixes",
+      "rustUnit": 68,
+      "rustIntegration": 3
+    },
+    "finalChangedSuites": {
+      "jestTests": 422,
+      "result": "passed",
+      "jestSuites": 5
+    },
+    "finalStatic": {
+      "lint": "passed",
+      "nativeConfiguration": "passed",
+      "typecheck": "passed"
+    }
+  },
+  "uiCases": [
+    {
+      "scope": "technical QA action block hidden; ordinary chat and Read aloud visible",
+      "id": "manual_qa_controls_hidden",
+      "result": "passed"
+    },
+    {
+      "scope": "controlled 22-character text preserved after Android Back dismisses keyboard; keyboard covers lower controls while open",
+      "id": "text_entry_keyboard",
+      "result": "passed"
+    },
+    {
+      "scope": "Choose model and codec opens Models; downloaded role and codec explicitly selected",
+      "id": "missing_model_recovery",
+      "result": "passed"
+    },
+    {
+      "scope": "Neu English, Default, Dave and Jo displayed; Jo selected in radio card and summary; no native voice inference asserted",
+      "id": "voice_selection",
+      "result": "passed"
+    },
+    {
+      "scope": "idle, explicit Record, Recording, Stop, preparation and file ready observed; ready timer displayed 00:22",
+      "id": "recording_ui",
+      "result": "passed"
+    },
+    {
+      "scope": "Preview invoked and Stop preview action observed; Record again entered new Recording; close returned to chat without an attachment; final appops query showed no active microphone",
+      "id": "preview_retake_discard",
+      "result": "passed"
+    },
+    {
+      "id": "new_apk_audio_input_content",
+      "reason": "this follow-up checks UI; controlled imported and microphone input results belong to the older APK in acceptance.md",
+      "result": "not_run"
+    },
+    {
+      "id": "new_apk_voice_content_conditioning",
+      "reason": "no admitted native reference/voice configuration proved on this device; historical Neu refusal and Qwen policy limit remain",
+      "result": "not_run"
+    },
+    {
+      "id": "russian_physical_ui",
+      "reason": "physical follow-up used English; EN/RU strings covered by host checks",
+      "result": "not_run"
+    }
+  ],
+  "failures": [
+    {
+      "scope": "host controller",
+      "id": "build_attempt_1",
+      "reason": "live ownership JSON sharing exception interrupted build",
+      "result": "failed"
+    },
+    {
+      "scope": "host controller",
+      "id": "build_attempt_2",
+      "reason": "atomic ownership JSON replacement denied during concurrent read; no application Rust defect established",
+      "result": "failed"
+    },
+    {
+      "scope": "compile",
+      "id": "build_attempt_3",
+      "reason": "append-only process journal; 615 tasks; required native libraries and stable source inputs verified",
+      "result": "passed"
+    },
+    {
+      "scope": "host USB transport",
+      "id": "adb_ui_transport",
+      "reason": "two screenshot sequences failed after UI input; task-owned ADB restarted; no phone data reset",
+      "result": "recovered"
+    },
+    {
+      "scope": "host controller",
+      "id": "adb_final_status",
+      "reason": "optional missing field under strict mode after server shutdown; independent audit confirmed server and harness absent and port 5037 released",
+      "result": "failed"
+    },
+    {
+      "scope": "GitHub hosted runner",
+      "id": "source_ci_attempt_1",
+      "reason": "job not acquired by hosted runner; cancelled and skipped jobs do not count as passed",
+      "result": "failed"
+    }
+  ],
+  "sourceCi": {
+    "run": 37369429710,
+    "attempt": 2,
+    "head": "c6cbb5de27be493982da11201db1396ca3c5bcf4",
+    "url": "https://github.com/Tah10n/pocket-ai/actions/runs/37369429710",
+    "snapshot": "deterministic, native scope and Android API 32 passed; other native jobs in progress; Android QA skipped",
+    "result": "in_progress"
+  },
+  "screenshots": [
+    {
+      "path": "ui-chat.png",
+      "case": "manual_qa_controls_hidden",
+      "sha256": "93fb05373df108f9a45c3e5aceb710c45057df690e4a5a5ebd5e0e6997f29a11",
+      "bytes": 139410,
+      "dimensions": [
+        1080,
+        2412
+      ]
+    },
+    {
+      "path": "ui-read-aloud.png",
+      "case": "selected_model_summary",
+      "sha256": "1445c0c5ea1394c3256d9b7c88f55f391353843a20cb61b0343016151c2b7659",
+      "bytes": 178372,
+      "dimensions": [
+        1080,
+        2412
+      ]
+    },
+    {
+      "path": "ui-voice-selection.png",
+      "case": "jo_ui_selection",
+      "sha256": "3f792832820e20342b07019e5875dcdf04aa873c5641e791e2f54899208a5191",
+      "bytes": 169033,
+      "dimensions": [
+        1080,
+        2412
+      ]
+    },
+    {
+      "path": "ui-recording.png",
+      "case": "explicit_retake_recording",
+      "sha256": "b000c45b1b87551631815295efad12108155619cb70a741613b599e0fea24830",
+      "bytes": 176406,
+      "dimensions": [
+        1080,
+        2412
+      ]
+    },
+    {
+      "path": "ui-recording-ready.png",
+      "case": "finalized_file_actions",
+      "sha256": "295ea03f48e36390882c7380bb9dc89b27c81d2589df9bcfe5609fad4111bfdc",
+      "bytes": 182618,
+      "dimensions": [
+        1080,
+        2412
+      ]
+    }
+  ]
+}

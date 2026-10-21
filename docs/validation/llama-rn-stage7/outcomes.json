@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "status": "incomplete",
+  "stageComplete": false,
+  "successorReportHead": "git_commit_that_adds_or_last_updates_this_report_revision",
+  "reportPath": "docs/validation/llama-rn-stage7/outcomes.json",
+  "testedBuild": {
+    "sourceHead": "6457bb2b970d1b1c7c62d98c745394ec4308c956",
+    "acceptedStage6Base": "fb970529608beeac90f272106f45ad7a97a330df",
+    "appTree": "ad17183d607086555f0e9abd6bfc7f6c75674ef9",
+    "apkSha256": "587bf83581ef548dc6f50995c929c6bd46150a04a1d62f8dcb29db10a5c88f95",
+    "apkBytes": 145674409,
+    "buildInputDigest": "3444c67ecf234af68a8c2f17165a57b9c3964f8b71d91c8cadb068cdc81de9ed",
+    "sourcePatchSha256NormalizedLf": "ac6071d8d49228d6f1473cffe1c0ccdbfe5a0733d32f33924225447d9eb57d28",
+    "compile": "passed", "install": "passed",
+    "platform": "physical_android", "api": 34, "abi": "arm64-v8a", "backend": "cpu"
+  },
+  "manifests": ["audio-input-fixtures.json", "tts-fixtures.json", "synthetic-inputs.json"],
+  "sourceNotes": "tts-model-sources.md",
+  "localVerification": {
+    "status": "passed", "jestSuites": 293, "jestTests": 6738,
+    "rustUnitTests": 68, "rustIntegrationTests": 3,
+    "typecheck": "passed", "lint": "passed", "nativeConfiguration": "passed",
+    "firstBroadAttempt": "failed_preserved"
+  },
+  "sourceCi": {
+    "api32FirstAttempt": "native_glass_ui_locator_timeout",
+    "api33FirstAttempt": "native_glass_ui_locator_timeout",
+    "api32Rerun": "passed", "api33Rerun": "failed",
+    "api33RerunJobId": 111847689200,
+    "api33RerunStages": {
+      "compile": "passed", "install": "passed", "bootstrap": "passed",
+      "scenariosPassed": 6, "failedScenario": "native-glass-theme-matrix",
+      "reportedFailure": "theme_preferences_restore_failed",
+      "hostFailureMasksPrimaryError": true, "actualApplicationCause": "unknown"
+    },
+    "api34": "passed", "api35": "passed", "ios": "passed", "deterministic": "passed",
+    "nativeScope": "passed", "androidQa": "skipped",
+    "failedJobRerunId": 37323380729, "failedJobRerunAttempt": 2,
+    "failedJobRerunStatus": "failed", "aggregateVerification": "failed",
+    "sourceFixForCiFailure": "not_applied", "additionalCiRerun": "not_run",
+    "ciIsDeviceAcceptanceProof": false
+  },
+  "recording": {
+    "status": "native_passed", "passedSteps": 7, "requiredSteps": 7,
+    "sourceMode": "external_acoustic_playback_actual_microphone",
+    "captureWallDurationMs": 20850, "preparedDurationMs": 20735.375,
+    "sampleRate": 16000, "channels": 1, "pcmEncoding": "pcm16",
+    "sampleCount": 331766, "wavBytes": 663576,
+    "wavSha256": "c10dfb7a106ce97e62161bd920a6902c12ae0a4ee80a14dfcce5fd08e111c907",
+    "headerValidated": true, "backgroundInterrupted": true, "noAutomaticResume": true
+  },
+  "audioInput": {
+    "imported": "passed", "actualRecorded": "passed",
+    "contentMatched": true, "completionsDrained": true, "ordinaryComposerProof": false,
+    "ordinaryComposerAttachSendObserved": true, "ordinaryComposerControlledContentOracle": false
+  },
+  "recordedWordContent": {
+    "status": "passed", "wordErrors": 0, "referenceWords": 9, "wordErrorRate": 0,
+    "exactNormalizedMatch": true, "normalizedNumericMatch": true,
+    "fullInputAndModelHashesBeforeAfter": true, "generatedSpeechOrSpeakerProof": false
+  },
+  "voices": {
+    "status": "failed_at_admission", "firstActualProfile": "neutts-nano-q4_k_m-neucodec-q8_0",
+    "firstActualVoice": "jo", "failureCode": "memory_insufficient", "failureStage": "tts_admission",
+    "completedSteps": 0, "clipExports": 0,
+    "neuEstimatedPeakBytes": 3346420096, "neuHiddenDimension": 576, "neuLayers": 24,
+    "qwenCase": "not_reached", "qwenObservedFailure": false,
+    "qwenEstimatedPeakBytes": 8837808576, "testDeviceTotalMemoryBytes": 7618306048,
+    "qwenPolicyExceedsDeviceTotalMemory": true, "measuredPeak": false,
+    "generatedSpeechContent": "not_run", "referenceConditioning": "not_run",
+    "savedReferenceColdReuse": "not_run", "restoreProof": "not_run"
+  },
+  "ordinaryComposer": {
+    "status": "incomplete", "firstHostFailure": "metadata_enobufs", "explicitRecordIssued": true,
+    "soundIssued": false, "attachIssued": true, "sendIssued": true, "regenerateIssued": false,
+    "sameCaptureAutoStoppedReady": true, "approximateReadyDurationMs": 29500,
+    "actualDiscard": "passed", "additionalRecordAttempted": true,
+    "firstAttempt": {
+      "hostFailure": "metadata_enobufs", "explicitRecordIssued": true,
+      "soundIssued": false, "attachIssued": false, "sendIssued": false, "regenerateIssued": false,
+      "autoStoppedReady": true, "approximateReadyDurationMs": 29500, "actualDiscard": "passed"
+    },
+    "manualFollowUp": {
+      "record": "visually_confirmed", "recordingScreenshots": 2,
+      "autoStoppedReady": true, "approximateReadyDurationMs": 29500,
+      "controlledSound": "not_played_host_handoff_deadline_missed", "hostSoundStartGuardMs": 15000,
+      "preview": "invoked_preparing_then_ready", "playingObserved": false,
+      "attach": "passed", "send": "passed", "userAndAssistantComplete": true,
+      "messageAudioAttachmentObserved": true, "controlledContentOracle": false
+    },
+    "readOnlyUiTransportProbeFailures": ["runtime_unavailable", "output_missing"],
+    "sendContent": "not_established_uncontrolled_sound", "coldAttachmentRetention": "passed_ui_identity_scope",
+    "coldRetention": {
+      "appForceStop": "passed", "processAbsenceConfirmed": true, "newProcessGeneration": true,
+      "sameThreadIdentity": true, "sameCompleteUserAndAssistantMessageIdentities": true,
+      "sameAudioAttachmentIdentity": true, "freshUiObservations": 8,
+      "recordingSheetObserved": false, "stopControlObserved": false, "recordingPhaseObserved": false,
+      "foregroundSourcePredicatePinned": true, "finalScreenshotReviewed": true,
+      "hostCleanupConfirmed": true, "sourceTreeApkAndBuildDigestUnchanged": true,
+      "nativeOwnerIdentityProof": false, "recordedFileByteIdentityProof": false, "coldPlayback": "not_run"
+    },
+    "regenerate": "not_run", "regenerateScopeReason": "not_needed_for_bounded_persistence_check",
+    "historicalHostFailures": [
+      {"phase": "cold_admission", "code": "cold_admission_failed", "deviceActionIssued": false}
+    ]
+  },
+  "privacy": {
+    "status": "passed_in_captured_window", "applicationRecords": 1687,
+    "bytesInspected": 256959, "candidateCount": 0, "rawLogsRetained": false,
+    "ownedCaptureDrainConfirmed": true,
+    "deviceWindowUtc": ["2026-10-05T14:45:38.274280Z", "2026-10-05T15:59:54.542422Z"],
+    "hostWindowUtc": ["2026-10-05T14:43:19.194Z", "2026-10-05T16:02:39.496Z"],
+    "priorFailuresPreserved": true, "universalPrivacyGuarantee": false,
+    "manualFollowUpWindow": {
+      "status": "incomplete", "termination": "duration_timeout",
+      "applicationRecords": 408, "candidateCount": 0, "rawLogsRetained": false,
+      "ownedCaptureDrainConfirmed": true, "resultIsPrivacyPass": false
+    },
+    "latestManualWindow": {
+      "status": "passed_in_captured_window", "captureMode": "bounded_continuous_application_stream",
+      "scope": "manual_send_and_cold_reopen", "applicationRecords": 478, "bytesInspected": 75191,
+      "candidateCount": 0, "rawLogsRetained": false, "auditStopRequestObserved": true,
+      "stopRequestedAfterColdCheck": true, "ownedCaptureDrainConfirmed": true,
+      "deviceWindowUtc": ["2026-10-05T17:02:52.129559Z", "2026-10-05T17:25:00.626501Z"],
+      "hostWindowUtc": ["2026-10-05T17:02:04.332Z", "2026-10-05T17:26:27.995Z"],
+      "coversEarlierManualRecordCapture": false, "universalPrivacyGuarantee": false
+    }
+  },
+  "historicalOutcomes": [
+    "earlier_build_controller_startup_anr_and_ui_transport_failures_preserved",
+    "earlier_voice_deadlines_reference_not_run_signature_and_vm_privacy_interruptions_preserved",
+    "c12_imported_input_passed_recording_incomplete_two_privacy_candidates",
+    "c13_broad_failure_and_targeted_sdk_resolution_pass_kept_separate",
+    "c14_recording_four_of_seven_original_export_failure_recovered_word_content_zero_of_nine_errors"
+  ],
+  "limitsWaived": false,
+  "mergeReleaseOrStage8Implied": false
+}

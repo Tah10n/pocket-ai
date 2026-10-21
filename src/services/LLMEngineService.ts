@@ -5,6 +5,7 @@ import type {
   NativeBackendDeviceInfo,
 } from 'llama.rn';
 import DeviceInfo from 'react-native-device-info';
+import { assertAudioDecoderAdmission } from './AudioDecoderAdmission';
 import { fileUriToNativePath } from '../utils/safeFilePath';
 import { Platform } from 'react-native';
 import appPackageJson from '../../package.json';
@@ -402,7 +403,13 @@ export interface AuxiliaryContextRequest {
   readonly isCurrent: () => boolean;
 }
 
+export type AuxiliaryFailureStage = 'detach' | 'before_init' | 'backbone_init' | 'native_callback' | 'context_release' | 'restore';
 export interface AuxiliarySequenceRequest {
+  /** Closed timing boundaries only; observers cannot affect the context transaction. */
+  readonly observeTiming?: (stage: 'detach' | 'backbone_init' | 'context_release' | 'restore',
+    phase: 'started' | 'settled') => void;
+  /** Nonthrowing observation only; no error object or change to native ownership. */
+  readonly observeFailure?: (stage: AuxiliaryFailureStage) => void;
   readonly runOwner?: symbol;
   readonly signal?: AbortSignal;
   /** Selection/permission check independent of the temporarily suspended chat context. */
@@ -3908,6 +3915,15 @@ class LLMEngineService {
       if (!isCurrent()) throw new AppError('engine_busy', 'The auxiliary model check was cancelled.');
     };
     owner.isCurrent = selectionCurrent;
+    let failureObserved = false;
+    const observeFailure = (stage: AuxiliaryFailureStage) => {
+      if (failureObserved) return;
+      failureObserved = true;
+      try { request.observeFailure?.(stage); } catch { /* Diagnostics cannot change the transaction. */ }
+    };
+    const observeTiming = (stage: 'detach' | 'backbone_init' | 'context_release' | 'restore', phase: 'started' | 'settled') => {
+      try { request.observeTiming?.(stage, phase); } catch { /* Diagnostics cannot change ownership. */ }
+    };
     // Notify auto-load observers before detaching A. No native handles are published.
     this.updateState(this.state);
     try {
@@ -3976,22 +3992,28 @@ class LLMEngineService {
           const work = (async () => {
             let phaseOperationFailed = false;
             let phaseOperationError: unknown;
+            let failureStage: AuxiliaryFailureStage = 'before_init';
             try {
               assertPhaseCurrent();
               await phase.beforeInit?.();
               assertPhaseCurrent();
               this.assertNoOrphanedContextReleasePending();
               initStarted = true;
-              auxiliaryContext = await this.awaitModelInitWithProgressWatchdog(
-                progress => initLlamaContext({ ...phase.initParams, n_parallel: 1,
-                  state_cache_budget_mb: DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
-                  state_cache_max_checkpoints: PROMPT_STATE_CACHE_MAX_CHECKPOINTS }, progress), () => undefined,
-              );
+              failureStage = 'backbone_init';
+              observeTiming('backbone_init', 'started');
+              try {
+                auxiliaryContext = await this.awaitModelInitWithProgressWatchdog(
+                  progress => initLlamaContext({ ...phase.initParams, n_parallel: 1,
+                    state_cache_budget_mb: DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+                    state_cache_max_checkpoints: PROMPT_STATE_CACHE_MAX_CHECKPOINTS }, progress), () => undefined,
+                );
+              } finally { observeTiming('backbone_init', 'settled'); }
               assertPhaseCurrent();
               // rc.3 exposes no generic cancel for embedding/rerank. Await the
               // actual callback, retaining native ownership throughout its drain.
               let value!: R;
               let nativeOperationError: unknown;
+              failureStage = 'native_callback';
               const nativeOperation = Promise.resolve().then(() => nativeCallback(auxiliaryContext!)).then(
                 next => { value = next; }, error => { nativeOperationError = error; },
               );
@@ -4010,14 +4032,21 @@ class LLMEngineService {
               assertPhaseCurrent();
               return value;
             } catch (error) {
+              observeFailure(failureStage);
               phaseOperationFailed = true;
               phaseOperationError = error;
               throw error;
             } finally {
               try {
-                if (auxiliaryContext) await this.releaseNativeContextsConfirmed(auxiliaryContext);
-                else if (initStarted && !this.orphanedContextReleaseError) await this.releaseNativeContextsConfirmed();
+                if (auxiliaryContext || (initStarted && !this.orphanedContextReleaseError)) {
+                  observeTiming('context_release', 'started');
+                  try {
+                    if (auxiliaryContext) await this.releaseNativeContextsConfirmed(auxiliaryContext);
+                    else await this.releaseNativeContextsConfirmed();
+                  } finally { observeTiming('context_release', 'settled'); }
+                }
               } catch (cleanupError) {
+                observeFailure('context_release');
                 if (phaseOperationFailed) throw new AuxiliaryContextCleanupError(phaseOperationError, cleanupError);
                 throw cleanupError;
               } finally { phaseActive = false; }
@@ -4029,16 +4058,23 @@ class LLMEngineService {
           void work.catch(() => undefined);
           return work;
         };
+        let sequenceFailureStage: AuxiliaryFailureStage = 'detach';
         try {
           // Completion admission observes auxiliaryOperation synchronously, so no
           // new user generation can start between this check and the detach.
           if (this.hasActiveCompletion()) throw new AppError('engine_busy', 'A response is being generated.');
           if (toolOwner) toolOwner.handoffActive = true;
-          if (this.context) await this.unloadInternal({ preservePromptPreparation: true });
+          if (this.context) {
+            observeTiming('detach', 'started');
+            try { await this.unloadInternal({ preservePromptPreparation: true }); }
+            finally { observeTiming('detach', 'settled'); }
+          }
           assertCurrent();
+          sequenceFailureStage = 'native_callback';
           result = await operation({ withContext });
           assertCurrent();
         } catch (error) {
+          observeFailure(sequenceFailureStage);
           operationError = error;
         } finally {
           sequenceFinished = true;
@@ -4047,6 +4083,7 @@ class LLMEngineService {
           }
         }
         if (previousModelId && selectionCurrent() && !this.orphanedContextReleaseError) {
+          observeTiming('restore', 'started');
           try {
             const currentModel = registry.getModel(previousModelId);
             if ((currentModel ? getCompanionBindingIdentity(currentModel) : null) !== previousBinding) {
@@ -4079,11 +4116,12 @@ class LLMEngineService {
                 restoredContextIdentity: this.getPromptContextIdentity(), modelId: previousModelId };
             }
           } catch (error) {
+            observeFailure('restore');
             if (this.orphanedContextReleaseError) throw error;
             this.auxiliaryRestoreError = 'The auxiliary check ended, but the previous chat model could not be restored.';
             this.updateState({ ...this.state, status: EngineStatus.ERROR, lastError: this.auxiliaryRestoreError });
             throw new AppError('model_load_failed', this.auxiliaryRestoreError);
-          }
+          } finally { observeTiming('restore', 'settled'); }
         }
         if (restorationReceipt && isCurrent()) request.onRestored?.(restorationReceipt);
         // Stop must not replace an unconfirmed native teardown failure with cancellation.
@@ -4241,6 +4279,10 @@ class LLMEngineService {
           ? { ...this.configuredSpeculativeDecoding }
           : null;
         const completionStartedAtMs = Date.now();
+        await assertAudioDecoderAdmission(requestMessages, () => {
+          this.assertCompletionNotInterrupted(interruptGeneration);
+          this.assertContextStillCurrent(context, contextGeneration);
+        });
         let firstTokenAtMs: number | null = null;
         let didUseSpeculativeCompletionFallback = false;
         try {
@@ -5344,6 +5386,10 @@ class LLMEngineService {
       let strictRoleSystemNormalization: StrictRoleSystemNormalization = 'plain';
       const countTokens = async (promptMessages: LlmChatMessage[]) => {
         this.assertContextStillCurrent(context, contextGeneration);
+        await assertAudioDecoderAdmission(promptMessages, () => {
+          cancellation.throwIfCancelled();
+          this.assertContextStillCurrent(context, contextGeneration);
+        });
         let formatted: LlamaFormattedChatResult;
         try {
           const prepared = await this.preparedRequestCache.prepare({

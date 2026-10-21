@@ -28,8 +28,13 @@ import { documentIndexStore } from './DocumentIndexStore';
 import { stopDocumentRetrievalPreparation } from './DocumentRetrievalPreparation';
 import { clearDocumentRetrievalStatus } from './DocumentRetrievalStatus';
 import { ttsService } from './TtsService';
+import { referenceVoiceStore } from './ReferenceVoiceStore';
+import { audioRecordingService } from './AudioRecordingService';
+import { audioSamplePreviewService } from './AudioSamplePreviewService';
+import { cleanupPreparedAudioAfterDrain } from './AudioPreparationService';
 
 export function invalidatePrivateStorageRuntimeHandles(): void {
+  referenceVoiceStore.invalidate();
   documentIndexStore.invalidate();
   clearDocumentRetrievalStatus();
   invalidateAppStorageForPrivateReset();
@@ -41,6 +46,7 @@ export function invalidatePrivateStorageRuntimeHandles(): void {
 }
 
 export function resetPrivatePersistedRuntimeStateForStorageReset(): void {
+  referenceVoiceStore.resetRuntime();
   resetActiveChatGenerationRuntimeForPrivateStorageReset();
   resetChatStoreForPrivateStorageReset();
   resetDownloadStoreForPrivateStorageReset();
@@ -49,27 +55,44 @@ export function resetPrivatePersistedRuntimeStateForStorageReset(): void {
 }
 
 export async function stopPrivateRuntimeWorkForStorageBlocked(): Promise<void> {
+  referenceVoiceStore.invalidate();
   documentIndexStore.invalidate();
   llmEngineService.invalidateAuxiliaryContextOperation();
-  await Promise.all([
+  await referenceVoiceStore.drainForPrivateReset(Promise.all([
     ttsService.cancelAndClear(),
+    audioRecordingService.cancelAndClear(),
+    audioSamplePreviewService.stop(),
     stopDocumentRetrievalPreparation(),
     stopModelDownloadManagerForPrivateStorageBlocked(),
     stopActiveChatGenerationForPrivateStorageBlocked(),
-  ]);
+  ]));
   await documentSessionContextCache.clearAll();
+  await cleanupPreparedAudioAfterDrain();
+  await referenceVoiceStore.cleanupCold();
 }
 
 export async function resetPrivateAppStorageAndRuntimeStateAfterConfirmation(): Promise<PrivateStorageHealthSnapshot> {
+  referenceVoiceStore.invalidate();
   documentIndexStore.invalidate();
   llmEngineService.invalidateAuxiliaryContextOperation();
-  await Promise.all([
+  const consumersDrained = Promise.all([
     ttsService.cancelAndClear(),
+    audioRecordingService.cancelAndClear(),
+    audioSamplePreviewService.stop(),
     stopDocumentRetrievalPreparation(),
     resetModelDownloadManagerForPrivateStorageReset(),
     stopActiveChatGenerationForPrivateStorageBlocked(),
   ]);
-  await documentSessionContextCache.clearAll();
+  await consumersDrained;
+  try {
+    await referenceVoiceStore.drainForPrivateReset(consumersDrained);
+    await documentSessionContextCache.clearAll();
+    await cleanupPreparedAudioAfterDrain();
+    await referenceVoiceStore.cleanupCold();
+  } catch {
+    // Do not reopen private storage while a sensitive plaintext sample may remain.
+    return blockPrivateStorageAfterResetFailure();
+  }
   await llmEngineService.unload();
   return runWithIdleModelDownloads(() => llmEngineService.runWithIdleModelResources(async () => {
     await registry.preserveExistingModelFilesForPrivateStorageReset();

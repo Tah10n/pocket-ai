@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "https://github.com/espeak-ng/espeak-ng",
+    "revision": "69bfd1efde0236654ccc117a28d04aef27673a30",
+    "archive": "vendor/espeak-ng-source.tar.gz",
+    "bytes": 18493532,
+    "sha256": "0d36c8e81e972805d343e2b93d77baf3b57dd6c7a18a12df6782c80fe9f11d15",
+    "preparedManifestSha256": "d0ea2b537beb0d765bb91400d2c045bcc2be01c682c79083bef73a35cec1143c",
+    "offlineDependencyPatch": "scripts/prepare-source.mjs"
+  },
+  "data": {
+    "manifest": "assets/data-manifest.json",
+    "sha256": "0bb3d67bab0295f4749d09a504bdad7fc17bc92b77cd0275a1e58dc5bfd33dd8",
+    "identity": "bf7bcd4943864ce8e6f3bad14637e3de6f8d2d826debb25e494d189cbb55f53a"
+  },
+  "license": "GPL-3.0-or-later"
+}

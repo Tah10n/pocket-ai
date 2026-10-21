@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "origin": "Locally generated Windows System.Speech/SAPI speech; no personal recording, host microphone or user voice.",
+  "permissionScope": "Synthetic controlled QA samples generated for this task. Raw files remain in the isolated private QA environment; this record publishes identities and fixed non-sensitive text only.",
+  "generatorRate": 0,
+  "referenceComparisonTarget": "The quiet river flows beside the old bridge.",
+  "fixtures": [
+    {
+      "filename": "r1-george.wav",
+      "voice": "Microsoft George",
+      "locale": "en-GB",
+      "sha256": "2823353c2b52de60e70304abd2c0a3935ec6f21ab1886a78c158a6ec0bb74d7d",
+      "bytes": 151462,
+      "sampleRate": 24000,
+      "channels": 1,
+      "bitsPerSample": 16,
+      "sampleCount": 75708,
+      "durationMs": 3154.5,
+      "text": "Welcome, this is a local voice sample."
+    },
+    {
+      "filename": "r2-zira.wav",
+      "voice": "Microsoft Zira Desktop",
+      "locale": "en-US",
+      "sha256": "105a8ff4e24d4d6539b84ab452bf8e63931de1fbc89fc9d692ff9209e854c6b7",
+      "bytes": 154822,
+      "sampleRate": 24000,
+      "channels": 1,
+      "bitsPerSample": 16,
+      "sampleCount": 77388,
+      "durationMs": 3224.5,
+      "text": "Welcome, this is a local voice sample."
+    },
+    {
+      "filename": "input-orange-seven.wav",
+      "voice": "Microsoft Zira Desktop",
+      "locale": "en-US",
+      "sha256": "dad094e335ce919ca55e169e192295a1ca1bccacb5a36243427a5e3927955e78",
+      "bytes": 114606,
+      "sampleRate": 16000,
+      "channels": 1,
+      "bitsPerSample": 16,
+      "sampleCount": 57280,
+      "durationMs": 3580,
+      "text": "The parcel is orange, and the code is seven."
+    }
+  ]
+}

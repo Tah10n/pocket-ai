@@ -4,8 +4,10 @@ const { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, sanitizeLocalT
 const { sanitizeDocumentRetrievalEvidence, waitForDocumentRetrievalEvidence } = require("./lib/document-retrieval-evidence");
 const { sanitizeDocumentIndexPublicationEvidence, waitForDocumentIndexPublicationEvidence } = require("./lib/document-index-publication-evidence");
 const { sanitizeTtsEvidence, validateTtsEvidence, validateTtsPlaybackEvidence } = require("./lib/tts-evidence");
+const { validateStage7CopiedClips, sanitizeAudioStage7Evidence, validateAudioStage7Evidence, validateStage7MicInjectionReceipt } = require('./lib/audio-stage7-evidence');
 const { createTtsPublicSnapshotReader, getTtsControlTap, runTtsPublicControls } = require("./lib/tts-public-controls");
 const { resolveExternalTtsDirectory, exportLocalTtsClip, assertTtsPrivateFileAccess } = require("./lib/tts-local-export");
+const { normalizeAndroidQaInstance } = require("./android-qa-application-id");
 
 const fs = require("fs");
 const path = require("path");
@@ -118,6 +120,7 @@ const SCENARIO_PACK_SCENARIOS = {
   retrieval: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval"],
   "retrieval-publication": ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-index-publication"],
   tts: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-index-publication", "runtime-local-tts-tokens", "runtime-local-tts-continuous"],
+  "audio-voices": ['runtime-stage7-recording', 'runtime-stage7-audio-input', 'runtime-stage7-voices'],
   "document-benchmark": DOCUMENT_BENCHMARK_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
@@ -156,7 +159,8 @@ const dumpPathOnDevice = "/sdcard/window_dump.xml";
 const expoConfig = readExpoConfig();
 const appPackageName = resolveAndroidQaApplicationId(
   expoConfig.packageName,
-  cliOptions.isolatedQaInstall
+  cliOptions.isolatedQaInstall,
+  cliOptions.qaInstance ?? (require.main === module ? process.env.POCKET_AI_ANDROID_QA_INSTANCE : null)
 );
 const appSchemeName = expoConfig.scheme;
 const homeLauncherLabel = "Pocket AI";
@@ -1025,6 +1029,7 @@ async function main() {
             scenario,
             context,
             logcatCollector,
+            error,
           });
           results.push({
             id: scenario.id,
@@ -1197,7 +1202,11 @@ function captureFailedScenarioEvidence({
   scenario,
   context,
   logcatCollector = null,
+  error = null,
 }) {
+  if (scenario.id === "native-glass-theme-matrix" && error?.themeFailureEvidence) {
+    return error.themeFailureEvidence;
+  }
   try {
     if (scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY) {
       return { evidencePolicy: DOCUMENT_EVIDENCE_POLICY };
@@ -1479,6 +1488,33 @@ function resolveScenarioVerticalSwipeGesture(snapshot, direction, options = {}) 
   };
   if (!snapshot) {
     return fallback;
+  }
+
+  const settingsHeader = findResourceIdInSnapshot(snapshot, "settings-header", { visibleOnly: true });
+  const settingsContent = findResourceIdInSnapshot(snapshot, "settings-screen-content", { visibleOnly: true });
+  if (settingsHeader || settingsContent) {
+    const destination = resolveSelectedBottomTabDestination(snapshot, "bottom-tab-settings", "settings-screen-content");
+    if (!destination || !settingsHeader?.bounds || !snapshot.viewportBounds) {
+      throw new Error("Settings swipe requires its selected tab, destination and header bounds.");
+    }
+    const bounds = settingsContent.bounds;
+    const viewport = snapshot.viewportBounds;
+    const top = Math.max(bounds.top, viewport.top, settingsHeader.bounds.bottom);
+    const bottom = Math.min(bounds.bottom, destination.tab.bounds.top,
+      viewport.bottom - resolveTapSafeBottomInsetPx(viewport));
+    const left = Math.max(bounds.left, viewport.left);
+    const right = Math.min(bounds.right, viewport.right);
+    if (bottom - top < 320 || right - left < 80) {
+      throw new Error("Settings viewport cannot provide a safe swipe distance.");
+    }
+    const inset = Math.min(120, Math.floor((bottom - top) * 0.2));
+    const upper = top + inset;
+    const lower = bottom - inset;
+    const distance = Math.min(lower - upper, options.maxDistancePx ?? 480);
+    const x = Math.round((left + right) / 2);
+    return { startX: x, endX: x,
+      startY: direction === "up" ? lower : upper,
+      endY: direction === "up" ? lower - distance : upper + distance };
   }
 
   const viewport = findResourceIdInSnapshot(snapshot, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
@@ -2706,16 +2742,37 @@ function findSelectedResourceKey(snapshot, resourcesByKey, label) {
   throw new Error(`Could not resolve the selected ${label}.`);
 }
 
-async function readSelectedThemeMode(ctx) {
-  await goToSettings(ctx);
+function findReadyThemeModeOption(snapshot, mode) {
+  const header = findResourceIdInSnapshot(snapshot, "settings-header", { visibleOnly: true });
+  const content = findResourceIdInSnapshot(snapshot, "settings-screen-content", { visibleOnly: true });
+  const top = Math.max(snapshot.viewportBounds.top, header?.bounds?.bottom ?? 0,
+    content?.bounds?.top ?? 0);
+  const bottom = Math.min(snapshot.viewportBounds.bottom - resolveTapSafeBottomInsetPx(snapshot.viewportBounds),
+    content?.bounds?.bottom ?? snapshot.viewportBounds.bottom);
+  for (const [key, resourceId] of Object.entries(THEME_MODE_RESOURCE_IDS)) {
+    if (mode && key !== mode) continue;
+    const node = findResourceIdClearOfOverlays(snapshot, resourceId);
+    if (node && (mode || node.selected) && node.bounds.top >= top && node.bounds.bottom <= bottom
+      && node.bounds.left >= snapshot.viewportBounds.left && node.bounds.right <= snapshot.viewportBounds.right) {
+      return { key, node };
+    }
+  }
+  return null;
+}
+
+async function readSelectedThemeMode(ctx, options = {}) {
+  await (options.goToSettings ?? goToSettings)(ctx);
+  let selected;
   await scrollToResourceId(ctx, THEME_MODE_CONTROL_RESOURCE_ID, {
+    ...options,
     timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+    isReady: (snapshot) => {
+      selected = findReadyThemeModeOption(snapshot);
+      return Boolean(selected);
+    },
   });
-  return findSelectedResourceKey(
-    createUiSnapshot(resolveAdbPath(), ctx.serial),
-    THEME_MODE_RESOURCE_IDS,
-    "theme mode"
-  );
+  // Read the selection from the same settled snapshot that satisfied readiness.
+  return selected.key;
 }
 
 async function selectThemeMode(ctx, mode) {
@@ -2726,6 +2783,7 @@ async function selectThemeMode(ctx, mode) {
   await goToSettings(ctx);
   await scrollToResourceId(ctx, THEME_MODE_CONTROL_RESOURCE_ID, {
     timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+    isReady: (snapshot) => Boolean(findReadyThemeModeOption(snapshot, mode)),
   });
   await tapVisibleResource(ctx, resourceId, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
   const { match, snapshot } = await waitForSnapshotMatch(
@@ -2782,42 +2840,62 @@ function findResourceIdClearOfOverlays(snapshot, resourceId) {
 
 async function scrollToResourceId(ctx, resourceId, options = {}) {
   const timeoutMs = options.timeoutMs ?? 20_000;
-  const maxSwipesDown = options.maxSwipesDown ?? 3;
-  const maxSwipesUp = options.maxSwipesUp ?? 10;
+  // Retain the thirteen-gesture total budget, but do not reverse after only three
+  // progressing gestures when Settings restored a scroll position below the target.
+  const limits = { down: options.maxSwipesDown ?? 10, up: options.maxSwipesUp ?? 10 };
+  const maxSwipes = options.maxSwipes ?? 13;
   const adbPath = options.adbPath ?? resolveAdbPath();
   const createSnapshot = options.createSnapshot ?? createUiSnapshot;
   const startedAt = Date.now();
-  const findNow = () => findResourceIdClearOfOverlays(
-    createSnapshot(adbPath, ctx.serial),
-    resourceId
-  );
+  const counts = { down: 0, up: 0 };
+  const exhausted = new Set();
+  let direction = "down";
+  let unchanged = 0;
+  let snapshot = createSnapshot(adbPath, ctx.serial);
+  const fingerprint = (value) => JSON.stringify(value.nodes.map((node) => [
+    node.resourceId, node.className, node.bounds,
+  ]));
 
-  let node = findNow();
-  if (node) {
-    return node;
-  }
-
-  for (let attempt = 0; attempt < maxSwipesDown && Date.now() - startedAt < timeoutMs; attempt += 1) {
-    await ctx.swipeDown();
-    node = findNow();
-    if (node) {
-      return node;
+  for (let attempt = 0; attempt <= maxSwipes; attempt += 1) {
+    const node = findResourceIdClearOfOverlays(snapshot, resourceId);
+    const ready = node && (!options.isReady || options.isReady(snapshot));
+    if (ready) return node;
+    if (attempt === maxSwipes || Date.now() - startedAt >= timeoutMs) break;
+    if (!resolveSelectedBottomTabDestination(snapshot, "bottom-tab-settings", "settings-screen-content")) {
+      const error = new Error(withUiSnapshotSummary(snapshot, "Settings navigation was lost before scrolling."));
+      error.uiSnapshot = snapshot;
+      throw error;
+    }
+    const target = findResourceIdInSnapshot(snapshot, resourceId);
+    const header = findResourceIdInSnapshot(snapshot, "settings-header", { visibleOnly: true });
+    if (target?.bounds) {
+      // A clipped parent may be exposed without its selectable children. Reveal
+      // it from the nearest edge instead of accepting the parent's tiny sliver.
+      const boundary = node && options.isReady
+        ? ((header?.bounds?.bottom ?? snapshot.viewportBounds.top)
+          + snapshot.viewportBounds.bottom - resolveTapSafeBottomInsetPx(snapshot.viewportBounds)) / 2
+        : (header?.bounds?.bottom ?? snapshot.viewportBounds.top);
+      direction = target.bounds.centerY <= boundary ? "down" : "up";
+    }
+    if (counts[direction] >= limits[direction]) exhausted.add(direction);
+    if (exhausted.has(direction)) direction = direction === "down" ? "up" : "down";
+    if (counts[direction] >= limits[direction] || exhausted.has(direction)) break;
+    const before = fingerprint(snapshot);
+    await ctx[direction === "down" ? "swipeDown" : "swipeUp"]({ snapshot, maxDistancePx: 480 });
+    counts[direction] += 1;
+    snapshot = createSnapshot(adbPath, ctx.serial);
+    unchanged = fingerprint(snapshot) === before ? unchanged + 1 : 0;
+    if (unchanged >= 2) {
+      exhausted.add(direction);
+      direction = direction === "down" ? "up" : "down";
+      unchanged = 0;
     }
   }
-
-  for (let attempt = 0; attempt < maxSwipesUp && Date.now() - startedAt < timeoutMs; attempt += 1) {
-    await ctx.swipeUp();
-    node = findNow();
-    if (node) {
-      return node;
-    }
-  }
-
-  throw new Error(withUiSummary(
-    adbPath,
-    ctx.serial,
-    `Timed out waiting for resource id "${resourceId}" outside the header and bottom overlays.`
-  ));
+  const error = new Error(withUiSnapshotSummary(snapshot,
+    `Timed out waiting for resource id "${resourceId}" outside the header and bottom overlays. `
+      + `Bounded swipes: down=${counts.down}, up=${counts.up}.`));
+  error.uiSnapshot = snapshot;
+  throw error;
 }
 
 async function readSelectedThemeStyle(ctx) {
@@ -3018,6 +3096,82 @@ async function restoreThemePreferences(ctx, { mode, themeStyle }) {
   }
 }
 
+function captureThemeFailureEvidence(ctx, phase, failureSnapshot = null, options = {}) {
+  const evidence = { failurePhase: phase };
+  const failures = [];
+  const root = options.outputRoot ?? artifactsRoot;
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  try {
+    const snapshot = failureSnapshot ?? createSnapshot(resolveAdbPath(), ctx.serial);
+    const uiDumpPath = path.join(root, "native-glass-theme-matrix-before-restore.xml");
+    (options.mkdirSync ?? fs.mkdirSync)(root, { recursive: true });
+    (options.writeFileSync ?? fs.writeFileSync)(uiDumpPath, snapshot.xml);
+    evidence.uiDumpPath = uiDumpPath;
+    evidence.failureBounds = {
+      viewport: snapshot.viewportBounds,
+      header: findResourceIdInSnapshot(snapshot, "settings-header")?.bounds ?? null,
+      target: findResourceIdInSnapshot(snapshot, THEME_STYLE_CONTAINER_RESOURCE_ID)?.bounds ?? null,
+      selectedSettings: Boolean(resolveSelectedBottomTabDestination(snapshot,
+        "bottom-tab-settings", "settings-screen-content")),
+    };
+  } catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
+  try {
+    evidence.screenshotPath = ctx.captureScreenshot("native-glass-theme-matrix-before-restore.png");
+  } catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
+  if (failures.length) evidence.evidenceCaptureError = failures.join("; ");
+  return evidence;
+}
+
+async function runNativeGlassThemeMatrix(ctx, options = {}) {
+  const readMode = options.readSelectedThemeMode ?? readSelectedThemeMode;
+  const readStyle = options.readSelectedThemeStyle ?? readSelectedThemeStyle;
+  const selectStyle = options.selectThemeStyle ?? selectThemeStyle;
+  const selectMode = options.selectThemeMode ?? selectThemeMode;
+  const capture = options.captureCoreSurfaceScreenshots ?? captureCoreSurfaceScreenshots;
+  const captureFailure = options.captureThemeFailureEvidence ?? captureThemeFailureEvidence;
+  const restore = options.restoreThemePreferences ?? restoreThemePreferences;
+  let originalPreferences = null;
+  let result;
+  let primaryError = null;
+  let evidence;
+  let phase = "read-theme-mode";
+  try {
+    const mode = await readMode(ctx);
+    phase = "read-theme-style";
+    originalPreferences = { mode, themeStyle: await readStyle(ctx) };
+    phase = "select-glass";
+    await selectStyle(ctx, "glass");
+    for (const mode of ["light", "dark"]) {
+      phase = `select-${mode}`;
+      await selectMode(ctx, mode);
+      phase = `capture-${mode}`;
+      result = await capture(ctx, `native-glass-${mode}`, THEME_STYLE_LABELS, {
+        hideChatQaEvidence: true,
+        settingsFocusResourceId: THEME_STYLE_CONTAINER_RESOURCE_ID,
+      });
+    }
+  } catch (error) {
+    primaryError = error instanceof Error ? error : new Error(String(error));
+    try { evidence = captureFailure(ctx, phase, primaryError.uiSnapshot); }
+    catch (captureError) { evidence = { evidenceCaptureError: String(captureError), failurePhase: phase }; }
+  }
+  let restoreError = null;
+  if (originalPreferences) {
+    try { await restore(ctx, originalPreferences); } catch (error) { restoreError = error; }
+  }
+  if (primaryError) {
+    const error = restoreError
+      ? new AggregateError([primaryError, restoreError],
+          `${primaryError.message} Theme restoration also failed: ${restoreError.message ?? String(restoreError)}`,
+          { cause: primaryError })
+      : primaryError;
+    error.themeFailureEvidence = evidence;
+    throw error;
+  }
+  if (restoreError) throw restoreError;
+  return result;
+}
+
 function buildScenarios() {
   return [
     {
@@ -3137,6 +3291,33 @@ function buildScenarios() {
       requiresIsolatedQaInstall: true,
       description: `Synthesize/decode ${flow}, exercise playback and restore A with LoRA; retain synthetic clips only for local independent ASR.`,
       run: ctx => runTtsAcceptanceScenario(ctx, flow),
+    })),
+    {
+      id: 'runtime-stage7-recording', tier: 'critical', requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true,
+      description: 'Capture controlled emulator microphone audio, finalize/prepare/preview/discard, retry and prove native background no-resume.',
+      run: ctx => runAudioStage7AcceptanceScenario(ctx, 'recording'),
+    },
+    {
+      id: 'runtime-stage7-import', tier: 'critical', requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true,
+      description: 'Verify managed WAV/MP3 import, send materialization, durable storage, owner cancellation and cold hydration; UI Send/inference are separate.',
+      run: ctx => runAudioImportAcceptanceScenario(ctx),
+    },
+    {
+      id: 'runtime-stage7-audio-input', tier: 'critical', requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true,
+      description: 'Use the real audio-input projector for imported and emulator-recorded controlled speech separately.',
+      run: ctx => runAudioStage7AcceptanceScenario(ctx, 'input'),
+    },
+    {
+      id: 'runtime-stage7-voices', tier: 'critical', requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true,
+      description: 'Run Neu builtin/phonemizer and Qwen eager/lazy/speakerless, restore A+LoRA, cold-open saved voice and delete.',
+      run: ctx => runAudioStage7AcceptanceScenario(ctx, 'voices'),
+    },
+    ...['phonemizer', 'reference'].map(mode => ({
+      id: `runtime-stage7-${mode}`, tier: 'critical', requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true,
+      description: mode === 'phonemizer'
+        ? 'Run required Neu phonemization, synthesis/decode and A+LoRA restoration independently of reference voices.'
+        : 'Run Qwen eager/lazy/speakerless and saved cold voice independently of Neu phonemization.',
+      run: ctx => runAudioStage7AcceptanceScenario(ctx, mode),
     })),
     {
       id: "runtime-local-tts-playback",
@@ -3352,39 +3533,7 @@ function buildScenarios() {
       requiresCurrentHeadProvenance: true,
       requiresIsolatedQaInstall: true,
       description: "Verify Glass across Home, Chat, Models, and Settings in light and dark modes.",
-      run: async (ctx) => {
-        const originalPreferences = {
-          mode: await readSelectedThemeMode(ctx),
-          themeStyle: await readSelectedThemeStyle(ctx),
-        };
-
-        try {
-          await selectThemeStyle(ctx, "glass");
-          await selectThemeMode(ctx, "light");
-          await captureCoreSurfaceScreenshots(
-            ctx,
-            "native-glass-light",
-            THEME_STYLE_LABELS,
-            {
-              hideChatQaEvidence: true,
-              settingsFocusResourceId: THEME_STYLE_CONTAINER_RESOURCE_ID,
-            }
-          );
-
-          await selectThemeMode(ctx, "dark");
-          return await captureCoreSurfaceScreenshots(
-            ctx,
-            "native-glass-dark",
-            THEME_STYLE_LABELS,
-            {
-              hideChatQaEvidence: true,
-              settingsFocusResourceId: THEME_STYLE_CONTAINER_RESOURCE_ID,
-            }
-          );
-        } finally {
-          await restoreThemePreferences(ctx, originalPreferences);
-        }
-      },
+      run: runNativeGlassThemeMatrix,
     },
     {
       id: "foreground-service-notification-states",
@@ -5660,6 +5809,184 @@ const INFERENCE_SMOKE_FAILURE_CODES = new Set(["actual_backend", "backend_discov
   "operation_failed", "runtime_policy", "stop_not_during_generation", "timeout", "unload_incomplete",
   "verified_model_missing"]);
 
+async function runAudioImportAcceptanceScenario(ctx) {
+  const adbPath = resolveAdbPath();
+  assertTtsPrivateFileAccess(adbPath, ctx.serial, appPackageName);
+  const open = async () => {
+    await goToHome(ctx);
+    await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+    await tapVisibleResource(ctx, 'chat-qa-stage7-panel-toggle', { timeoutMs: 180000 });
+  };
+  const wait = async expected => {
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+      const node = findResourceIdInSnapshot(createUiSnapshot(adbPath, ctx.serial), 'chat-qa-stage7-import-evidence');
+      let value; try { value = JSON.parse(node?.contentDesc || node?.text || 'null'); } catch { value = null; }
+      if (value?.status === 'failed') {
+        const phase = typeof value.phase === 'string' && /^[a-z_]{1,64}$/u.test(value.phase) ? value.phase : 'unknown';
+        throw new Error(`Isolated audio import QA failed: ${phase}.`);
+      }
+      if (value?.status === expected) {
+        const names = ['over-four-MiB.wav', 'forty-seconds.wav', 'legacy-import.mp3'];
+        if (value.uiSend !== 'not_run' || value.inference !== 'not_run' || !Array.isArray(value.fixtures)
+          || value.fixtures.length !== 3 || !Array.isArray(value.steps) || value.steps.length > 8) throw new Error('Invalid import QA evidence.');
+        const fixtures = names.map(name => {
+          const item = value.fixtures.find(fixture => fixture.name === name);
+          if (!item || !Number.isSafeInteger(item.sizeBytes) || item.sizeBytes <= 0 || item.sizeBytes > 25 * 1024 * 1024
+            || !/^[a-f0-9]{64}$/u.test(item.sha256)) throw new Error('Invalid import fixture evidence.');
+          return { name, sizeBytes: item.sizeBytes, sha256: item.sha256 };
+        });
+        if (!value.steps.every(step => typeof step === 'string' && /^[a-z_]{1,64}$/u.test(step))) throw new Error('Invalid import QA step.');
+        return { status: expected, fixtures, steps: value.steps, uiSend: 'not_run', inference: 'not_run' };
+      }
+      await delay(500);
+    }
+    throw new Error('Audio import QA timed out.');
+  };
+  try {
+    await open(); await tapVisibleResource(ctx, 'chat-qa-stage7-import', { timeoutMs: 30000 });
+    const imported = await wait('awaiting_restart');
+    fs.writeFileSync(path.join(artifactsRoot, 'stage7-import-evidence.json'), `${JSON.stringify({ imported, cold: 'not_run' }, null, 2)}\n`);
+    forceStopScenarioApp(adbPath, ctx.serial);
+    await relaunchScenarioApp(ctx); await open();
+    await tapVisibleResource(ctx, 'chat-qa-stage7-import-cold', { timeoutMs: 30000 });
+    const cold = await wait('passed');
+    const details = { imported, cold };
+    fs.writeFileSync(path.join(artifactsRoot, 'stage7-import-evidence.json'), `${JSON.stringify(details, null, 2)}\n`);
+    await tapVisibleResource(ctx, 'chat-qa-stage7-close', { timeoutMs: 30000, allowScroll: true });
+    return { details };
+  } catch (error) { forceStopScenarioApp(adbPath, ctx.serial); throw error; }
+}
+
+async function runAudioStage7AcceptanceScenario(ctx, mode) {
+  const adbPath = resolveAdbPath();
+  assertTtsPrivateFileAccess(adbPath, ctx.serial, appPackageName);
+  const output = process.env.POCKET_AI_TTS_AUDIO_OUTPUT_DIR;
+  if (!output || !path.isAbsolute(output)) throw new Error('Stage7 requires an explicit external local clip export directory.');
+  const directory = resolveExternalTtsDirectory(output, projectRoot);
+  const injectionFile = process.env.POCKET_AI_STAGE7_MIC_INJECTION_RECEIPT;
+  if (mode === 'recording' && (!injectionFile || !path.isAbsolute(injectionFile))) {
+    throw new Error('Controlled recording requires an absolute host injection receipt path.');
+  }
+  const evidencePath = path.join(artifactsRoot, `stage7-${mode}-evidence.json`);
+  const exports = []; const copied = new Set(); const handled = new Set();
+  let injection;
+  const read = () => {
+    const snapshot = createUiSnapshot(adbPath, ctx.serial);
+    const node = findResourceIdInSnapshot(snapshot, 'chat-qa-stage7-evidence');
+    let value; try { value = node ? JSON.parse(node.contentDesc || node.text) : null; } catch { return null; }
+    return value ? sanitizeAudioStage7Evidence(value) : null;
+  };
+  const open = async () => {
+    await goToHome(ctx);
+    await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+    await tapVisibleResource(ctx, 'chat-qa-stage7-panel-toggle', { timeoutMs: 180000 });
+  };
+  try {
+    await open();
+    if (mode === 'recording') {
+      const userId = readAndroidCurrentUserId(adbPath, ctx.serial);
+      const packageState = runCapture(adbPath, ['-s', ctx.serial, 'shell', 'dumpsys', 'package', appPackageName]);
+      if (parseAndroidRuntimePermission(packageState, userId, 'android.permission.RECORD_AUDIO') !== false) {
+        throw new Error('First controlled recording requires microphone permission ungranted before Record.');
+      }
+      const initialSnapshot = createUiSnapshot(adbPath, ctx.serial);
+      if (findResourceIdInSnapshot(initialSnapshot, 'com.android.permissioncontroller:id/permission_allow_foreground_only_button', { visibleOnly: true })) {
+        throw new Error('Unexpected OS microphone prompt before explicit Record.');
+      }
+    }
+    const startedAt = Date.now();
+    await tapVisibleResource(ctx, `chat-qa-stage7-${mode === 'input' ? 'input' : mode}`, { timeoutMs: 30000 });
+    const deadline = Date.now() + 3600000;
+    while (Date.now() < deadline) {
+      // The OS active window hides our marker; process its prompt before looking for QA evidence.
+      if (mode === 'recording') grantStage7MicrophoneAfterExplicitRecord(adbPath, ctx.serial, { explicitRecordIssued: true });
+      const safe = read();
+      if (!safe) { await delay(1000); continue; }
+      fs.writeFileSync(evidencePath, `${JSON.stringify({ ...safe, localClipExports: exports, ...(injection ? { microphoneInjection: injection } : {}) }, null, 2)}\n`);
+      if (safe.status === 'failed') throw new Error(`Native Stage7 failed: phase=${safe.phase}, code=${safe.failureCode || 'unknown'}.`);
+      if (safe.phase === 'recording_awaiting_controlled_sound' && !handled.has(safe.phase)) {
+        if (!fs.existsSync(injectionFile)) { await delay(500); continue; }
+        const bytes = fs.readFileSync(injectionFile);
+        if (bytes.length > 4096) throw new Error('Host microphone injection receipt exceeds its bound.');
+        let value; try { value = JSON.parse(bytes.toString('utf8')); } catch { await delay(500); continue; }
+        injection = validateStage7MicInjectionReceipt(value, startedAt);
+        await delay(500); // Explicitly allow recorder encoder drain after streamed PCM EOF.
+        handled.add(safe.phase);
+        await tapVisibleResource(ctx, 'chat-qa-stage7-continue', { timeoutMs: 30000 });
+      }
+      if (safe.phase === 'awaiting_clip_copy' && safe.clipId && !copied.has(safe.clipId)) {
+        const step = safe.steps.find(item => item.id === (safe.clipId === 'recorded' ? 'recording_prepared' : safe.clipId));
+        if (!step?.sampleRate || !step.sampleCount) throw new Error('Stage7 clip has no bounded decode receipt.');
+        const privatePath = safe.clipId === 'recorded' ? 'cache/stage7-fixtures/recorded.wav' : 'cache/tts-clips/clip.wav';
+        const result = spawnSync(adbPath, ['-s', ctx.serial, 'exec-out', 'run-as', appPackageName, 'cat', privatePath], {
+          encoding: null, timeout: 30000, maxBuffer: 1600000, stdio: ['ignore', 'pipe', 'pipe'] });
+        if (result.error || result.status !== 0) throw new Error('Controlled Stage7 clip cannot be exported from isolated storage.');
+        exports.push({ ...exportLocalTtsClip(directory, safe.clipId, result.stdout,
+          { ...step, duration: step.sampleCount / step.sampleRate }), copyPid: result.pid });
+        copied.add(safe.clipId);
+        ctx.captureScreenshot(`stage7-${safe.clipId}.png`);
+        await tapVisibleResource(ctx, 'chat-qa-stage7-continue', { timeoutMs: 30000 });
+      }
+      if (safe.phase === 'recording_awaiting_background' && !handled.has(safe.phase)) {
+        // A second real capture exists; allow enough audio frames for its native stop.
+        await delay(800);
+        runChecked(adbPath, ['-s', ctx.serial, 'shell', 'input', 'keyevent', '3']);
+        await delay(1200);
+        await relaunchScenarioApp(ctx);
+        handled.add(safe.phase);
+        await tapVisibleResource(ctx, 'chat-qa-stage7-continue', { timeoutMs: 30000 });
+      }
+      if (safe.status === 'native_passed') {
+        validateAudioStage7Evidence(safe, mode);
+        if (mode === 'recording' && !injection) throw new Error('Controlled capture provenance missing.');
+        validateStage7CopiedClips(copied, mode);
+        let cold;
+        if (mode === 'voices' || mode === 'reference') {
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx); await open();
+          await tapVisibleResource(ctx, 'chat-qa-stage7-cold-voice', { timeoutMs: 30000 });
+          const coldDeadline = Date.now() + 600000;
+          while (Date.now() < coldDeadline) {
+            cold = read();
+            if (cold?.status === 'failed') throw new Error(`Saved voice cold proof failed: ${cold.failureCode || 'unknown'}.`);
+            if (cold?.phase === 'awaiting_clip_copy' && cold.clipId === 'qwen-saved-cold' && !copied.has(cold.clipId)) {
+              const step = cold.steps.find(item => item.id === cold.clipId);
+              if (!step?.sampleRate || !step.sampleCount) throw new Error('Saved voice clip lacks native decode proof.');
+              const result = spawnSync(adbPath, ['-s', ctx.serial, 'exec-out', 'run-as', appPackageName, 'cat', 'cache/tts-clips/clip.wav'], {
+                encoding: null, timeout: 30000, maxBuffer: 1600000, stdio: ['ignore', 'pipe', 'pipe'] });
+              if (result.error || result.status !== 0) throw new Error('Cold saved voice clip export failed.');
+              exports.push({ ...exportLocalTtsClip(directory, cold.clipId, result.stdout,
+                { ...step, duration: step.sampleCount / step.sampleRate }), copyPid: result.pid });
+              copied.add(cold.clipId);
+              await tapVisibleResource(ctx, 'chat-qa-stage7-continue', { timeoutMs: 30000 });
+            }
+            if (cold?.status === 'native_passed') break;
+            await delay(500);
+          }
+          validateAudioStage7Evidence(cold, 'cold_voice');
+          if (!copied.has('qwen-saved-cold')) throw new Error('Cold saved source content clip missing.');
+        }
+        await tapVisibleResource(ctx, 'chat-qa-stage7-close', { timeoutMs: 30000, allowScroll: true });
+        const details = { ...safe, localClipExports: exports, ...(injection ? { microphoneInjection: injection } : {}), ...(cold ? { cold } : {}) };
+        fs.writeFileSync(evidencePath, `${JSON.stringify(details, null, 2)}\n`);
+        return { details };
+      }
+      await delay(1000);
+    }
+    throw new Error('Native Stage7 deadline expired; isolated teardown required.');
+  } catch (error) { forceStopScenarioApp(adbPath, ctx.serial); throw error; }
+}
+
+function grantStage7MicrophoneAfterExplicitRecord(adbPath, serial, options = {}) {
+  if (options.explicitRecordIssued !== true) return false;
+  const snapshot = (options.createSnapshot || createUiSnapshot)(adbPath, serial);
+  const allow = findResourceIdInSnapshot(snapshot, 'com.android.permissioncontroller:id/permission_allow_foreground_only_button', { visibleOnly: true });
+  if (!allow?.bounds) return false;
+  (options.tapBounds || tapBounds)(adbPath, serial, allow.bounds);
+  return true;
+}
+
 async function runTtsAcceptanceScenario(ctx, flow) {
   const audioOutput = process.env.POCKET_AI_TTS_AUDIO_OUTPUT_DIR;
   if (!audioOutput || !path.isAbsolute(audioOutput)) {
@@ -5992,6 +6319,11 @@ async function waitForInferenceSmokeEvidence(readEvidence, options = {}) {
 }
 
 function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenance, env = process.env) {
+  const qaInstance = normalizeAndroidQaInstance(options.qaInstance ?? env.POCKET_AI_ANDROID_QA_INSTANCE);
+  if (qaInstance !== null) {
+    if (!options.isolatedQaInstall) throw new ScenarioPreconditionFailureError("--qa-instance requires --isolated-qa-install.");
+    env.POCKET_AI_ANDROID_QA_INSTANCE = qaInstance;
+  }
   if (options.apkVariant) {
     env.ANDROID_SMOKE_APK_VARIANT = options.apkVariant;
   } else if (["documents", "native", "inference", "retrieval"].includes(options.pack) && !env.ANDROID_SMOKE_APK_VARIANT) {
@@ -6009,12 +6341,12 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
       );
     }
     env.EXPO_PUBLIC_ANDROID_QA = "1";
-    if (["documents", "inference", "retrieval", "retrieval-publication", "tts"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval", "runtime-document-index-publication", "runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback"].includes(options.scenario)) {
+    if (["documents", "inference", "retrieval", "retrieval-publication", "tts", "audio-voices"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools", "runtime-document-retrieval", "runtime-document-index-publication", "runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback", "runtime-stage7-recording", "runtime-stage7-import", "runtime-stage7-audio-input", "runtime-stage7-voices", "runtime-stage7-phonemizer", "runtime-stage7-reference"].includes(options.scenario)) {
       env.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS = "1";
     }
     env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
       env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING || "true";
-    if (options.pack === "tts" || ["runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback"].includes(options.scenario)) {
+    if (["tts", "audio-voices"].includes(options.pack) || ["runtime-local-tts-tokens", "runtime-local-tts-continuous", "runtime-local-tts-playback", "runtime-stage7-recording", "runtime-stage7-import", "runtime-stage7-audio-input", "runtime-stage7-voices", "runtime-stage7-phonemizer", "runtime-stage7-reference"].includes(options.scenario)) {
       if (!options.isolatedQaInstall) throw new ScenarioPreconditionFailureError("Private speech verification requires --isolated-qa-install.");
       env.POCKET_AI_QA_PRIVATE_FILE_ACCESS = "1";
     }
@@ -7306,6 +7638,12 @@ function selectScenarios(scenarios, options) {
       "runtime-local-tts-tokens",
       "runtime-local-tts-continuous",
       "runtime-local-tts-playback",
+      "runtime-stage7-recording",
+      "runtime-stage7-import",
+      "runtime-stage7-audio-input",
+      "runtime-stage7-voices",
+      "runtime-stage7-phonemizer",
+      "runtime-stage7-reference",
       "native-glass-theme-matrix",
       "foreground-service-notification-states",
     ]);
@@ -8173,6 +8511,10 @@ function buildSmokeLaunchArgs(options, resolvedSerial) {
 
   if (options.isolatedQaInstall) {
     args.push("--isolated-qa-install");
+  }
+
+  if (options.qaInstance != null) {
+    args.push("--qa-instance", normalizeAndroidQaInstance(options.qaInstance));
   }
 
   if (options.apkVariant) {
@@ -10989,6 +11331,7 @@ function parseCliOptions(argv) {
     scenario: null,
     port: null,
     isolatedQaInstall: false,
+    qaInstance: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -11021,6 +11364,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--isolated-qa-install") {
       options.isolatedQaInstall = true;
+      continue;
+    }
+
+    if (arg === "--qa-instance") {
+      options.qaInstance = normalizeAndroidQaInstance(readCliValue(argv, ++index, "--qa-instance"));
       continue;
     }
 
@@ -11081,6 +11429,10 @@ function parseCliOptions(argv) {
     options.isolatedQaInstall = true;
   }
 
+  if (options.qaInstance !== null && !options.isolatedQaInstall) {
+    throw new Error("--qa-instance requires --isolated-qa-install.");
+  }
+
   return options;
 }
 
@@ -11108,6 +11460,7 @@ function printHelp() {
   console.log("  --preserve-running-app     Do not bootstrap or restart the app before scenarios");
   console.log("  --bootstrap-screenshot     Save a smoke bootstrap screenshot before scenarios");
   console.log("  --isolated-qa-install      Install and target the repository-owned side-by-side .qa package");
+  console.log("  --qa-instance <name>       Select a single lowercase named QA instance (requires isolated QA)");
   console.log("  --port <number>            Forward a specific Metro port to android-smoke");
   console.log("  --list                     Print available scenarios");
 }
@@ -11490,6 +11843,9 @@ function sleepSync(ms) {
 }
 
 module.exports = {
+  findReadyThemeModeOption,
+  readSelectedThemeMode,
+  grantStage7MicrophoneAfterExplicitRecord,
   sanitizeInferenceSmokeEvidence,
   validateInferenceSmokeEvidence,
   waitForInferenceSmokeEvidence,
@@ -11514,6 +11870,9 @@ module.exports = {
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureCoreSurfaceScreenshots,
+  captureThemeFailureEvidence,
+  captureFailedScenarioEvidence,
+  runNativeGlassThemeMatrix,
   cleanupScenarioOwnedMetro,
   cleanupTransferredMetroOwnership,
   cleanupAndroidLogcatCollector,

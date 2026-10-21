@@ -1,0 +1,235 @@
+[
+  {
+    "id": "target",
+    "text": "The quiet river flows beside the old bridge.",
+    "raw": [
+      "ð_ə k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ f_l_ˈoʊ_z b_ᵻ_s_ˌaɪ_d ð_ɪʲ ˈoʊ_l_d b_ɹ_ˈɪ_dʒ"
+    ],
+    "expected": "ðə kwˈaɪət ɹˈɪvɚ flˈoʊz bᵻsˌaɪd ðɪʲ ˈoʊld bɹˈɪdʒ.",
+    "chunks": [
+      "The quiet river flows beside the old bridge"
+    ]
+  },
+  {
+    "id": "punctuation",
+    "text": "Hello, world! (Please wait.) Yes; no: maybe?",
+    "raw": [
+      "h_ə_l_ˈoʊ",
+      "w_ˈɜː_l_d",
+      "p_l_ˈiː_z w_ˈeɪ_t",
+      "j_ˈɛ_s",
+      "n_ˈoʊ",
+      "m_ˈeɪ_b_iː"
+    ],
+    "expected": "həlˈoʊ, wˈɜːld! (plˈiːz wˈeɪt.) jˈɛs; nˈoʊ: mˈeɪbiː?",
+    "chunks": [
+      "Hello",
+      "world",
+      "Please wait",
+      "Yes",
+      "no",
+      "maybe"
+    ]
+  },
+  {
+    "id": "literal_flags",
+    "text": "Read (en) and [fr] literally.",
+    "raw": [
+      "ɹ_ˈiː_d",
+      "ˈɛ_n",
+      "æ_n_d",
+      "ˌɛ_f_ˈɑːɹ",
+      "l_ˈɪ_ɾ_ɚ_ɹ_əl_i"
+    ],
+    "expected": "ɹˈiːd (ˈɛn) ænd [ˌɛfˈɑːɹ] lˈɪɾɚɹəli.",
+    "chunks": [
+      "Read",
+      "en",
+      "and",
+      "fr",
+      "literally"
+    ]
+  },
+  {
+    "id": "curly_quotes",
+    "text": "“Don’t,” she said, ‘wait!’",
+    "raw": [
+      "d_ˈoʊ_n_t",
+      "ʃ_iː s_ˈɛ_d",
+      "_w_ˈeɪ_t",
+      ""
+    ],
+    "expected": "“dˈoʊnt,” ʃiː sˈɛd, wˈeɪt!",
+    "chunks": [
+      "Don’t",
+      "she said",
+      "‘wait",
+      "’"
+    ]
+  },
+  {
+    "id": "straight_quotes",
+    "text": "\"Don't,\" she said, 'wait!'",
+    "raw": [
+      "d_ˈoʊ_n_t",
+      "ʃ_iː s_ˈɛ_d",
+      "w_ˈeɪ_t",
+      ""
+    ],
+    "expected": "\"dˈoʊnt,\" ʃiː sˈɛd, wˈeɪt!",
+    "chunks": [
+      "Don't",
+      "she said",
+      "'wait",
+      "'"
+    ]
+  },
+  {
+    "id": "digits",
+    "text": "On 12/03/2026, pay $12.50 for 3 items.",
+    "raw": [
+      "ˌɔ_n t_w_ˈɛ_l_v s_l_ˈæ_ʃ z_ˈiə_ɹ_oʊ θ_ɹ_ˈiː s_l_ˈæ_ʃ t_ˈuː θ_ˈaʊ_z_ə_n_d t_w_ˈɛ_n_t_i s_ˈɪ_k_s",
+      "p_ˈeɪ d_ˈɑː_l_ɚ t_w_ˈɛ_l_v",
+      "f_ˈɪ_f_t_i f_ɔːɹ θ_ɹ_ˈiːʲ ˈaɪ_ɾ_ə_m_z"
+    ],
+    "expected": "ˌɔn twˈɛlv slˈæʃ zˈiəɹoʊ θɹˈiː slˈæʃ tˈuː θˈaʊzənd twˈɛnti sˈɪks, pˈeɪ dˈɑːlɚ twˈɛlv.fˈɪfti fɔːɹ θɹˈiːʲ ˈaɪɾəmz.",
+    "chunks": [
+      "On 12/03/2026",
+      "pay $12",
+      "50 for 3 items"
+    ]
+  },
+  {
+    "id": "accented",
+    "text": "Café déjà vu, naïve façade.",
+    "raw": [
+      "k_æ_f_ˈeɪ d_ˌeɪ_ʒ_ɑː v_ˈuː",
+      "n_aɪ_ˈiː_v f_ə_s_ˈɑː_d"
+    ],
+    "expected": "kæfˈeɪ dˌeɪʒɑː vˈuː, naɪˈiːv fəsˈɑːd.",
+    "chunks": [
+      "Café déjà vu",
+      "naïve façade"
+    ]
+  },
+  {
+    "id": "combining",
+    "text": "Café and résumé.",
+    "raw": [
+      "k_ˈeɪ_f æ_n_d ɹ_ˈɛ_s_uː_m_ˌɛ"
+    ],
+    "expected": "kˈeɪf ænd ɹˈɛsuːmˌɛ.",
+    "chunks": [
+      "Café and résumé"
+    ]
+  },
+  {
+    "id": "nfkc",
+    "text": "ＡＢＣ ① ﬁ ²",
+    "raw": [
+      "l_ˌɛ_ɾ_ɚ__ˌɛ_f__ˌɛ_f__f_ˈɔːɹ__w_ˌʌ_n__l_ˌɛ_ɾ_ɚ__ˌɛ_f__ˈɛ_f__f_ˌɔːɹ__t_ˌuː__l_ˌɛ_ɾ_ɚ__ˈɛ_f__ˌɛ_f__f_ˌɔːɹ__θ_ɹ_ˈiː_ f_ˌaɪ t_ˈuː"
+    ],
+    "expected": "lˌɛɾɚˌɛfˌɛffˈɔːɹwˌʌnlˌɛɾɚˌɛfˈɛffˌɔːɹtˌuːlˌɛɾɚˈɛfˌɛffˌɔːɹθɹˈiː fˌaɪ tˈuː",
+    "chunks": [
+      "ＡＢＣ ① ﬁ ²"
+    ]
+  },
+  {
+    "id": "nfkc_normalized",
+    "text": "ABC 1 fi 2",
+    "raw": [
+      "ˌeɪ_b_ˌiː_s_ˈiː w_ˈʌ_n f_ˌaɪ t_ˈuː"
+    ],
+    "expected": "ˌeɪbˌiːsˈiː wˈʌn fˌaɪ tˈuː",
+    "chunks": [
+      "ABC 1 fi 2"
+    ]
+  },
+  {
+    "id": "whitespace",
+    "text": " \tHello\nworld.\r\n Again! ",
+    "raw": [
+      "h_ə_l_ˈoʊ w_ˈɜː_l_d",
+      "ɐ_ɡ_ˈɛ_n"
+    ],
+    "expected": "həlˈoʊ wˈɜːld. ɐɡˈɛn!",
+    "chunks": [
+      " \tHello\nworld",
+      "Again"
+    ]
+  },
+  {
+    "id": "hyphens",
+    "text": "An up-to-date co-worker can't wait.",
+    "raw": [
+      "ɐ_n ˌʌ_p_t_ə_d_ˈeɪ_t k_ˈoʊ_w_ˈɜː_k_ɚ k_ˈæ_n_t w_ˈeɪ_t"
+    ],
+    "expected": "ɐn ˌʌptədˈeɪt kˈoʊwˈɜːkɚ kˈænt wˈeɪt.",
+    "chunks": [
+      "An up-to-date co-worker can't wait"
+    ]
+  },
+  {
+    "id": "punctuation_only",
+    "text": "...?!",
+    "raw": [],
+    "expected": "...?!",
+    "chunks": []
+  },
+  {
+    "id": "embedded_flags_candidate",
+    "text": "bonjour señor déjà vu Übermensch",
+    "raw": [
+      "b_ɔː_n_ʒ_ˈʊɹ s_ɛ_n_j_ˈɔːɹ d_ˌeɪ_ʒ_ɑː v_ˈuː ˈuː_b_ɚ_m_ˌɛ_n_ʃ"
+    ],
+    "expected": "bɔːnʒˈʊɹ sɛnjˈɔːɹ dˌeɪʒɑː vˈuː ˈuːbɚmˌɛnʃ",
+    "chunks": [
+      "bonjour señor déjà vu Übermensch"
+    ]
+  },
+  {
+    "id": "max_length",
+    "text": "quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river ",
+    "raw": [
+      "k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ k_w_ˈaɪə_t ɹ_ˈɪ_v_ɚ"
+    ],
+    "expected": "kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ kwˈaɪət ɹˈɪvɚ",
+    "chunks": [
+      "quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river quiet river "
+    ]
+  },
+  {
+    "id": "ellipsis",
+    "text": "Wait… now—go!",
+    "raw": [
+      "w_ˈeɪ_t",
+      "n_ˈaʊ",
+      "ɡ_ˈoʊ"
+    ],
+    "expected": "wˈeɪt… nˈaʊ—ɡˈoʊ!",
+    "chunks": [
+      "Wait",
+      "now",
+      "go"
+    ]
+  },
+  {
+    "id": "brackets",
+    "text": "{hello} [world] «yes» ¡hello! ¿why?",
+    "raw": [
+      "h_ə_l_ˈoʊ",
+      "w_ˈɜː_l_d",
+      "j_ˈɛ_s",
+      "h_ə_l_ˈoʊ",
+      "w_ˈaɪ"
+    ],
+    "expected": "{həlˈoʊ} [wˈɜːld] «jˈɛs» ¡həlˈoʊ! ¿wˈaɪ?",
+    "chunks": [
+      "hello",
+      "world",
+      "yes",
+      "hello",
+      "why"
+    ]
+  }
+]

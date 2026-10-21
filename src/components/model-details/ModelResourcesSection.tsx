@@ -14,7 +14,7 @@ import { ModelLoraControls } from './ModelLoraControls';
 import { registry } from '../../services/LocalStorageRegistry';
 import { getModelDownloadManager } from '../../services/ModelDownloadManager';
 import { getSettings, subscribeSettings, type AuxiliaryModelRole } from '../../services/SettingsStore';
-import { AuxiliaryModelError, checkAuxiliaryModel, selectAuxiliaryModel, resolveModelForResourceEdit } from '../../services/AuxiliaryModelService';
+import { AuxiliaryModelError, checkAuxiliaryModel, getAuxiliarySelection, selectAuxiliaryModel, resolveModelForResourceEdit } from '../../services/AuxiliaryModelService';
 import { useDownloadStore } from '../../store/downloadStore';
 import { ttsService } from '../../services/TtsService';
 import { TtsError } from '../../types/tts';
@@ -33,7 +33,11 @@ export function ModelResourcesSection({ model }: { model: ModelMetadata }) {
   const [size, setSize] = useState('');
   const abort = useRef<AbortController | null>(null);
   const queued = useDownloadStore((state) => state.queue.find((entry) => entry.id === model.id));
-  useEffect(() => subscribeSettings(setSettings), []);
+  useEffect(() => {
+    const unsubscribeSettings = subscribeSettings(setSettings);
+    const unsubscribeModels = registry.subscribeModels(() => setSettings(getSettings()));
+    return () => { unsubscribeSettings(); unsubscribeModels(); };
+  }, []);
   useEffect(() => () => abort.current?.abort(), []);
   const evidence = getModelRoleEvidence(model);
   const artifacts = getManagedCompanionArtifacts(queued ?? model);
@@ -90,8 +94,9 @@ export function ModelResourcesSection({ model }: { model: ModelMetadata }) {
         </Text>
       )) : <Text>{t('resources.unknown')}</Text>}
       {(['embedding', 'reranker', 'tts'] as const).filter((role) => evidence.some((entry) => entry.role === role)).map((role) => {
-        const selected = settings.auxiliaryModels?.[role]?.modelId === model.id
-          && settings.auxiliaryModels[role]?.fileIdentity === getModelFileIdentity(model);
+        const resolvedSelection = getAuxiliarySelection(role);
+        const selected = resolvedSelection?.id === model.id
+          && getModelFileIdentity(resolvedSelection) === getModelFileIdentity(model);
         const verified = model.roleValidation?.some((entry) => entry.role === role
           && entry.fileIdentity === getModelFileIdentity(model) && entry.runtimeVersion === '0.13.0-rc.3');
         const profileReady = baseReady && (role !== 'tts' || getSelectedManagedCompanions(model)
@@ -104,9 +109,9 @@ export function ModelResourcesSection({ model }: { model: ModelMetadata }) {
             <Button size="sm" action="secondary" disabled={checking || Boolean(queued)} onPress={() => void runAction(() => selectAuxiliaryModel(role, selected ? null : model))}>
               <ButtonText>{t(selected ? 'resources.unselect' : 'resources.select')}</ButtonText>
             </Button>
-            <Button size="sm" disabled={!selected || !baseReady || checking || Boolean(queued)} onPress={() => void check(role)} testID={`resource-check-${role}`}>
+            {role !== 'tts' ? <Button size="sm" disabled={!selected || !baseReady || checking || Boolean(queued)} onPress={() => void check(role)} testID={`resource-check-${role}`}>
               <ButtonText>{t('resources.checkLoad')}</ButtonText>
-            </Button>
+            </Button> : null}
             {role === 'tts' ? <Button size="sm" action="secondary" disabled={!selected || !profileReady || checking || Boolean(queued)}
               testID="resource-check-tts-files" onPress={() => void checkTtsFiles()}><ButtonText>{t('tts.checkFiles')}</ButtonText></Button> : null}
           </Box>

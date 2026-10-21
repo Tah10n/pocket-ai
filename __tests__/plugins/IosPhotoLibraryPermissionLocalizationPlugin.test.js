@@ -4,6 +4,16 @@ const path = require('path');
 const withIosPhotoLibraryPermissionLocalization = require('../../plugins/withIosPhotoLibraryPermissionLocalization');
 
 describe('iOS photo library permission localization config plugin', () => {
+  const ownedTemporaryRoots = new Set();
+  afterEach(() => {
+    for (const directory of ownedTemporaryRoots) {
+      const resolved = path.resolve(directory);
+      if (!resolved.startsWith(`${path.resolve(os.tmpdir())}${path.sep}`)) throw new Error('Temporary fixture escaped its owner root.');
+      fs.rmSync(resolved, { recursive: true, force: true });
+      if (fs.existsSync(resolved)) throw new Error('Temporary iOS permission fixture cleanup failed.');
+      ownedTemporaryRoots.delete(directory);
+    }
+  });
   const {
     PHOTO_LIBRARY_USAGE_DESCRIPTION_KEY,
     LOCALIZED_PHOTO_LIBRARY_USAGE_DESCRIPTIONS,
@@ -170,6 +180,7 @@ describe('iOS photo library permission localization config plugin', () => {
 
   it('writes localized InfoPlist.strings files into locale resource directories', () => {
     const platformProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-ios-permissions-'));
+    ownedTemporaryRoots.add(platformProjectRoot);
     const projectName = 'PocketAI';
 
     writeLocalizedPhotoLibraryPermissionFiles({ platformProjectRoot, projectName });
@@ -196,6 +207,7 @@ describe('iOS photo library permission localization config plugin', () => {
 
   it('preserves existing localized entries while writing permission files', () => {
     const platformProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-ios-permissions-'));
+    ownedTemporaryRoots.add(platformProjectRoot);
     const projectName = 'PocketAI';
     const localeDirectory = path.join(platformProjectRoot, projectName, 'Supporting', 'en.lproj');
     fs.mkdirSync(localeDirectory, { recursive: true });

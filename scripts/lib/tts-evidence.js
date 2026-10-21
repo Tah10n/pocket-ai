@@ -99,6 +99,24 @@ function validateTtsWav(bytes, step) {
   return { bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
     sampleRate: step.sampleRate, sampleCount: step.sampleCount };
 }
+/** Controlled recordings have their own canonical 30-second input policy. */
+function validateRecordedWav(bytes, step) {
+  if (!step || typeof step !== 'object' || step.headerValidated !== true || step.sampleRate !== 16000
+    || !Number.isSafeInteger(step.sampleCount) || step.sampleCount < 1 || step.sampleCount > 480000
+    || !Number.isFinite(step.duration) || step.duration !== step.sampleCount / 16000 || step.duration > 30
+    || !Buffer.isBuffer(bytes) || bytes.length < 46 || bytes.length > 960044
+    || !Number.isSafeInteger(step.sizeBytes) || step.sizeBytes !== bytes.length
+    || bytes.toString('ascii', 0, 4) !== 'RIFF' || bytes.toString('ascii', 8, 12) !== 'WAVE'
+    || bytes.readUInt32LE(4) !== bytes.length - 8 || bytes.toString('ascii', 12, 16) !== 'fmt '
+    || bytes.readUInt32LE(16) !== 16 || bytes.readUInt16LE(20) !== 1 || bytes.readUInt16LE(22) !== 1
+    || bytes.readUInt32LE(24) !== 16000 || bytes.readUInt32LE(28) !== 32000
+    || bytes.readUInt16LE(32) !== 2 || bytes.readUInt16LE(34) !== 16 || bytes.toString('ascii', 36, 40) !== 'data'
+    || bytes.readUInt32LE(40) !== step.sampleCount * 2 || bytes.length !== 44 + step.sampleCount * 2) {
+    throw new Error('Exported recording differs from the bounded canonical PCM receipt.');
+  }
+  return { bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    sampleRate: step.sampleRate, sampleCount: step.sampleCount };
+}
 function validateTtsPlaybackEvidence(value) {
   const fail = () => { throw new Error('Incomplete single-clip TTS playback acceptance.'); };
   const native = value?.native;
@@ -130,4 +148,4 @@ function validateTtsPlaybackEvidence(value) {
     || !background || ['playingObserved', 'clipRemoved', 'previewClosed', 'noAutoplay'].some(key => background[key] !== true)) fail();
   return value;
 }
-module.exports = { sanitizeTtsEvidence, validateTtsEvidence, validateTtsWav, validateTtsPlaybackEvidence };
+module.exports = { sanitizeTtsEvidence, validateTtsEvidence, validateTtsWav, validateRecordedWav, validateTtsPlaybackEvidence };

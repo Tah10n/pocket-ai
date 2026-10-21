@@ -12,10 +12,15 @@ import * as chatSession from '../../src/hooks/useChatSession';
 import { ttsService } from '../../src/services/TtsService';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { documentSessionContextCache } from '../../src/services/DocumentSessionContextCache';
+import { referenceVoiceStore } from '../../src/services/ReferenceVoiceStore';
+import { cleanupPreparedAudioAfterDrain } from '../../src/services/AudioPreparationService';
 
 jest.mock('../../src/services/TtsService', () => ({
   ttsService: { cancelAndClear: jest.fn(async () => undefined) },
 }));
+jest.mock('../../src/services/AudioRecordingService', () => ({ audioRecordingService: { cancelAndClear: jest.fn(async () => undefined) } }));
+jest.mock('../../src/services/AudioSamplePreviewService', () => ({ audioSamplePreviewService: { stop: jest.fn(async () => undefined) } }));
+jest.mock('../../src/services/AudioPreparationService', () => ({ cleanupPreparedAudioAfterDrain: jest.fn(async () => undefined) }));
 
 jest.mock('expo-secure-store', () => ({
   isAvailableAsync: jest.fn(async () => true),
@@ -47,8 +52,10 @@ describe('PrivateStorageRecovery', () => {
   beforeEach(() => {
     jest.restoreAllMocks();
     jest.mocked(ttsService.cancelAndClear).mockReset().mockResolvedValue(undefined);
+    jest.mocked(cleanupPreparedAudioAfterDrain).mockReset().mockResolvedValue(undefined);
     jest.spyOn(registry, 'preserveExistingModelFilesForPrivateStorageReset').mockResolvedValue([]);
     jest.spyOn(chatAttachmentStorageService, 'deleteAllAttachmentFilesForPrivateStorageReset').mockResolvedValue(undefined);
+    jest.spyOn(referenceVoiceStore, 'cleanupCold').mockResolvedValue(undefined);
     useChatStore.setState({ threads: {}, activeThreadId: null });
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     useModelsStore.setState({
@@ -66,6 +73,28 @@ describe('PrivateStorageRecovery', () => {
       },
     });
     registry.invalidatePrivateStorageRuntimeState();
+  });
+
+  it('keeps reset health blocked when prepared audio cleanup cannot confirm plaintext deletion', async () => {
+    jest.mocked(cleanupPreparedAudioAfterDrain).mockRejectedValueOnce(new Error('private path must not be logged'));
+    const resetStorage = jest.spyOn(privateStorage, 'resetPrivateAppStorageAfterConfirmation');
+    await expect(resetPrivateAppStorageAndRuntimeStateAfterConfirmation()).resolves.toEqual(expect.objectContaining({
+      status: 'blocked', reason: 'reset_failed',
+    }));
+    expect(resetStorage).not.toHaveBeenCalled();
+    expect(referenceVoiceStore.cleanupCold).not.toHaveBeenCalled();
+    expect(chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset).not.toHaveBeenCalled();
+  });
+
+  it('keeps reset health blocked when a retained temporary reference cannot be deleted after native drain', async () => {
+    jest.spyOn(referenceVoiceStore, 'drainForPrivateReset').mockRejectedValueOnce(new Error('retained private source'));
+    const resetStorage = jest.spyOn(privateStorage, 'resetPrivateAppStorageAfterConfirmation');
+    await expect(resetPrivateAppStorageAndRuntimeStateAfterConfirmation()).resolves.toEqual(expect.objectContaining({
+      status: 'blocked', reason: 'reset_failed',
+    }));
+    expect(ttsService.cancelAndClear).toHaveBeenCalled();
+    expect(resetStorage).not.toHaveBeenCalled();
+    expect(cleanupPreparedAudioAfterDrain).not.toHaveBeenCalled();
   });
 
   it('clears cached private handles and in-memory private persisted state after explicit reset', async () => {

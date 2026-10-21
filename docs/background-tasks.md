@@ -4,6 +4,15 @@ Pocket AI supports long-running model downloads and on-device generation while t
 
 Experimental [local speech](local-tts.md) has foreground-only synthesis/playback ownership. Backgrounding invalidates its request, waits for native drain and clears its temporary player/clip. It does not use the inference foreground service or resume speech when the app returns to the foreground. The Expo audio configuration disables background playback and recording.
 
+Explicit audio recording also stays foreground-only. Backgrounding stops and finalizes an active
+capture into an interrupted draft for explicit review; it cannot resume automatically. Cancelled
+permission or preparation work cannot start capture later. Recorder, sample preview and speech
+playback share one session and await confirmed native disposal before handoff. The C15 physical
+Android API 34 recorder run passed background interruption/no-resume within its seven lifecycle
+cases. TTS/reference acceptance remains unverified. The separate bounded C15 privacy audit
+inspected 1,687 application records / 256,959 bytes with zero candidates; it covers only its
+captured window and does not turn recorder cleanup into general privacy proof.
+
 ## Android
 
 ### Foreground service

@@ -123,6 +123,9 @@ describe('Android benchmark artifact reporting', () => {
     expect(report.environment.sourceRevision).toBe('a'.repeat(40));
     expect(report.environment.artifactSha256).toBe(provenance.apkSha256);
     expect(report.environment.arch).toBe('arm64-v8a');
+    const fullInspection = inspectAndroidArtifactNativeLibraries(artifactPath, 'apk', { targetAbi: 'arm64-v8a' });
+    expect(fullInspection.nativeLibraryFingerprints.map(entry => entry.library)).toContain('libpocket_phonemizer.so');
+    expect(report.libraries.map(entry => entry.library)).not.toContain('libpocket_phonemizer.so');
     expect(report.libraries).toEqual(['libpocket_anydoc.so', 'libpocket_anydoc_jni.so'].map((library) => {
       const bytes = Buffer.from(`arm64-v8a:${library}`);
       return {

@@ -5,7 +5,7 @@ const { withDangerousMod, withMainApplication } = require('expo/config-plugins')
 const { mergeContents } = require('@expo/config-plugins/build/utils/generateCode');
 
 const TAG = 'pocket-ai-debug-hmr-compatibility';
-const REGISTRATION = '    if (BuildConfig.DEBUG) PocketHmrCompatibility.install(reactHost)';
+const REGISTRATION = '    if (BuildConfig.DEBUG && BuildConfig.BUILD_TYPE.equals("debug")) PocketHmrCompatibility.install(reactHost)';
 
 function createSource(packageName) {
   if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(packageName)) {

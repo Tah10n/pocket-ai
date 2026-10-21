@@ -1,14 +1,16 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import * as RNFS from 'react-native-fs';
 import { checkAuxiliaryModel, selectAuxiliaryModel, getAuxiliarySelection, estimateAuxiliaryCheckBytes, resolveModelForResourceEdit } from '../../src/services/AuxiliaryModelService';
-import { getSettings, updateSettings, resetSettings, clearAuxiliaryBindingsForModel, storage, SETTINGS_KEY } from '../../src/services/SettingsStore';
+import { getSettings, updateSettings, resetSettings, clearAuxiliaryBindingsForModel, invalidateSettingsStorageForPrivateReset, storage, SETTINGS_KEY } from '../../src/services/SettingsStore';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
-import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import { LifecycleStatus, ModelAccessState, type ModelArtifactMetadata, type ModelMetadata } from '../../src/types/models';
 import { useChatStore } from '../../src/store/chatStore';
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { bindManagedCompanion, getSelectedManagedCompanions } from '../../src/utils/modelArtifacts';
+import { getModelFileIdentity } from '../../src/utils/modelRoles';
+import { DEFAULT_TTS_PROFILE_ID, TTS_EXECUTION_PROFILES, type TtsExecutionProfile } from '../../src/services/TtsExecutionProfiles';
 
 jest.mock('../../src/services/LLMEngineService', () => ({ llmEngineService: {
   getState: jest.fn(() => ({ activeModelId: 'chat/a' })),
@@ -170,4 +172,140 @@ it('invalidates a binding when a different file replaces the chosen variant', ()
   registry.updateModel({ ...model(), hfRevision: 'next' });
   expect(getAuxiliarySelection('embedding')).toBeUndefined();
   expect(getSettings().activeModelId).toBe('chat/a');
+});
+
+const preferredTtsProfile = TTS_EXECUTION_PROFILES.find(profile => profile.id === DEFAULT_TTS_PROFILE_ID)!;
+function installedTtsModel(profile: TtsExecutionProfile = preferredTtsProfile, id = 'tts/oute'): ModelMetadata {
+  const base = { ...model(id), size: profile.backbone.bytes, sha256: profile.backbone.sha256,
+    downloadUrl: `https://huggingface.co/${profile.backbone.repository}/resolve/${profile.backbone.revision}/${profile.backbone.filename}`,
+    hfRevision: profile.backbone.revision, resolvedFileName: profile.backbone.filename,
+    roleEvidence: [{ role: 'tts' as const, source: 'pipeline_tag' as const, confidence: 'declared' as const }] };
+  const bound = bindManagedCompanion(base, { kind: 'tts_codec',
+    downloadUrl: `https://huggingface.co/${profile.codec.repository}/resolve/${profile.codec.revision}/${profile.codec.filename}`,
+    sha256: profile.codec.sha256, sizeBytes: profile.codec.bytes });
+  return { ...bound, artifacts: bound.artifacts!.map(artifact => ({ ...artifact,
+    installState: 'installed' as const, localPath: id.replace('/', '-') + '-codec.gguf' })) };
+}
+function withCodecChanges(entry: ModelMetadata, changes: Partial<ModelArtifactMetadata>): ModelMetadata {
+  return { ...entry, artifacts: entry.artifacts?.map(artifact => artifact.kind === 'tts_codec'
+    ? { ...artifact, ...changes } : artifact) };
+}
+
+it('resolves the preferred installed TTS pair without selecting, downloading, hashing, or loading it', () => {
+  const preferred = installedTtsModel();
+  registry.saveModels([model('chat/a'), preferred]);
+  const before = getSettings();
+  const modelsBefore = registry.getModels();
+  expect(getAuxiliarySelection('tts')?.id).toBe(preferred.id);
+  expect(getSettings()).toEqual(before);
+  expect(getSettings().auxiliaryModels?.tts).toBeUndefined();
+  expect(registry.getModels()).toEqual(modelsBefore);
+  expect(useDownloadStore.getState().queue).toEqual([]);
+  expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+  expect(RNFS.hash).not.toHaveBeenCalled();
+  expect(engine.runWithAuxiliaryContext).not.toHaveBeenCalled();
+});
+
+it('keeps the automatic choice stable when registry order changes', () => {
+  const first = installedTtsModel(preferredTtsProfile, 'tts/a');
+  const second = installedTtsModel(preferredTtsProfile, 'tts/z');
+  registry.saveModels([second, first]);
+  expect(getAuxiliarySelection('tts')?.id).toBe(first.id);
+  registry.saveModels([first, second]);
+  expect(getAuxiliarySelection('tts')?.id).toBe(first.id);
+});
+
+it('allows the preferred pair with active installed lifecycle metadata', () => {
+  const preferred = { ...installedTtsModel(), lifecycleStatus: LifecycleStatus.ACTIVE };
+  registry.saveModels([preferred]);
+  expect(getAuxiliarySelection('tts')?.id).toBe(preferred.id);
+});
+
+it('does not substitute another supported profile for a missing preferred pair', () => {
+  registry.saveModels([installedTtsModel(TTS_EXECUTION_PROFILES.find(profile => profile.family === 'neutts')!, 'tts/other')]);
+  expect(getAuxiliarySelection('tts')).toBeUndefined();
+});
+
+it('requires the first selected codec to match the preferred profile', () => {
+  const preferred = installedTtsModel();
+  const codec = preferred.artifacts![0];
+  registry.saveModels([{ ...preferred, artifacts: [
+    { ...codec, id: 'wrong-first-codec', sha256: 'c'.repeat(64) }, codec,
+  ] }]);
+  expect(getAuxiliarySelection('tts')).toBeUndefined();
+});
+
+it('preserves an explicit custom TTS selection and does not revive the default after its deletion', () => {
+  const customProfile = TTS_EXECUTION_PROFILES.find(profile => profile.family === 'neutts')!;
+  const custom = installedTtsModel(customProfile, 'tts/custom');
+  registry.saveModels([installedTtsModel(), custom]);
+  selectAuxiliaryModel('tts', custom);
+  expect(getAuxiliarySelection('tts')?.id).toBe(custom.id);
+  expect(getSettings().autoSelectTtsModel).toBe(false);
+  clearAuxiliaryBindingsForModel(custom.id);
+  expect(getAuxiliarySelection('tts')).toBeUndefined();
+});
+
+it('retains an explicit unavailable custom TTS model instead of silently choosing an installed default', () => {
+  const custom = { ...installedTtsModel(TTS_EXECUTION_PROFILES.find(profile => profile.family === 'neutts')!, 'tts/custom'),
+    localPath: undefined, lifecycleStatus: LifecycleStatus.AVAILABLE, artifacts: [] };
+  registry.saveModels([installedTtsModel(), custom]);
+  selectAuxiliaryModel('tts', custom);
+  expect(getAuxiliarySelection('tts')?.id).toBe(custom.id);
+  expect(getAuxiliarySelection('tts')?.localPath).toBeUndefined();
+});
+
+it('persists explicit TTS unselect across a fresh settings handle', () => {
+  registry.saveModels([installedTtsModel()]);
+  expect(getAuxiliarySelection('tts')).toBeDefined();
+  selectAuxiliaryModel('tts', null);
+  invalidateSettingsStorageForPrivateReset();
+  expect(getSettings().autoSelectTtsModel).toBe(false);
+  expect(getAuxiliarySelection('tts')).toBeUndefined();
+});
+
+it.each(['missing model', 'changed file identity'] as const)('does not fall back past an explicit TTS binding with %s', reason => {
+  const preferred = installedTtsModel();
+  registry.saveModels([preferred]);
+  updateSettings({ autoSelectTtsModel: true, auxiliaryModels: { tts: {
+    modelId: reason === 'missing model' ? 'tts/removed' : preferred.id, fileIdentity: 'stale-identity',
+  } } });
+  expect(getAuxiliarySelection('tts')).toBeUndefined();
+});
+
+it('fails closed when malformed persisted explicit TTS identity is removed during settings sanitation', () => {
+  registry.saveModels([installedTtsModel()]);
+  storage.set(SETTINGS_KEY, JSON.stringify({ autoSelectTtsModel: true,
+    auxiliaryModels: { tts: { modelId: 'tts/custom', fileIdentity: '' } } }));
+  expect(getAuxiliarySelection('tts')).toBeUndefined();
+  expect(getSettings().autoSelectTtsModel).toBe(false);
+});
+
+it.each<[string, (entry: ModelMetadata) => ModelMetadata]>([
+  ['missing backbone path', entry => ({ ...entry, localPath: undefined })],
+  ['uninstalled backbone', entry => ({ ...entry, lifecycleStatus: LifecycleStatus.AVAILABLE })],
+  ['malformed backbone hash', entry => ({ ...entry, sha256: 'not-a-sha256' })],
+  ['different backbone size', entry => ({ ...entry, size: preferredTtsProfile.backbone.bytes + 1 })],
+  ['missing TTS role evidence', entry => ({ ...entry, roleEvidence: [] })],
+  ['missing codec', entry => ({ ...entry, artifacts: [] })],
+  ['unselected codec', entry => withCodecChanges(entry, { selected: false })],
+  ['wrong codec base binding', entry => withCodecChanges(entry, { boundToModelIdentity: 'another-base' })],
+  ['uninstalled codec', entry => withCodecChanges(entry, { installState: 'remote' })],
+  ['missing codec path', entry => withCodecChanges(entry, { localPath: undefined })],
+  ['unsafe codec path', entry => withCodecChanges(entry, { localPath: '../codec.gguf' })],
+  ['malformed codec hash', entry => withCodecChanges(entry, { sha256: 'not-a-sha256' })],
+  ['different codec size', entry => withCodecChanges(entry, { sizeBytes: preferredTtsProfile.codec.bytes + 1 })],
+])('keeps automatic TTS unavailable with %s', (_reason, change) => {
+  registry.saveModels([change(installedTtsModel())]);
+  expect(getAuxiliarySelection('tts')).toBeUndefined();
+  expect(engine.runWithAuxiliaryContext).not.toHaveBeenCalled();
+});
+
+it('does not apply the TTS default to embedding or reranker selections', () => {
+  registry.saveModels([installedTtsModel()]);
+  expect(getAuxiliarySelection('embedding')).toBeUndefined();
+  expect(getAuxiliarySelection('reranker')).toBeUndefined();
+  selectAuxiliaryModel('embedding', model());
+  expect(getSettings().autoSelectTtsModel).toBe(true);
+  expect(getAuxiliarySelection('embedding')?.id).toBe('embed/b');
 });

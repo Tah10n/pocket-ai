@@ -393,5 +393,5 @@ async function main() {
     if (fs.existsSync(resolved)) throw new Error('Native fixture cleanup failed');
   }
 }
-module.exports = { block, method, harnessSource, guardedSource };
+module.exports = { block, method, harnessSource, guardedSource, cachedJar, run };
 if (require.main === module) main().catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });

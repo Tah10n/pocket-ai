@@ -4,6 +4,10 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const {
   assertSmokeBuildOverrideContract,
+  buildQaApkWithoutDevice,
+  evaluateTargetedApkPackaging,
+  assertImmutableBuildReuse,
+  writePreinstallAbiDiagnostic,
   buildGradleAssembleArgs,
   buildMetroBundlePath,
   buildMetroReverseSpecs,
@@ -1114,18 +1118,27 @@ describe('android-smoke APK reuse decisions', () => {
 });
 
 describe('android-smoke target ABI contract', () => {
+  it.each(['x86_64', 'arm64-v8a'])('starts the actual build-only CLI with target ABI %s before help exits', (abi) => {
+    const result = require('child_process').spawnSync(process.execPath, [
+      path.resolve(__dirname, '../../scripts/android-smoke.js'),
+      '--build-only', '--apk-variant', 'release', '--target-abi', abi,
+      '--isolated-qa-install', '--help',
+    ], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('Usage: node ./scripts/android-smoke.js');
+    expect(result.stderr).toBe('');
+  });
+
   const reactNativeLibrary = (abi) => `lib/${abi}/libreactnative.so`;
   const rnLlamaLibrary = (abi) => `lib/${abi}/librnllama.so`;
   const rnLlamaJniLibrary = (abi) => `lib/${abi}/librnllama_jni.so`;
   const pocketAnydocLibrary = (abi) => `lib/${abi}/libpocket_anydoc.so`;
   const pocketAnydocJniLibrary = (abi) => `lib/${abi}/libpocket_anydoc_jni.so`;
-  const nativeLibraryEntries = (abi) => [
-    reactNativeLibrary(abi),
-    rnLlamaLibrary(abi),
-    rnLlamaJniLibrary(abi),
-    pocketAnydocLibrary(abi),
-    pocketAnydocJniLibrary(abi),
-  ];
+  const { ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI } = require('../../scripts/android-build-provenance');
+  const nativeLibraryEntries = (abi) => ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI[abi].map(name => `lib/${abi}/${name}`);
   const canonicalUniversalAbis = ['arm64-v8a', 'x86_64'];
 
   it('accepts only the supported target ABI enum', () => {
@@ -1183,6 +1196,26 @@ describe('android-smoke target ABI contract', () => {
       applicationId: 'com.example.untrusted',
     })).toThrow(/repository package or its isolated \.qa package/);
   });
+
+  it('binds the selected named QA instance through CLI, resolver and Gradle arguments', () => {
+    const options = parseCliOptions(['--isolated-qa-install', '--qa-instance', 'stage7']);
+    const applicationId = resolveAndroidQaApplicationId('com.github.tah10n.pocketai', options.isolatedQaInstall, options.qaInstance);
+    expect(applicationId).toBe('com.github.tah10n.pocketai.stage7.qa');
+    expect(buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a', { applicationId, qaInstance: options.qaInstance }))
+      .toContain('-PpocketAiApplicationId=com.github.tah10n.pocketai.stage7.qa');
+    expect(() => parseCliOptions(['--qa-instance', 'stage7'])).toThrow(/requires --isolated-qa-install/);
+    for (const wrong of ['com.github.tah10n.pocketai', 'com.github.tah10n.pocketai.qa', 'com.github.tah10n.pocketai.other.qa', 'com.other.stage7.qa']) {
+      expect(() => buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a', {
+        applicationId: wrong, env: { POCKET_AI_ANDROID_QA_INSTANCE: 'stage7' },
+      })).toThrow(/repository package or its isolated/);
+    }
+  });
+
+  it.each(['', 'Stage7', 'stage.7', 'stage-7', ' stage7', 'stage7 ', 'stage7\n', 'stage/7', '7stage', 'a'.repeat(33)])(
+    'rejects malformed QA instance %j at the public resolver boundary', instance => {
+      expect(() => resolveAndroidQaApplicationId('com.github.tah10n.pocketai', true, instance)).toThrow(/QA instance/);
+    },
+  );
 
   it('cleans generated native intermediates before invoking a fresh provenance build', () => {
     const source = fs.readFileSync(path.join(__dirname, '../../scripts/android-smoke.js'), 'utf8');
@@ -1320,6 +1353,7 @@ describe('android-smoke target ABI contract', () => {
         rnLlamaLibrary('x86_64'),
         pocketAnydocLibrary('x86_64'),
         pocketAnydocJniLibrary('x86_64'),
+        'lib/x86_64/libpocket_phonemizer.so',
       ],
     })).toEqual(expect.objectContaining({
       canReuse: false,
@@ -1638,4 +1672,113 @@ describe('android-smoke privacy-scoped bootstrap logcat', () => {
       fs.rmSync(tempDir, { force: true, recursive: true });
     }
   });
+});
+
+
+describe('CI build before emulator with immutable install artifact', () => {
+  const requiredLibraries = ['libllama.so', 'libpocket_anydoc.so'];
+  const entries = requiredLibraries.map((name) => `lib/x86_64/${name}`);
+  const setup = () => ({
+    targetAbi: 'x86_64', requiredLibraries,
+    ensureAndroidNativeProject: jest.fn(() => ({ digest: 'prebuild' })),
+    collectNativeBuildInputState: jest.fn(() => ({ digest: 'unchanged-source' })),
+    buildAndroidApk: jest.fn(), listZipEntries: jest.fn(() => entries),
+    createFileFingerprint: jest.fn(() => ({ sha256: 'apk-hash', size: 42 })),
+    writeBuildStamp: jest.fn(),
+  });
+
+  it('accepts explicit build-only mode without requesting an emulator', () => {
+    expect(parseCliOptions(['--build-only', '--apk-variant', 'release', '--target-abi', 'x86_64', '--isolated-qa-install']))
+      .toEqual(expect.objectContaining({ buildOnly: true, emulator: false, isolatedQaInstall: true }));
+    expect(() => parseCliOptions(['--build-only', '--emulator'])).toThrow(/build-only/);
+    expect(() => parseCliOptions(['--build-only', '--skip-build'])).toThrow(/build-only/);
+  });
+
+  it('stamps only artifact packaging and stable inputs, with no invented device ABI evidence', () => {
+    const options = setup();
+    const outcome = buildQaApkWithoutDevice('com.example.qa', options);
+    expect(options.buildAndroidApk).toHaveBeenCalledWith('com.example.qa');
+    expect(options.collectNativeBuildInputState).toHaveBeenCalledTimes(2);
+    expect(options.writeBuildStamp).toHaveBeenCalledWith(
+      { digest: 'unchanged-source' }, { sha256: 'apk-hash', size: 42 },
+      expect.objectContaining({ validationScope: 'artifact-only', packagedAbis: ['x86_64'] }),
+    );
+    expect(outcome).not.toHaveProperty('supportedAbis');
+    expect(outcome).not.toHaveProperty('device');
+  });
+
+  it('refuses to stamp inputs that changed during build', () => {
+    const options = setup();
+    options.collectNativeBuildInputState.mockReturnValueOnce({ digest: 'before' }).mockReturnValue({ digest: 'after' });
+    expect(() => buildQaApkWithoutDevice('com.example.qa', options)).toThrow(/inputs changed/);
+    expect(options.writeBuildStamp).not.toHaveBeenCalled();
+  });
+
+  it('keeps required-library and exact targeted ABI guards before offline stamping', () => {
+    const options = setup();
+    options.listZipEntries.mockReturnValue(['lib/x86_64/libllama.so']);
+    expect(() => buildQaApkWithoutDevice('com.example.qa', options)).toThrow(/required native libraries/);
+    expect(options.writeBuildStamp).not.toHaveBeenCalled();
+    expect(evaluateTargetedApkPackaging({ targetAbi: 'x86_64', requiredLibraries,
+      zipEntries: [...entries, 'lib/arm64-v8a/libllama.so'] }).canReuse).toBe(false);
+    expect(() => evaluateTargetedApkPackaging({ targetAbi: 'universal', zipEntries: entries, requiredLibraries }))
+      .toThrow(/explicit target ABI/);
+  });
+
+  it('fails closed on a stale artifact after emulator boot while retaining ordinary developer rebuild behavior', () => {
+    const stale = { canReuse: false, reason: 'source fingerprint changed' };
+    expect(() => assertImmutableBuildReuse(stale, true)).toThrow(/source fingerprint changed/);
+    expect(() => assertImmutableBuildReuse(stale, false)).not.toThrow();
+    expect(() => assertImmutableBuildReuse({ canReuse: true }, true)).not.toThrow();
+  });
+
+  it('distinguishes an unavailable device ABI query from failed APK entry inspection', () => {
+    const deviceFailure = resolveDebugApkReuseDecision('unused', 'test', 'test.apk', {
+      resolvePrimaryDeviceAbi: () => { throw new Error('private device payload'); }, log: jest.fn(),
+    });
+    expect(deviceFailure.inspectionStage).toBe('device-primary-abi');
+    const zipFailure = resolveDebugApkReuseDecision('unused', 'test', 'test.apk', {
+      resolvePrimaryDeviceAbi: () => 'x86_64', resolveDeviceSupportedAbis: () => ['x86_64'],
+      listZipEntries: () => { throw new Error('private archive payload'); }, log: jest.fn(),
+    });
+    expect(zipFailure.inspectionStage).toBe('apk-entries');
+    expect(zipFailure.supportedAbis).toEqual(['x86_64']);
+  });
+
+  it('writes bounded ABI metadata without private exception text and never masks the primary guard if writing fails', () => {
+    const writeFileSync = jest.fn();
+    writePreinstallAbiDiagnostic({ canReuse: false, inspectionStage: 'apk-entries',
+      packagedAbis: ['x86_64', 'private-secret'], supportedAbis: ['x86_64'],
+      reason: 'private secret path', missingEntries: ['private-secret'],
+    }, 'post-build', { mkdirSync: jest.fn(), writeFileSync, log: jest.fn() });
+    const diagnostic = JSON.parse(writeFileSync.mock.calls[0][1]);
+    expect(diagnostic.inspectionStage).toBe('apk-entries');
+    expect(diagnostic.packagedAbis).toEqual(['x86_64']);
+    expect(JSON.stringify(diagnostic)).not.toContain('private');
+    expect(() => writePreinstallAbiDiagnostic({}, 'post-build', {
+      mkdirSync: () => { throw new Error('disk unavailable'); }, log: jest.fn(),
+    })).not.toThrow();
+  });
+});
+
+it('the real build-only entry branch returns before tool resolution or any connected-device action', async () => {
+  const vm = require('vm');
+  const source = fs.readFileSync(path.join(__dirname, '../../scripts/android-smoke.js'), 'utf8');
+  const start = source.indexOf('async function main() {');
+  const body = source.slice(start, source.indexOf('\nfunction ', start));
+  const forbidden = jest.fn(() => { throw new Error('device access forbidden'); });
+  const build = jest.fn();
+  const context = { cliOptions: { buildOnly: true }, process: { env: { ANDROID_SERIAL: 'connected-device' } },
+    projectRoot: '/test', buildTargetAbi: 'x86_64', androidBuildEnvironment: {},
+    require: (name) => name.includes('phonemize') ? { applyPhonemizePatch: jest.fn() }
+      : { setupLlamaHexagonSdk: async () => ({ env: {} }) },
+    readExpoConfig: () => ({ packageName: 'test.qa' }), resolveAndroidQaApplicationId: () => 'test.qa',
+    assertSmokeBuildOverrideContract: jest.fn(), buildQaApkWithoutDevice: build, log: jest.fn(),
+    resolveAndroidTools: forbidden, runChecked: forbidden, pickConnectedDevice: forbidden,
+    startEmulatorAndWait: forbidden, wakeAndUnlockDevice: forbidden, installDebugApk: forbidden,
+  };
+  vm.createContext(context);
+  await vm.runInContext(`${body}\nmain();`, context);
+  expect(build).toHaveBeenCalledWith('test.qa');
+  expect(forbidden).not.toHaveBeenCalled();
 });

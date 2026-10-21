@@ -270,6 +270,48 @@ describe('ChatMessageBubble', () => {
     expect(text.props.colorRole).toBe('onAccent');
   });
 
+  it.each(['audio', 'document'] as const)('shows the original %s attachment name after Send', (kind) => {
+    reactI18nextMock.__setTranslationOverride('chat.attachments.messageFileIndexedAccessibilityLabel', en.chat.attachments.messageFileIndexedAccessibilityLabel);
+    const base = {
+      id: 'imported', state: 'ready' as const, threadId: 'thread-name', messageId: 'user-name',
+      localUri: 'test-dir/chat-attachments/draft-managed', pathCategory: 'chat_attachment' as const,
+      fileName: 'draft-managed', displayName: 'Original import', sizeBytes: 1024,
+      source: 'document_picker' as const, createdAt: 1,
+    };
+    const attachment: ChatAttachment = kind === 'audio'
+      ? { ...base, kind, mimeType: 'audio/wav', audio: { format: 'wav' } }
+      : { ...base, kind, mimeType: 'text/plain', document: { processorId: 'text', processorVersion: 1 } };
+    const { getByTestId, queryByText } = render(
+      <ChatMessageBubble id="user-name" isUser content="" attachments={[attachment]} />,
+    );
+    const card = getByTestId(`message-attachment-${kind}-user-name-imported`);
+    expect(within(card).getByText('Original import')).toBeTruthy();
+    expect(card.props.accessibilityLabel).toContain('Original import');
+    expect(queryByText('draft-managed')).toBeNull();
+  });
+
+  it('refreshes the memoized visible and accessible name when only displayName changes', () => {
+    reactI18nextMock.__setTranslationOverride('chat.attachments.messageFileIndexedAccessibilityLabel', en.chat.attachments.messageFileIndexedAccessibilityLabel);
+    const attachment: ChatAttachment = {
+      id: 'audio-name', kind: 'audio', state: 'ready', threadId: 'thread-name', messageId: 'user-name',
+      localUri: 'test-dir/chat-attachments/draft-managed.wav', pathCategory: 'chat_attachment',
+      fileName: 'draft-managed.wav', mimeType: 'audio/wav', audio: { format: 'wav' },
+      sizeBytes: 1024, source: 'document_picker', createdAt: 1,
+    };
+    const { getByTestId, getByText, queryByText, rerender } = render(
+      <ChatMessageBubble id="user-name" isUser content="" attachments={[attachment]} />,
+    );
+    const cardId = 'message-attachment-audio-user-name-audio-name';
+    expect(getByText('draft-managed.wav')).toBeTruthy();
+    expect(getByTestId(cardId).props.accessibilityLabel).toContain('draft-managed.wav');
+    rerender(
+      <ChatMessageBubble id="user-name" isUser content="" attachments={[{ ...attachment, displayName: 'recorded.wav' }]} />,
+    );
+    expect(getByText('recorded.wav')).toBeTruthy();
+    expect(getByTestId(cardId).props.accessibilityLabel).toContain('recorded.wav');
+    expect(queryByText('draft-managed.wav')).toBeNull();
+  });
+
   it.each([
     ['default', 'light'], ['default', 'dark'], ['glass', 'light'], ['glass', 'dark'],
   ] as const)('keeps attachment labels on the user bubble foreground in %s %s', (themeId, resolvedMode) => {
@@ -837,5 +879,39 @@ it.each([['en', en.common.errors.localToolRoundLimit], ['ru', ru.common.errors.l
       expect(view.getByText(localized)).toBeTruthy();
       expect(view.queryByText('Local tool run could not complete.')).toBeNull();
     } finally { reactI18nextMock.__resetTranslations(); }
+  },
+);
+it.each(['', 'Partial assistant response retained.'])(
+  'keeps a long error intrinsically measurable and shrinkable with body %j', async (content) => {
+    const error = 'Not enough memory is available to process this audio. Close other applications and try again. '.repeat(3).trim();
+    const screen = render(<ChatMessageBubble id="memory-error-layout" isUser={false}
+      content={content} messageState="error" errorCode="memory_insufficient" errorMessage={error} />);
+    const errorNode = screen.getByText(error);
+    expect(errorNode.props.selectable).toBe(true);
+    // Compile the actual rendered classes through Tailwind and NativeWind's native
+    // CSS parser. A text child with a zero basis cannot size its auto-width row.
+    const postcss = require('postcss');
+    const tailwind = require('tailwindcss');
+    const { cssToReactNativeRuntime } = require('react-native-css-interop/css-to-rn');
+    const css = await postcss([tailwind({
+      content: [{ raw: errorNode.props.className, extension: 'html' }],
+      corePlugins: { preflight: false },
+    })]).process('@tailwind utilities;', { from: undefined });
+    const compiled = cssToReactNativeRuntime(css.css) as {
+      rules: Record<string, { n?: { d?: [Record<string, unknown>][] }[] }>;
+    };
+    const nativeStyle: Record<string, unknown> = {};
+    for (const rule of Object.values(compiled.rules)) {
+      for (const normal of rule.n ?? []) {
+        for (const [declaration] of normal.d ?? []) Object.assign(nativeStyle, declaration);
+      }
+    }
+    expect(nativeStyle.flexGrow ?? 0).toBe(0);
+    expect(nativeStyle.flexBasis ?? 'auto').toBe('auto');
+    expect(nativeStyle.flexShrink).toBe(1);
+    expect(nativeStyle.minWidth).toBe(0);
+    expect(screen.getByTestId('assistant-message-state-error-memory-error-layout')).toBeTruthy();
+    if (content) expect(screen.getByTestId('markdown-renderer').props.children).toBe(content);
+    else expect(screen.queryByTestId('assistant-message-content-memory-error-layout')).toBeNull();
   },
 );

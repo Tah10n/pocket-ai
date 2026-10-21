@@ -44,6 +44,11 @@ export type AndroidQaGenerationEvidenceSnapshot = {
 };
 
 const enabled = process.env.EXPO_PUBLIC_ANDROID_QA === '1' || process.env.NODE_ENV === 'test';
+
+/** Manual QA builds can show the normal chat while retaining bounded status evidence. */
+export function isAndroidQaUiControlsVisible(): boolean {
+  return enabled && process.env.EXPO_PUBLIC_ANDROID_QA_SHOW_CONTROLS !== '0';
+}
 const listeners = new Set<() => void>();
 const gateReleaseWaiters = new Map<string, Set<() => void>>();
 

@@ -249,7 +249,9 @@ function buildAndroidBenchmarkReport({ scenarioReportPath, artifactPath }) {
         ? { appVersion: normalizeSafeLabel(provenance.versionName, 64) }
         : null),
     },
-    libraries: nativeInspection.nativeLibraryFingerprints.map((entry) => ({
+    libraries: nativeInspection.nativeLibraryFingerprints
+      .filter((entry) => mobileLibraryPattern.test(entry.library))
+      .map((entry) => ({
       abi: entry.abi,
       library: entry.library,
       sizeBytes: entry.size,

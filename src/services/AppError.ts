@@ -47,6 +47,8 @@ export type AppErrorCode =
   | 'multimodal_not_ready'
   | 'chat_attachment_copy_failed'
   | 'chat_attachment_limit_exceeded'
+  | 'audio_decoder_size_limit'
+  | 'audio_decoder_duration_limit'
   | 'chat_attachment_missing'
   | 'chat_attachment_not_ready'
   | 'chat_attachment_unsupported_type'
@@ -101,6 +103,8 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   multimodal_not_ready: 'common.errors.multimodalNotReady',
   chat_attachment_copy_failed: 'common.errors.chatAttachmentCopyFailed',
   chat_attachment_limit_exceeded: 'common.errors.chatAttachmentLimitExceeded',
+  audio_decoder_size_limit: 'common.errors.audioDecoderSizeLimit',
+  audio_decoder_duration_limit: 'common.errors.audioDecoderDurationLimit',
   chat_attachment_missing: 'common.errors.chatAttachmentMissing',
   chat_attachment_not_ready: 'common.errors.chatAttachmentNotReady',
   chat_attachment_unsupported_type: 'common.errors.chatAttachmentUnsupportedType',
@@ -120,6 +124,9 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
 };
 
 const ERROR_PATTERNS: { pattern: RegExp; code: AppErrorCode }[] = [
+  { pattern: /\baudio_decoder_size_limit\b/u, code: 'audio_decoder_size_limit' },
+  { pattern: /\baudio_decoder_duration_limit\b/u, code: 'audio_decoder_duration_limit' },
+  { pattern: /\baudio_decoder_invalid_format\b/u, code: 'chat_attachment_unsupported_type' },
   { pattern: /DISK_SPACE_LOW/i, code: 'download_disk_space_low' },
   { pattern: /MODEL_SIZE_UNKNOWN/i, code: 'download_size_unknown' },
   { pattern: /MODEL_METADATA_UNAVAILABLE/i, code: 'download_metadata_unavailable' },
@@ -201,6 +208,8 @@ const SAFE_APP_ERROR_CODES: ReadonlySet<string> = new Set<AppErrorCode>([
   'multimodal_not_ready',
   'chat_attachment_copy_failed',
   'chat_attachment_limit_exceeded',
+  'audio_decoder_size_limit',
+  'audio_decoder_duration_limit',
   'chat_attachment_missing',
   'chat_attachment_not_ready',
   'chat_attachment_unsupported_type',

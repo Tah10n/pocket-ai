@@ -7,6 +7,7 @@ import { llmEngineService } from '../../src/services/LLMEngineService';
 import { AppError } from '../../src/services/AppError';
 import { getAppStorageMetrics } from '../../src/services/StorageManagerService';
 import { screenLayoutMetrics } from '../../src/utils/themeTokens';
+import type { AuxiliaryModelBindings } from '../../src/services/SettingsStore';
 
 const mockBack = jest.fn();
 const mockReplace = jest.fn();
@@ -20,6 +21,9 @@ let mockDeviceMetricsResult: {
 };
 let mockEngineState: Record<string, any>;
 let mockEngineIsReady: boolean;
+let mockResolvedTtsModel: { id: string } | undefined;
+let mockSettingsValue: { language: 'en'; auxiliaryModels?: AuxiliaryModelBindings };
+const mockModelsListeners = new Set<() => void>();
 
 function createStorageMetrics() {
   return {
@@ -168,12 +172,18 @@ jest.mock('../../src/services/StorageManagerService', () => ({
 }));
 
 jest.mock('../../src/services/SettingsStore', () => ({
-  getSettings: () => ({
-    language: 'en',
-  }),
+  getSettings: () => ({ ...mockSettingsValue }),
   subscribeSettings: () => jest.fn(),
   updateSettings: jest.fn(),
 }));
+jest.mock('../../src/services/AuxiliaryModelService', () => ({
+  getAuxiliarySelection: (role: string) => role === 'tts' ? mockResolvedTtsModel : undefined,
+}));
+jest.mock('../../src/services/LocalStorageRegistry', () => ({ registry: {
+  subscribeModels: (listener: () => void) => {
+    mockModelsListeners.add(listener); return () => mockModelsListeners.delete(listener);
+  },
+} }));
 
 jest.mock('../../src/components/ui/MaterialSymbols', () => {
   const mockReact = require('react');
@@ -194,6 +204,9 @@ describe('SettingsScreen', () => {
     mockCanGoBack = true;
     mockEngineState = { activeModelId: null };
     mockEngineIsReady = false;
+    mockResolvedTtsModel = undefined;
+    mockSettingsValue = { language: 'en' };
+    mockModelsListeners.clear();
     (getAppStorageMetrics as jest.Mock).mockResolvedValue({ appFilesBytes: 12_000_000_000 });
     (llmEngineService.unload as jest.Mock).mockResolvedValue(undefined);
     mockDeviceMetricsResult = {
@@ -211,6 +224,35 @@ describe('SettingsScreen', () => {
     expect(queryByTestId('settings-back-button')).toBeNull();
     expect(mockBack).not.toHaveBeenCalled();
     expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it('shows and opens the resolved automatic TTS model after registry updates', async () => {
+    const view = await renderScreen();
+    expect(view.getByTestId('settings-resource-tts')).toHaveTextContent('resources.roles.tts: resources.notSelected');
+    act(() => {
+      mockResolvedTtsModel = { id: 'tts/preferred-installed' };
+      mockModelsListeners.forEach(listener => listener());
+    });
+    expect(view.getByTestId('settings-resource-tts')).toHaveTextContent('resources.roles.tts: tts/preferred-installed');
+    fireEvent.press(view.getByTestId('settings-resource-details-tts'));
+    expect(mockPush).toHaveBeenLastCalledWith({ pathname: '/model-details', params: { modelId: 'tts/preferred-installed' } });
+    act(() => {
+      mockResolvedTtsModel = undefined;
+      mockModelsListeners.forEach(listener => listener());
+    });
+    expect(view.getByTestId('settings-resource-tts')).toHaveTextContent('resources.roles.tts: resources.notSelected');
+    fireEvent.press(view.getByTestId('settings-resource-details-tts'));
+    expect(mockPush).toHaveBeenLastCalledWith('/(tabs)/models');
+    view.unmount();
+    expect(mockModelsListeners.size).toBe(0);
+  });
+
+  it('retains the explicit TTS setup link when its current selection cannot resolve', async () => {
+    mockSettingsValue = { language: 'en', auxiliaryModels: { tts: { modelId: 'tts/custom-missing', fileIdentity: 'stale' } } };
+    const view = await renderScreen();
+    expect(view.getByTestId('settings-resource-tts')).toHaveTextContent('resources.roles.tts: tts/custom-missing');
+    fireEvent.press(view.getByTestId('settings-resource-details-tts'));
+    expect(mockPush).toHaveBeenLastCalledWith({ pathname: '/model-details', params: { modelId: 'tts/custom-missing' } });
   });
 
   it('keeps the root-tab chrome when there is no back history', async () => {

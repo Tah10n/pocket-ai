@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor, within } from '@testing-library/react-native';
 import { TtsPreviewSheet, getTtsQaPlaybackMarker } from '../../src/components/ui/TtsPreviewSheet';
 import { ttsService, getTtsSelectionStatus, type TtsServiceState } from '../../src/services/TtsService';
 import * as DocumentPicker from 'expo-document-picker';
@@ -411,15 +411,16 @@ it('keeps pending native startup separate from Playing and Stop available', () =
 
 it('submits the selected builtin with speech language admission and shows only that profile voice list', async () => {
   mockSelection = { profileId: 'neutts-nano', modelName: 'NeuTTS', languages: ['en'], voiceModes: ['builtin'],
-    builtinVoices: ['default', 'dave', 'jo'] };
+    builtinVoices: ['pocket-synthetic-en-v1'] };
   const view = renderSheet(props());
+  expect(within(view.getByTestId('tts-builtin-pocket-synthetic-en-v1')).getByText('tts.syntheticEnglish')).toBeTruthy();
   expect(view.queryByTestId('tts-mode-reference')).toBeNull();
   expect(view.queryByTestId('tts-language-de')).toBeNull();
-  fireEvent.press(view.getByTestId('tts-builtin-jo'));
+  fireEvent.press(view.getByTestId('tts-builtin-pocket-synthetic-en-v1'));
   await waitFor(() => expect(view.getByTestId('tts-synthesize')).toBeEnabled());
   fireEvent.press(view.getByTestId('tts-synthesize'));
   await waitFor(() => expect(service.start).toHaveBeenCalledWith(expect.objectContaining({
-    language: 'en', voice: { kind: 'builtin', voice: 'jo' },
+    language: 'en', voice: { kind: 'builtin', voice: 'pocket-synthetic-en-v1' },
   })));
 });
 

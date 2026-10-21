@@ -87,6 +87,12 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Setup Java for phonemizer boundary tests
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
       - name: Setup pinned Rust
         uses: dtolnay/rust-toolchain@1.97.1
         with:
@@ -99,6 +105,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Verify actual phonemizer core and JNI failure contracts
+        run: npm run phonemizer:test
 
       - name: Verify (Rust + typecheck + lint + tests)
         run: npm run verify:release
@@ -149,9 +158,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build native release APK before emulator
+        env:
+          EXPO_PUBLIC_ANDROID_QA: "1"
+          ANDROID_SMOKE_APK_VARIANT: release
+          ANDROID_SMOKE_TARGET_ABI: x86_64
+          POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"
+        run: npm run android:smoke -- --build-only --apk-variant release --target-abi x86_64 --isolated-qa-install
       - name: Build and run native release pack
         uses: reactivecircus/android-emulator-runner@v2
         env:
+          ANDROID_SMOKE_REQUIRE_EXISTING_BUILD: "1"
+          EXPO_PUBLIC_ANDROID_QA: "1"
           ANDROID_SMOKE_APK_VARIANT: release
           ANDROID_SMOKE_TARGET_ABI: x86_64
           POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"

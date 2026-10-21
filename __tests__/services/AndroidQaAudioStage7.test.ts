@@ -118,9 +118,13 @@ beforeEach(() => {
     const settled = (operation: string, extra = {}) => request.observe?.({ operation, phase: 'settled', ...extra } as never);
     settled('vocoder_init');
     if (request.voice?.kind === 'reference') { settled('speaker_create'); if (request.voice.bake === 'eager') settled('speaker_bake'); }
-    if (request.voice?.kind === 'builtin' && (!request.qaFrontend || request.qaFrontend === 'neu-canonical-reference-v1')) settled('phonemizer', { elapsedMs: 10 });
+    if (request.voice?.kind === 'builtin') {
+      settled('phonemizer', { elapsedMs: 10 }); settled('phonemizer_conversion', { elapsedMs: 8 });
+      settled('phonemizer', { elapsedMs: 11 }); settled('phonemizer_conversion', { elapsedMs: 9 });
+    }
     settled('formatter', request.voice?.kind === 'reference' ? { speakerRows: 1, speakerBaked: true } : {});
-    settled('completion'); settled('decode', { sampleRate: 24000, sampleCount: 24000 });
+    settled('completion', request.voice?.kind === 'builtin' ? { termination: { schemaVersion: 1, sampledTokenCount: 51, audioTokenCount: 50, stopTokenKind: 'expected_speech_end' } } : {});
+    settled('decode', { sampleRate: 24000, sampleCount: 24000 });
     if (request.voice?.kind === 'reference') settled('speaker_release'); settled('vocoder_release');
     mockTtsState = { phase: 'ready', clipAvailable: true, sampleRate: 24000, sampleCount: 24000 };
   });
@@ -384,15 +388,16 @@ it('rejects changed fixture bytes before giving unrelated audio to the native mo
 });
 it('runs fixed-target builtin/eager/lazy/no-reference consumers and cold saved deletion without handles', async () => {
   const work = runAndroidQaStage7Voices();
-  for (const id of ['neu-jo', 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference']) {
+  for (const id of ['neu-synthetic-first', 'neu-synthetic-repeat', 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference']) {
     await until('awaiting_clip_copy'); expect(getAndroidQaAudioStage7Evidence().clipId).toBe(id);
     continueAndroidQaAudioStage7();
   }
   await work; expect(getAndroidQaAudioStage7Evidence().status).toBe('native_passed');
   const requests = mockTtsStart.mock.calls.map(call => call[0]);
-  expect(new Set(requests.map(request => request.text)).size).toBe(1);
-  expect(requests.map(request => request.voice.kind)).toEqual(['builtin', 'reference', 'reference', 'speakerless']);
-  expect(requests[1].voice.bake).toBe('eager'); expect(requests[2].voice.bake).toBe('lazy');
+  expect(requests.slice(0, 2).map(request => request.text)).toEqual(['A small green boat is waiting near the station.', 'Please close the window before you leave.']);
+  expect(requests.slice(2).every(request => request.text === syntheticFixtures.referenceComparisonTarget)).toBe(true);
+  expect(requests.map(request => request.voice.kind)).toEqual(['builtin', 'builtin', 'reference', 'reference', 'speakerless']);
+  expect(requests[2].voice.bake).toBe('eager'); expect(requests[3].voice.bake).toBe('lazy');
   mockTtsState = { phase: null }; const cold = checkAndroidQaStage7ColdVoice();
   await until('awaiting_clip_copy'); expect(getAndroidQaAudioStage7Evidence().clipId).toBe('qwen-saved-cold');
   continueAndroidQaAudioStage7(); await cold;
@@ -402,12 +407,17 @@ it('runs fixed-target builtin/eager/lazy/no-reference consumers and cold saved d
 it('runs phonemizer synthesis independently without preparing reference fixtures or saving voices', async () => {
   const work = runAndroidQaStage7Voices('phonemizer');
   await until('awaiting_clip_copy');
-  expect(getAndroidQaAudioStage7Evidence().clipId).toBe('neu-jo');
+  expect(getAndroidQaAudioStage7Evidence().clipId).toBe('neu-synthetic-first');
+  continueAndroidQaAudioStage7(); await until('awaiting_clip_copy');
+  expect(getAndroidQaAudioStage7Evidence().clipId).toBe('neu-synthetic-repeat');
   continueAndroidQaAudioStage7(); await work;
   const safe = sanitizeAudioStage7Evidence(getAndroidQaAudioStage7Evidence());
   expect(validateAudioStage7Evidence(safe, 'phonemizer')).toBe(safe);
-  expect(mockTtsStart).toHaveBeenCalledTimes(1);
-  expect(mockTtsStart.mock.calls[0][0].voice).toEqual({ kind: 'builtin', voice: 'jo' });
+  expect(safe.steps).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'neu-synthetic-first',
+    phonemizerElapsedMs: 21, phonemizerConversionMs: 17 })]));
+  expect(mockTtsStart).toHaveBeenCalledTimes(2);
+  expect(mockTtsStart.mock.calls.map(([request]) => request.text)).toEqual(['A small green boat is waiting near the station.', 'Please close the window before you leave.']);
+  expect(mockTtsStart.mock.calls[0][0].voice).toEqual({ kind: 'builtin', voice: 'pocket-synthetic-en-v1' });
   expect(mockPrep).not.toHaveBeenCalled(); expect(mockSave).not.toHaveBeenCalled();
   expect(mockChatCompletion).toHaveBeenCalledTimes(1); expect(mockThread).toBe('original');
 });
@@ -445,7 +455,7 @@ it('requires an actual formatter speaker receipt before a reference path can pas
     const typed = event as { operation: string; speakerBaked?: boolean };
     request.observe?.({ ...typed, ...(typed.operation === 'formatter' ? { speakerBaked: false } : {}) } as never);
   } }));
-  const work = runAndroidQaStage7Voices(); await until('awaiting_clip_copy'); continueAndroidQaAudioStage7();
+  const work = runAndroidQaStage7Voices('reference');
   await work; expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'reference_not_used' });
 });
 
@@ -512,7 +522,7 @@ it('retains bounded failed-attempt observations through native rejection without
   });
   await runAndroidQaStage7Voices('phonemizer');
   const safe = sanitizeAudioStage7Evidence(getAndroidQaAudioStage7Evidence());
-  expect(safe).toMatchObject({ status: 'failed', steps: [], failedAttempt: { id: 'neu-jo', observations: [
+  expect(safe).toMatchObject({ status: 'failed', steps: [], failedAttempt: { id: 'neu-synthetic-first', observations: [
     { operation: 'phonemizer_module_init', phase: 'settled', elapsedMs: 12 },
     { operation: 'phonemizer_conversion', phase: 'settled', elapsedMs: 4 },
     { operation: 'formatter', phase: 'settled', flow: 'tokens' },
@@ -553,47 +563,16 @@ it('retains only closed Neu termination diagnostics in successful QA evidence an
   } }));
   const work = runAndroidQaStage7Voices('phonemizer'); await until('awaiting_clip_copy');
   expect(getAndroidQaAudioStage7Evidence().steps[0].termination).toEqual(termination);
+  continueAndroidQaAudioStage7(); await until('awaiting_clip_copy');
+  expect(getAndroidQaAudioStage7Evidence().clipId).toBe('neu-synthetic-repeat');
   continueAndroidQaAudioStage7(); await work;
   const safe = sanitizeAudioStage7Evidence(getAndroidQaAudioStage7Evidence()) as { steps: { termination?: unknown }[] };
   expect(safe.steps[0].termination).toEqual(termination);
   expect(JSON.stringify(safe)).not.toContain('private'); expect(safe.steps[0].termination).not.toHaveProperty('tokenId');
 });
 
-it('runs two isolated diagnostic arms through copy/clear gates and can never satisfy production acceptance', async () => {
-  const work = runAndroidQaStage7Voices('phonemizer_diagnostic');
-  await until('awaiting_clip_copy');
-  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ diagnosticOnly: true, clipId: 'neu-jo-canonical-reference' });
-  expect(mockTtsStart.mock.calls[0][0]).toMatchObject({ qaFrontend: 'neu-canonical-reference-v1' });
-  continueAndroidQaAudioStage7(); await until('awaiting_clip_copy');
-  expect(getAndroidQaAudioStage7Evidence().clipId).toBe('neu-jo-canonical-target');
-  expect(mockTtsClear).toHaveBeenCalledTimes(1);
-  expect(mockTtsStart.mock.calls[1][0]).toMatchObject({ qaFrontend: 'neu-canonical-target-v1',
-    text: syntheticFixtures.referenceComparisonTarget, language: 'en', voice: { kind: 'builtin', voice: 'jo' } });
-  continueAndroidQaAudioStage7(); await work;
-  const result = getAndroidQaAudioStage7Evidence();
-  expect(result).toMatchObject({ status: 'diagnostic_complete', mode: 'phonemizer_diagnostic', diagnosticOnly: true });
-  expect(result.steps.slice(0, 2)).toMatchObject([
-    { id: 'neu-jo-canonical-reference', productionG2POutputUsed: true, referenceFrontend: 'canonical_fixture', targetFrontend: 'production_js', profileRestored: true },
-    { id: 'neu-jo-canonical-target', productionG2POutputUsed: false, referenceFrontend: 'builtin', targetFrontend: 'canonical_fixture', profileRestored: true },
-  ]);
-  expect(result.steps[1].operations).not.toContain('phonemizer');
-  expect(result.steps[0].frontendFixtureSha256).toMatch(/^[0-9a-f]{64}$/);
-  expect(() => validateAudioStage7Evidence(sanitizeAudioStage7Evidence(result), 'phonemizer')).toThrow();
-  expect(mockTtsClear).toHaveBeenCalledTimes(3);
-  expect(mockChatCompletion).toHaveBeenCalledTimes(1);
-  expect(mockSave).not.toHaveBeenCalled(); expect(mockPrep).not.toHaveBeenCalled(); expect(mockThread).toBe('original');
-});
-
-it('clears a failed canonical arm, restores the original owner and does not claim diagnostic completion', async () => {
-  const ordinary = mockTtsStart.getMockImplementation()!;
-  mockTtsStart.mockImplementation(async (request: TtsRequest) => {
-    if (request.qaFrontend === 'neu-canonical-target-v1') throw new TtsError('cancelled');
-    return ordinary(request);
-  });
-  const work = runAndroidQaStage7Voices('phonemizer_diagnostic');
-  await until('awaiting_clip_copy'); continueAndroidQaAudioStage7(); await work;
-  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'cancelled',
-    failedAttempt: { id: 'neu-jo-canonical-target' }, diagnosticOnly: true });
-  expect(mockTtsClear).toHaveBeenCalledTimes(2); expect(mockThread).toBe('original');
-  expect(mockLoad).toHaveBeenLastCalledWith('base', expect.objectContaining({ forceReload: true }));
+it('rejects retired diagnostic mode before adapter/model work and never emits diagnostic completion', async () => {
+  await runAndroidQaStage7Voices('phonemizer_diagnostic');
+  expect(getAndroidQaAudioStage7Evidence()).toMatchObject({ status: 'failed', failureCode: 'prerequisite_missing', steps: [] });
+  expect(prepareAndroidQaStage3Adapter).not.toHaveBeenCalled(); expect(mockTtsStart).not.toHaveBeenCalled();
 });

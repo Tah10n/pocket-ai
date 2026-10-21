@@ -1,0 +1,11 @@
+PocketPhonemizer uses eSpeak NG 1.52.0.1 at commit 69bfd1efde0236654ccc117a28d04aef27673a30.
+Copyright Jonathan Duddington, Reece H. Dunn, and other eSpeak/eSpeak NG contributors.
+The complete upstream source archive, original notices and COPYING files are in vendor/.
+Modified 2026-10-21: deterministic offline dependency selection, synchronous phoneme-only
+configuration, mobile serial worker, bounded ownership and manifest-verified data staging.
+The TypeScript frontend derives from bootphon/phonemizer 3.3.0,
+Copyright 2015-2021 Mathieu Bernard, licensed GPL-3.0-or-later.
+Modified 2026-10-21: bounded English-only mobile frontend with native conversion.
+No upstream NeuTTS sample transcript, phoneme string or reference code array is included.
+The GPL license and warranty disclaimer are reproduced in vendor/COPYING.
+Preserve these notices and all applicable upstream notices when redistributing.

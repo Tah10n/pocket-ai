@@ -459,7 +459,6 @@ describe('Android build content provenance', () => {
 
   it.each(['docs/validation/llama-rn-stage3/lora-fixture.json', 'docs/validation/llama-rn-stage4/tool-fixture.json', 'docs/validation/llama-rn-stage5/retrieval-fixtures.json',
     'docs/validation/llama-rn-stage7/audio-input-fixtures.json', 'docs/validation/llama-rn-stage7/tts-fixtures.json',
-    'docs/validation/llama-rn-stage7/neu-canonical-frontend-diagnostic.json',
     'docs/validation/llama-rn-stage7/synthetic-inputs.json'])('hashes imported fixture %s without recursively including validation documents', (fixtureRelativePath) => {
     const projectRoot = createProject();
     const fixturePath = path.join(projectRoot, fixtureRelativePath);
@@ -2343,7 +2342,7 @@ describe('Android build provenance routing', () => {
       const inspection = inspectAndroidArtifactNativeLibraries(artifactPath, 'apk');
       expect(inspection.nativeLibraryFingerprints).toEqual(
         ANDROID_UNIVERSAL_ABIS.flatMap((abi) => (
-          ['libpocket_anydoc.so', 'libpocket_anydoc_jni.so'].map((library) => {
+          ['libpocket_anydoc.so', 'libpocket_anydoc_jni.so', 'libpocket_phonemizer.so'].map((library) => {
             const contents = Buffer.from(
               library === 'libpocket_anydoc.so'
                 ? `pocket-anydoc-${abi}`
@@ -2752,4 +2751,12 @@ describe('Android build provenance routing', () => {
     expect(releaseBuilder).not.toMatch(/\bnpx(?:\.cmd)?\b/);
     expect(releaseBuilder).not.toContain('mtimeMs');
   });
+});
+
+it('requires the production phonemizer library for both ABI contracts while excluding only generated intermediates', () => {
+  for (const abi of ANDROID_UNIVERSAL_ABIS) expect(ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI[abi]).toContain('libpocket_phonemizer.so');
+  expect(isExcludedAndroidBuildInput('modules/pocket-phonemizer/generated/source/espeak-ng/src/translate.c')).toBe(true);
+  expect(isExcludedAndroidBuildInput('modules/pocket-phonemizer/vendor/espeak-ng-source.tar.gz')).toBe(false);
+  expect(isExcludedAndroidBuildInput('modules/pocket-phonemizer/assets/espeak-ng-data/en_dict')).toBe(false);
+  expect(isExcludedAndroidBuildInput('modules/pocket-phonemizer/cpp/data-identity.h')).toBe(false);
 });

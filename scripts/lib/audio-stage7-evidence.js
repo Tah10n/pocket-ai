@@ -1,9 +1,9 @@
 const { validateTtsWav } = require('./tts-evidence');
 const syntheticFixtures = require('../../docs/validation/llama-rn-stage7/synthetic-inputs.json');
 const IDS = ['recording_started', 'recording_finalized', 'recording_prepared', 'recording_preview', 'recording_discard',
-  'recording_retry', 'recording_background', 'input_imported', 'input_recorded', 'neu-jo', 'reference-r1', 'reference-r2',
+  'recording_retry', 'recording_background', 'input_imported', 'input_recorded', 'neu-synthetic-first', 'neu-synthetic-repeat', 'reference-r1', 'reference-r2',
   'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference', 'chat_after', 'voice_saved', 'voice_cold', 'qwen-saved-cold', 'voice_deleted'];
-const CLIPS = ['recorded', 'neu-jo', 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference', 'qwen-saved-cold'];
+const CLIPS = ['recorded', 'neu-synthetic-first', 'neu-synthetic-repeat', 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference', 'qwen-saved-cold'];
 const PHASES = ['idle', 'prepare', 'complete', 'recording_awaiting_controlled_sound', 'recording_awaiting_background',
   'awaiting_clip_copy', 'input_imported', 'input_recorded', 'chat_after', ...CLIPS];
 const PROFILES = ['neutts-nano-q4_k_m-neucodec-q8_0', 'qwen3-tts-0.6b-q4_k_m-tokenizer-q8_0'];
@@ -60,6 +60,13 @@ function sanitizeAudioStage7Evidence(value) {
     mode: ['recording', 'input', 'voices', 'phonemizer', 'reference', 'cold_voice'].includes(source.mode) ? source.mode : null,
     requiresForceStop: source.requiresForceStop !== false, runtimeVersion: source.runtimeVersion === '0.13.0-rc.3' ? source.runtimeVersion : 'unknown',
     backend: source.backend === 'cpu' ? 'cpu' : 'unknown', contentVerification: 'not_run', referenceConditioning: 'not_run', steps: [] };
+  // Retired diagnostic/Jo receipts cannot become production acceptance by dropping their fields.
+  const retiredStep = step => step && typeof step.id === 'string'
+    && /^(neu-|canonical)/u.test(step.id) && !IDS.includes(step.id);
+  if (source.diagnosticOnly === true || source.productionG2POutputUsed === false
+    || (source.clipId != null && !CLIPS.includes(source.clipId))
+    || (Array.isArray(source.steps) && source.steps.some(step => retiredStep(step)
+      || step?.diagnosticOnly === true || step?.productionG2POutputUsed === false))) result.status = 'failed';
   if (CLIPS.includes(source.clipId)) result.clipId = source.clipId;
   if (FAILURES.includes(source.failureCode)) result.failureCode = source.failureCode;
   if (result.status === 'failed' && ['voices', 'phonemizer', 'reference'].includes(result.mode)
@@ -123,7 +130,7 @@ function validateAudioStage7Evidence(evidence, mode) {
   if (!evidence || evidence.schemaVersion !== 1 || evidence.status !== 'native_passed' || evidence.phase !== 'complete'
     || evidence.mode !== mode || evidence.backend !== 'cpu' || evidence.runtimeVersion !== '0.13.0-rc.3'
     || evidence.requiresForceStop !== false || evidence.contentVerification !== 'not_run' || evidence.referenceConditioning !== 'not_run') fail();
-  const requireStep = id => { const step = evidence.steps.find(item => item.id === id); if (step?.status !== 'passed') fail(); return step; };
+  const requireStep = id => { const steps = evidence.steps.filter(item => item.id === id); if (steps.length !== 1 || steps[0].status !== 'passed') fail(); return steps[0]; };
   if (mode === 'recording') {
     ['recording_started', 'recording_finalized', 'recording_prepared', 'recording_preview', 'recording_discard', 'recording_retry'].forEach(requireStep);
     const prepared = requireStep('recording_prepared');
@@ -138,8 +145,14 @@ function validateAudioStage7Evidence(evidence, mode) {
     }
   } else if (['voices', 'phonemizer', 'reference'].includes(mode)) {
     if (mode !== 'reference') {
-      const neu = requireStep('neu-jo');
-      if (!neu.operations?.includes('phonemizer') || !Number.isFinite(neu.phonemizerElapsedMs)) fail();
+      for (const id of ['neu-synthetic-first', 'neu-synthetic-repeat']) {
+        const neu = requireStep(id);
+        const termination = sanitizeTtsTerminationDiagnostics(neu.termination);
+        if (neu.profileId !== 'neutts-nano-q4_k_m-neucodec-q8_0'
+          || !neu.operations?.includes('phonemizer') || !neu.operations.includes('phonemizer_conversion')
+          || [neu.phonemizerElapsedMs, neu.phonemizerConversionMs].some(value => !Number.isFinite(value) || value < 0 || value > 300_000)
+          || termination?.stopTokenKind !== 'expected_speech_end' || !(termination.audioTokenCount > 0)) fail();
+      }
     }
     if (mode !== 'phonemizer') {
       ['reference-r1', 'reference-r2'].forEach(requireStep);
@@ -152,9 +165,9 @@ function validateAudioStage7Evidence(evidence, mode) {
       if (none.operations?.includes('speaker_create')) fail();
       if (requireStep('voice_saved').handlesPersisted !== false) fail();
     }
-    const clips = mode === 'phonemizer' ? ['neu-jo']
+    const clips = mode === 'phonemizer' ? ['neu-synthetic-first', 'neu-synthetic-repeat']
       : mode === 'reference' ? ['qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference']
-        : ['neu-jo', 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference'];
+        : ['neu-synthetic-first', 'neu-synthetic-repeat', 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference'];
     for (const id of clips) {
       const step = requireStep(id);
       if (!step.sampleRate || !step.sampleCount || step.profileRestored !== true || step.chatUnchanged !== true
@@ -171,6 +184,15 @@ function validateAudioStage7Evidence(evidence, mode) {
   } else fail();
   return evidence;
 }
+function validateStage7CopiedClips(copied, mode) {
+  const expected = mode === 'recording' ? ['recorded']
+    : mode === 'phonemizer' ? ['neu-synthetic-first', 'neu-synthetic-repeat']
+      : mode === 'reference' ? ['qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference']
+        : mode === 'voices' ? ['neu-synthetic-first', 'neu-synthetic-repeat', 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference'] : [];
+  if (!(copied instanceof Set) || copied.size !== expected.length || expected.some(id => !copied.has(id))) {
+    throw new Error('Independent Stage7 content clip exports do not match the exact scenario contract.');
+  }
+}
 function validateStage7MicInjectionReceipt(value, startedAt) {
   const input = syntheticFixtures.fixtures.find(item => item.filename === 'input-orange-seven.wav');
   if (!value || !input || value.mode !== 'emulator_grpc_injectAudio' || value.sourceSha256 !== input.sha256
@@ -182,4 +204,4 @@ function validateStage7MicInjectionReceipt(value, startedAt) {
   return { mode: value.mode, sourceSha256: value.sourceSha256, sampleRate: 16000, sampleCount: 57280,
     channels: 1, bitsPerSample: 16, streamEof: true, startedAt: value.startedAt, finishedAt: value.finishedAt };
 }
-module.exports = { sanitizeAudioStage7Evidence, validateAudioStage7Evidence, validateStage7MicInjectionReceipt, validateTtsWav };
+module.exports = { validateStage7CopiedClips, sanitizeAudioStage7Evidence, validateAudioStage7Evidence, validateStage7MicInjectionReceipt, validateTtsWav };

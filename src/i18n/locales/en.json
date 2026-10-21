@@ -1457,6 +1457,7 @@
       "eager": "Prepare voice first",
       "lazy": "Prepare voice when used"
     },
+    "syntheticEnglish": "Synthetic English",
     "phonemizerNotices": "Phonemizer licenses and notices",
     "subtitle": "Write, choose a voice, and listen.",
     "language": "Language",

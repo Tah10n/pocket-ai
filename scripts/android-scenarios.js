@@ -4,7 +4,7 @@ const { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, sanitizeLocalT
 const { sanitizeDocumentRetrievalEvidence, waitForDocumentRetrievalEvidence } = require("./lib/document-retrieval-evidence");
 const { sanitizeDocumentIndexPublicationEvidence, waitForDocumentIndexPublicationEvidence } = require("./lib/document-index-publication-evidence");
 const { sanitizeTtsEvidence, validateTtsEvidence, validateTtsPlaybackEvidence } = require("./lib/tts-evidence");
-const { sanitizeAudioStage7Evidence, validateAudioStage7Evidence, validateStage7MicInjectionReceipt } = require('./lib/audio-stage7-evidence');
+const { validateStage7CopiedClips, sanitizeAudioStage7Evidence, validateAudioStage7Evidence, validateStage7MicInjectionReceipt } = require('./lib/audio-stage7-evidence');
 const { createTtsPublicSnapshotReader, getTtsControlTap, runTtsPublicControls } = require("./lib/tts-public-controls");
 const { resolveExternalTtsDirectory, exportLocalTtsClip, assertTtsPrivateFileAccess } = require("./lib/tts-local-export");
 const { normalizeAndroidQaInstance } = require("./android-qa-application-id");
@@ -1029,6 +1029,7 @@ async function main() {
             scenario,
             context,
             logcatCollector,
+            error,
           });
           results.push({
             id: scenario.id,
@@ -1201,7 +1202,11 @@ function captureFailedScenarioEvidence({
   scenario,
   context,
   logcatCollector = null,
+  error = null,
 }) {
+  if (scenario.id === "native-glass-theme-matrix" && error?.themeFailureEvidence) {
+    return error.themeFailureEvidence;
+  }
   try {
     if (scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY) {
       return { evidencePolicy: DOCUMENT_EVIDENCE_POLICY };
@@ -1483,6 +1488,33 @@ function resolveScenarioVerticalSwipeGesture(snapshot, direction, options = {}) 
   };
   if (!snapshot) {
     return fallback;
+  }
+
+  const settingsHeader = findResourceIdInSnapshot(snapshot, "settings-header", { visibleOnly: true });
+  const settingsContent = findResourceIdInSnapshot(snapshot, "settings-screen-content", { visibleOnly: true });
+  if (settingsHeader || settingsContent) {
+    const destination = resolveSelectedBottomTabDestination(snapshot, "bottom-tab-settings", "settings-screen-content");
+    if (!destination || !settingsHeader?.bounds || !snapshot.viewportBounds) {
+      throw new Error("Settings swipe requires its selected tab, destination and header bounds.");
+    }
+    const bounds = settingsContent.bounds;
+    const viewport = snapshot.viewportBounds;
+    const top = Math.max(bounds.top, viewport.top, settingsHeader.bounds.bottom);
+    const bottom = Math.min(bounds.bottom, destination.tab.bounds.top,
+      viewport.bottom - resolveTapSafeBottomInsetPx(viewport));
+    const left = Math.max(bounds.left, viewport.left);
+    const right = Math.min(bounds.right, viewport.right);
+    if (bottom - top < 320 || right - left < 80) {
+      throw new Error("Settings viewport cannot provide a safe swipe distance.");
+    }
+    const inset = Math.min(120, Math.floor((bottom - top) * 0.2));
+    const upper = top + inset;
+    const lower = bottom - inset;
+    const distance = Math.min(lower - upper, options.maxDistancePx ?? 480);
+    const x = Math.round((left + right) / 2);
+    return { startX: x, endX: x,
+      startY: direction === "up" ? lower : upper,
+      endY: direction === "up" ? lower - distance : upper + distance };
   }
 
   const viewport = findResourceIdInSnapshot(snapshot, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
@@ -2786,42 +2818,56 @@ function findResourceIdClearOfOverlays(snapshot, resourceId) {
 
 async function scrollToResourceId(ctx, resourceId, options = {}) {
   const timeoutMs = options.timeoutMs ?? 20_000;
-  const maxSwipesDown = options.maxSwipesDown ?? 3;
-  const maxSwipesUp = options.maxSwipesUp ?? 10;
+  // Retain the thirteen-gesture total budget, but do not reverse after only three
+  // progressing gestures when Settings restored a scroll position below the target.
+  const limits = { down: options.maxSwipesDown ?? 10, up: options.maxSwipesUp ?? 10 };
+  const maxSwipes = options.maxSwipes ?? 13;
   const adbPath = options.adbPath ?? resolveAdbPath();
   const createSnapshot = options.createSnapshot ?? createUiSnapshot;
   const startedAt = Date.now();
-  const findNow = () => findResourceIdClearOfOverlays(
-    createSnapshot(adbPath, ctx.serial),
-    resourceId
-  );
+  const counts = { down: 0, up: 0 };
+  const exhausted = new Set();
+  let direction = "down";
+  let unchanged = 0;
+  let snapshot = createSnapshot(adbPath, ctx.serial);
+  const fingerprint = (value) => JSON.stringify(value.nodes.map((node) => [
+    node.resourceId, node.className, node.bounds,
+  ]));
 
-  let node = findNow();
-  if (node) {
-    return node;
-  }
-
-  for (let attempt = 0; attempt < maxSwipesDown && Date.now() - startedAt < timeoutMs; attempt += 1) {
-    await ctx.swipeDown();
-    node = findNow();
-    if (node) {
-      return node;
+  for (let attempt = 0; attempt <= maxSwipes; attempt += 1) {
+    const node = findResourceIdClearOfOverlays(snapshot, resourceId);
+    if (node) return node;
+    if (attempt === maxSwipes || Date.now() - startedAt >= timeoutMs) break;
+    if (!resolveSelectedBottomTabDestination(snapshot, "bottom-tab-settings", "settings-screen-content")) {
+      const error = new Error(withUiSnapshotSummary(snapshot, "Settings navigation was lost before scrolling."));
+      error.uiSnapshot = snapshot;
+      throw error;
+    }
+    const target = findResourceIdInSnapshot(snapshot, resourceId);
+    const header = findResourceIdInSnapshot(snapshot, "settings-header", { visibleOnly: true });
+    if (target?.bounds) {
+      direction = target.bounds.centerY <= (header?.bounds?.bottom ?? snapshot.viewportBounds.top)
+        ? "down" : "up";
+    }
+    if (counts[direction] >= limits[direction]) exhausted.add(direction);
+    if (exhausted.has(direction)) direction = direction === "down" ? "up" : "down";
+    if (counts[direction] >= limits[direction] || exhausted.has(direction)) break;
+    const before = fingerprint(snapshot);
+    await ctx[direction === "down" ? "swipeDown" : "swipeUp"]({ snapshot, maxDistancePx: 480 });
+    counts[direction] += 1;
+    snapshot = createSnapshot(adbPath, ctx.serial);
+    unchanged = fingerprint(snapshot) === before ? unchanged + 1 : 0;
+    if (unchanged >= 2) {
+      exhausted.add(direction);
+      direction = direction === "down" ? "up" : "down";
+      unchanged = 0;
     }
   }
-
-  for (let attempt = 0; attempt < maxSwipesUp && Date.now() - startedAt < timeoutMs; attempt += 1) {
-    await ctx.swipeUp();
-    node = findNow();
-    if (node) {
-      return node;
-    }
-  }
-
-  throw new Error(withUiSummary(
-    adbPath,
-    ctx.serial,
-    `Timed out waiting for resource id "${resourceId}" outside the header and bottom overlays.`
-  ));
+  const error = new Error(withUiSnapshotSummary(snapshot,
+    `Timed out waiting for resource id "${resourceId}" outside the header and bottom overlays. `
+      + `Bounded swipes: down=${counts.down}, up=${counts.up}.`));
+  error.uiSnapshot = snapshot;
+  throw error;
 }
 
 async function readSelectedThemeStyle(ctx) {
@@ -3020,6 +3066,82 @@ async function restoreThemePreferences(ctx, { mode, themeStyle }) {
   if (failures.length > 0) {
     throw new AggregateError(failures, "Failed to restore Android theme preferences after native QA.");
   }
+}
+
+function captureThemeFailureEvidence(ctx, phase, failureSnapshot = null, options = {}) {
+  const evidence = { failurePhase: phase };
+  const failures = [];
+  const root = options.outputRoot ?? artifactsRoot;
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  try {
+    const snapshot = failureSnapshot ?? createSnapshot(resolveAdbPath(), ctx.serial);
+    const uiDumpPath = path.join(root, "native-glass-theme-matrix-before-restore.xml");
+    (options.mkdirSync ?? fs.mkdirSync)(root, { recursive: true });
+    (options.writeFileSync ?? fs.writeFileSync)(uiDumpPath, snapshot.xml);
+    evidence.uiDumpPath = uiDumpPath;
+    evidence.failureBounds = {
+      viewport: snapshot.viewportBounds,
+      header: findResourceIdInSnapshot(snapshot, "settings-header")?.bounds ?? null,
+      target: findResourceIdInSnapshot(snapshot, THEME_STYLE_CONTAINER_RESOURCE_ID)?.bounds ?? null,
+      selectedSettings: Boolean(resolveSelectedBottomTabDestination(snapshot,
+        "bottom-tab-settings", "settings-screen-content")),
+    };
+  } catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
+  try {
+    evidence.screenshotPath = ctx.captureScreenshot("native-glass-theme-matrix-before-restore.png");
+  } catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
+  if (failures.length) evidence.evidenceCaptureError = failures.join("; ");
+  return evidence;
+}
+
+async function runNativeGlassThemeMatrix(ctx, options = {}) {
+  const readMode = options.readSelectedThemeMode ?? readSelectedThemeMode;
+  const readStyle = options.readSelectedThemeStyle ?? readSelectedThemeStyle;
+  const selectStyle = options.selectThemeStyle ?? selectThemeStyle;
+  const selectMode = options.selectThemeMode ?? selectThemeMode;
+  const capture = options.captureCoreSurfaceScreenshots ?? captureCoreSurfaceScreenshots;
+  const captureFailure = options.captureThemeFailureEvidence ?? captureThemeFailureEvidence;
+  const restore = options.restoreThemePreferences ?? restoreThemePreferences;
+  let originalPreferences = null;
+  let result;
+  let primaryError = null;
+  let evidence;
+  let phase = "read-theme-mode";
+  try {
+    const mode = await readMode(ctx);
+    phase = "read-theme-style";
+    originalPreferences = { mode, themeStyle: await readStyle(ctx) };
+    phase = "select-glass";
+    await selectStyle(ctx, "glass");
+    for (const mode of ["light", "dark"]) {
+      phase = `select-${mode}`;
+      await selectMode(ctx, mode);
+      phase = `capture-${mode}`;
+      result = await capture(ctx, `native-glass-${mode}`, THEME_STYLE_LABELS, {
+        hideChatQaEvidence: true,
+        settingsFocusResourceId: THEME_STYLE_CONTAINER_RESOURCE_ID,
+      });
+    }
+  } catch (error) {
+    primaryError = error instanceof Error ? error : new Error(String(error));
+    try { evidence = captureFailure(ctx, phase, primaryError.uiSnapshot); }
+    catch (captureError) { evidence = { evidenceCaptureError: String(captureError), failurePhase: phase }; }
+  }
+  let restoreError = null;
+  if (originalPreferences) {
+    try { await restore(ctx, originalPreferences); } catch (error) { restoreError = error; }
+  }
+  if (primaryError) {
+    const error = restoreError
+      ? new AggregateError([primaryError, restoreError],
+          `${primaryError.message} Theme restoration also failed: ${restoreError.message ?? String(restoreError)}`,
+          { cause: primaryError })
+      : primaryError;
+    error.themeFailureEvidence = evidence;
+    throw error;
+  }
+  if (restoreError) throw restoreError;
+  return result;
 }
 
 function buildScenarios() {
@@ -3383,39 +3505,7 @@ function buildScenarios() {
       requiresCurrentHeadProvenance: true,
       requiresIsolatedQaInstall: true,
       description: "Verify Glass across Home, Chat, Models, and Settings in light and dark modes.",
-      run: async (ctx) => {
-        const originalPreferences = {
-          mode: await readSelectedThemeMode(ctx),
-          themeStyle: await readSelectedThemeStyle(ctx),
-        };
-
-        try {
-          await selectThemeStyle(ctx, "glass");
-          await selectThemeMode(ctx, "light");
-          await captureCoreSurfaceScreenshots(
-            ctx,
-            "native-glass-light",
-            THEME_STYLE_LABELS,
-            {
-              hideChatQaEvidence: true,
-              settingsFocusResourceId: THEME_STYLE_CONTAINER_RESOURCE_ID,
-            }
-          );
-
-          await selectThemeMode(ctx, "dark");
-          return await captureCoreSurfaceScreenshots(
-            ctx,
-            "native-glass-dark",
-            THEME_STYLE_LABELS,
-            {
-              hideChatQaEvidence: true,
-              settingsFocusResourceId: THEME_STYLE_CONTAINER_RESOURCE_ID,
-            }
-          );
-        } finally {
-          await restoreThemePreferences(ctx, originalPreferences);
-        }
-      },
+      run: runNativeGlassThemeMatrix,
     },
     {
       id: "foreground-service-notification-states",
@@ -5821,10 +5911,8 @@ async function runAudioStage7AcceptanceScenario(ctx, mode) {
       }
       if (safe.status === 'native_passed') {
         validateAudioStage7Evidence(safe, mode);
-        if (mode === 'recording' && (!injection || copied.size !== 1)) throw new Error('Controlled capture provenance missing.');
-        if (mode === 'voices' && copied.size !== 4) throw new Error('Independent voice content clips incomplete.');
-        if (mode === 'phonemizer' && copied.size !== 1) throw new Error('Phonemizer synthesis clip missing.');
-        if (mode === 'reference' && copied.size !== 3) throw new Error('Reference comparison clips incomplete.');
+        if (mode === 'recording' && !injection) throw new Error('Controlled capture provenance missing.');
+        validateStage7CopiedClips(copied, mode);
         let cold;
         if (mode === 'voices' || mode === 'reference') {
           forceStopScenarioApp(adbPath, ctx.serial);
@@ -11752,6 +11840,9 @@ module.exports = {
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureCoreSurfaceScreenshots,
+  captureThemeFailureEvidence,
+  captureFailedScenarioEvidence,
+  runNativeGlassThemeMatrix,
   cleanupScenarioOwnedMetro,
   cleanupTransferredMetroOwnership,
   cleanupAndroidLogcatCollector,

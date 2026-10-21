@@ -1,0 +1,18 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+group = 'com.github.tah10n.pocketphonemizer'
+version = '0.0.1'
+android {
+  namespace 'com.github.tah10n.pocketphonemizer'
+  defaultConfig {
+    minSdkVersion 24
+    versionName '0.0.1'
+    consumerProguardFiles 'consumer-rules.pro'
+    externalNativeBuild { cmake { targets 'pocket_phonemizer'; cppFlags '-std=c++17' } }
+  }
+  externalNativeBuild { cmake { path 'CMakeLists.txt'; version '3.22.1' } }
+  sourceSets { main { assets.srcDirs = ['../assets'] } }
+}
+dependencies { implementation project(':expo-modules-core') }

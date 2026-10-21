@@ -6,6 +6,11 @@ provenance-aware APK path used by high-assurance device QA.
 For general development setup, see the main [README](../README.md). For the complete
 release flow, see the [Release Checklist](./release-checklist.md).
 
+The eSpeak-enabled application uses the direct Android GPL-compatible distribution route.
+Preserve the exact source commit and notices described in [DISTRIBUTION.md](../DISTRIBUTION.md).
+The local phonemizer module builds its pinned source archive offline through SDK CMake and
+verifies its complete bundled data manifest; `npm run phonemizer:verify` checks those inputs.
+
 ## Prerequisites
 
 - Install dependencies from the committed lockfile with `npm ci`.
@@ -23,6 +28,8 @@ scripts, explicitly run the same installer before building:
 ```bash
 node node_modules/llama.rn/install/download-native-artifacts.js
 node patches/llama-rn-0.13.0-rc.3.js
+node patches/llama-rn-neu-assets.js
+npm run phonemizer:verify
 npm run verify:native-config
 ```
 

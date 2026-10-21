@@ -1,0 +1,5 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["PocketPhonemizerModule"] },
+  "android": { "modules": ["com.github.tah10n.pocketphonemizer.PocketPhonemizerModule"] }
+}

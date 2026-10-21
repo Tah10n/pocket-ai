@@ -5,6 +5,7 @@ import { requireLlamaModule } from './llamaRnModule';
 import { getCompletionPromptTokenCount } from './LlamaPromptTokenCount';
 import { runCompletionOnContext, type LlamaCompletionResult } from './LlamaRuntimeAdapter';
 import { phonemizeSpeech } from './TtsPhonemizer';
+import { getNeuSyntheticVoice } from './NeuSyntheticVoice';
 import { resolveAndroidQaNeuFrontend, type AndroidQaNeuFrontend } from './AndroidQaNeuFrontend';
 
 export interface TtsRuntimeOptions {
@@ -89,7 +90,7 @@ export async function synthesizeTtsOnContext(
     finally { observe({ operation, phase: 'settled' }); }
   };
   check();
-  const qaFrontend = resolveAndroidQaNeuFrontend(options.qaFrontend, profile.id, options.text, options.language, options.voice);
+  resolveAndroidQaNeuFrontend(options.qaFrontend, profile.id, options.text, options.language, options.voice);
   if (!options.text.trim() || options.text.length > TTS_LIMITS.textCharacters) throw new TtsError('input_too_large');
   if (!profile.languages.includes(options.language)) throw new TtsError('language_unsupported');
   let initIssued = false;
@@ -123,31 +124,22 @@ export async function synthesizeTtsOnContext(
     const modes = profile.voiceModes ?? ['speakerless'];
     if (!modes.includes(voice.kind)) throw new TtsError('voice_unavailable');
     const phonemizer = profile.phonemizerLanguage ? async (text: string, language: string) => {
-      if (qaFrontend) {
-        check();
-        if (text !== qaFrontend.targetText || language !== 'en-us') throw new TtsError('prerequisite_missing');
-      }
-      if (qaFrontend?.canonicalTarget) {
-        // Deliberate diagnostic bypass: do not emit production phonemizer observations.
-        return qaFrontend.canonicalTargetPhones;
-      }
       const started = Date.now();
       observe({ operation: 'phonemizer', phase: 'started' });
-      try { return await phonemizeSpeech(text, language, check, observe); }
+      try { return await phonemizeSpeech(text, language, check, observe, options.signal); }
       catch (error) { observeFailure('phonemizer'); throw error; }
       finally { observe({ operation: 'phonemizer', phase: 'settled', elapsedMs: Math.max(0, Date.now() - started) }); }
     } : undefined;
     let speaker: SpeakerPayload | LlamaSpeaker | undefined;
     if (voice.kind === 'builtin') {
       failureStage = 'builtin_voice_lookup';
-      const llama = requireLlamaModule();
       const language = profile.builtinLanguage;
-      if (!language || !profile.builtinVoices?.includes(voice.voice)
-        || !llama.listTTSLanguages(capabilities.family).includes(language)
-        || !llama.listTTSVoices(capabilities.family, language).includes(voice.voice)) {
-        throw new TtsError('voice_unavailable');
-      }
-      const payload = llama.getTTSVoice(capabilities.family, voice.voice, language);
+      if (!language || !profile.builtinVoices?.includes(voice.voice)) throw new TtsError('voice_unavailable');
+      const llama = profile.family === 'neutts' ? undefined : requireLlamaModule();
+      if (llama && (!llama.listTTSLanguages(capabilities.family).includes(language)
+        || !llama.listTTSVoices(capabilities.family, language).includes(voice.voice))) throw new TtsError('voice_unavailable');
+      const payload = profile.family === 'neutts' ? getNeuSyntheticVoice(voice.voice)
+        : llama!.getTTSVoice(capabilities.family, voice.voice, language);
       if (!payload || typeof payload !== 'object') throw new TtsError('voice_unavailable');
       const copied = { ...payload } as Record<string, unknown>;
       if (profile.family === 'neutts') {
@@ -155,14 +147,7 @@ export async function synthesizeTtsOnContext(
           || copied.ref_codes.some(value => !Number.isSafeInteger(value) || value < 0 || value >= 65536)) {
           throw new TtsError('voice_unavailable');
         }
-        if (qaFrontend) {
-          if (copied.ref_codes.length !== qaFrontend.referenceCodesCount || copied.ref_phones !== qaFrontend.builtinReferencePhones) {
-            throw new TtsError('prerequisite_missing');
-          }
-          if (qaFrontend.canonicalReference) copied.ref_phones = qaFrontend.canonicalReferencePhones;
-        }
-        // The handle path skips upstream ref_text phonemization. Payload references are
-        // explicitly prepared here, while exact pre-baked IPA is retained unchanged.
+        // Reference transcript and user target independently use the production frontend.
         if (!copied.ref_phones && typeof copied.ref_text === 'string' && phonemizer) {
           copied.ref_phones = await phonemizer(copied.ref_text, profile.phonemizerLanguage!);
           check();

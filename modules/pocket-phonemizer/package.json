@@ -1,0 +1,9 @@
+{
+  "name": "pocket-phonemizer",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Offline bounded eSpeak-NG phoneme frontend for Pocket AI",
+  "license": "GPL-3.0-or-later",
+  "main": "index.ts",
+  "peerDependencies": { "expo": "*", "react": "*", "react-native": "*" }
+}

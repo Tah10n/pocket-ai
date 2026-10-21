@@ -5,6 +5,7 @@ const path = require("path");
 const zlib = require("zlib");
 const { spawnSync } = require("child_process");
 const { getEnvFiles, parseEnvFiles } = require("@expo/env");
+const { sanitizeLlamaNeuAssets } = require("../patches/llama-rn-neu-assets");
 const { applyPhonemizePatch } = require("../patches/phonemize-2.0.1");
 const { normalizeAndroidQaInstance, resolveAndroidQaApplicationId } = require("./android-qa-application-id");
 
@@ -54,7 +55,6 @@ const EMBEDDED_BUNDLE_INPUTS = [
   // Stage 7 controlled audio identity and voice profiles are imported by its QA surface.
   "docs/validation/llama-rn-stage7/audio-input-fixtures.json",
   "docs/validation/llama-rn-stage7/tts-fixtures.json",
-  "docs/validation/llama-rn-stage7/neu-canonical-frontend-diagnostic.json",
   "docs/validation/llama-rn-stage7/synthetic-inputs.json",
   "app",
   "src",
@@ -85,6 +85,7 @@ const ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI = Object.freeze({
     "librnllama_jni.so",
     "libpocket_anydoc.so",
     "libpocket_anydoc_jni.so",
+    "libpocket_phonemizer.so",
   ]),
   x86_64: Object.freeze([
     "libreactnative.so",
@@ -92,11 +93,13 @@ const ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI = Object.freeze({
     "librnllama_jni.so",
     "libpocket_anydoc.so",
     "libpocket_anydoc_jni.so",
+    "libpocket_phonemizer.so",
   ]),
 });
-const POCKET_ANYDOC_ANDROID_LIBRARIES = Object.freeze([
+const POCKET_OWNED_ANDROID_LIBRARIES = Object.freeze([
   "libpocket_anydoc.so",
   "libpocket_anydoc_jni.so",
+  "libpocket_phonemizer.so",
 ]);
 const ANDROID_PROVENANCE_GRADLE_EXECUTION_ARGS = Object.freeze([
   "--rerun-tasks",
@@ -1611,6 +1614,7 @@ function isExcludedAndroidBuildInput(relativePath) {
       return true;
     }
   }
+  if (segments[0] === "modules" && segments[1] === "pocket-phonemizer" && segments[2] === "generated") return true;
   if (segments[0] === "modules" && segments[1] === "pocket-anydoc") {
     const moduleRelative = segments.slice(2).join("/");
     return moduleRelative === "node_modules"
@@ -2042,12 +2046,16 @@ function collectBuildProvenance(projectRoot, options = {}) {
     ? require("./llama-hexagon-sdk").verifyLlamaHexagonSdk(projectRoot, { abi, env: options.env || process.env }).identity
     : null;
   const phonemize = applyPhonemizePatch(projectRoot, { check: true });
+  const appManifest = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
+  const neuAssetSanitation = appManifest.dependencies?.["llama.rn"]
+    ? sanitizeLlamaNeuAssets(projectRoot, { check: true }).sources : null;
   const manifest = {
     schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
     variant,
     abi,
     ...(hexagonManifestExists ? { llamaHexagon } : {}),
     ...(phonemize ? { phonemize } : {}),
+    ...(neuAssetSanitation ? { neuAssetSanitation } : {}),
     embeddedBundle: includeBundleInputs,
     buildContext,
     toolchains: options.toolchains || collectToolchainVersions(projectRoot, options),
@@ -2287,7 +2295,7 @@ function inspectAndroidArtifactNativeLibraries(artifactPath, artifactType, optio
   const normalizedArtifactType = `${artifactType}`.trim().toLowerCase();
   const libraryPrefix = normalizedArtifactType === "aab" ? "base/lib/" : "lib/";
   const nativeLibraryFingerprints = inspection.packagedAbis.flatMap((abi) => (
-    POCKET_ANYDOC_ANDROID_LIBRARIES.map((library) => {
+    POCKET_OWNED_ANDROID_LIBRARIES.map((library) => {
       const expectedName = `${libraryPrefix}${abi}/${library}`;
       const entry = archive.entries.find(
         (candidate) => normalizePath(candidate.name) === expectedName

@@ -5,6 +5,7 @@ const os = require('node:os');
 const { patchLlamaBridge } = require('../patches/llama-rn-0.13.0-rc.3');
 const { patches: audioPatches, VERSION: audioVersion } = require('../patches/expo-audio-55.0.18');
 const { applyPhonemizePatch } = require('../patches/phonemize-2.0.1');
+const { sanitizeLlamaNeuAssets } = require('../patches/llama-rn-neu-assets');
 
 const { HEXAGON_GUARD, assertPodfileSourceBuild } = require('../plugins/withLlamaSourceBuild')._internal;
 const projectRoot = path.resolve(__dirname, '..');
@@ -358,6 +359,16 @@ function run(argv = process.argv.slice(2), root = projectRoot) {
   patchLlamaBridge(root, { check: true });
   assertExpoAudioNativePatch(root);
   applyPhonemizePatch(root, { check: true });
+  const manifest = JSON.parse(readText(path.join(root, 'package.json'), 'Package manifest'));
+  if (manifest.scripts?.['phonemizer:verify']
+    || fs.existsSync(path.join(root, 'modules/pocket-phonemizer/expo-module.config.json'))) {
+    if (!fs.existsSync(path.join(root, 'modules/pocket-phonemizer/expo-module.config.json'))) {
+      throw new Error('The declared native phonemizer module is missing.');
+    }
+    // Both Android and iOS must exclude restricted references, even when a
+    // developer manually ran older install hooks instead of the complete chain.
+    sanitizeLlamaNeuAssets(root, { check: true });
+  }
 
   if (requireIos || fs.existsSync(path.join(root, 'ios'))) {
     assertIosGeneratedConfig(root);

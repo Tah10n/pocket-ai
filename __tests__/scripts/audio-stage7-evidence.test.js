@@ -1,9 +1,12 @@
 const { it, expect, jest } = require('@jest/globals');
-const { sanitizeAudioStage7Evidence, validateAudioStage7Evidence, validateStage7MicInjectionReceipt } = require('../../scripts/lib/audio-stage7-evidence');
+const { sanitizeAudioStage7Evidence, validateAudioStage7Evidence, validateStage7MicInjectionReceipt, validateStage7CopiedClips } = require('../../scripts/lib/audio-stage7-evidence');
 const { buildScenarios, configureScenarioBuildEnvironment, validateScenarioExecutionOptions,
   grantStage7MicrophoneAfterExplicitRecord, parseUiSnapshot } = require('../../scripts/android-scenarios');
 const initial = mode => ({ schemaVersion: 1, status: 'native_passed', phase: 'complete', mode, requiresForceStop: false,
   runtimeVersion: '0.13.0-rc.3', backend: 'cpu', contentVerification: 'not_run', referenceConditioning: 'not_run', steps: [] });
+const neuFields = { profileId: 'neutts-nano-q4_k_m-neucodec-q8_0', sampleRate: 24000, sampleCount: 12000, profileRestored: true, chatUnchanged: true, phonemizerElapsedMs: 20, phonemizerConversionMs: 5,
+  termination: { schemaVersion: 1, sampledTokenCount: 50, audioTokenCount: 49, stopTokenKind: 'expected_speech_end' },
+  operations: ['phonemizer', 'phonemizer_conversion', 'formatter', 'completion', 'decode'] };
 const step = (id, fields = {}) => ({ id, status: 'passed', ...fields });
 it('drops every source/transcript/phoneme/native-handle field from receipts', () => {
   const safe = sanitizeAudioStage7Evidence({ ...initial('voices'), transcript: 'private', sourceUri: '/private/audio',
@@ -53,14 +56,13 @@ it('requires separate imported and recorded audio content proof', () => {
 it('requires actual bake receipt and release order rather than random output hashes', () => {
   const operations = ['vocoder_init', 'speaker_create', 'speaker_bake', 'formatter', 'completion', 'decode', 'speaker_release', 'vocoder_release'];
   const common = { sampleRate: 24000, sampleCount: 12000, profileRestored: true, chatUnchanged: true };
-  const voices = { ...initial('voices'), steps: [step('neu-jo', { ...common, phonemizerElapsedMs: 20,
-    operations: ['phonemizer', 'formatter', 'completion', 'decode'] }), step('reference-r1'), step('reference-r2'),
+  const voices = { ...initial('voices'), steps: [step('neu-synthetic-first', neuFields), step('neu-synthetic-repeat', neuFields), step('reference-r1'), step('reference-r2'),
   step('qwen-r1-eager', { ...common, speakerRows: 1, speakerBaked: true, operations }),
   step('qwen-r2-lazy', { ...common, speakerRows: 1, speakerBaked: true, operations: operations.filter(op => op !== 'speaker_bake') }),
   step('qwen-no-reference', { ...common, operations: ['formatter', 'completion', 'decode'] }),
   step('chat_after', { profileRestored: true }), step('voice_saved', { handlesPersisted: false })] };
   expect(validateAudioStage7Evidence(voices, 'voices')).toBe(voices);
-  voices.steps[3].speakerBaked = false;
+  voices.steps.find(item => item.id === 'qwen-r1-eager').speakerBaked = false;
   expect(() => validateAudioStage7Evidence(voices, 'voices')).toThrow();
 });
 it('accepts only the current exact controlled grpc fixture injection after actual Record', () => {
@@ -97,9 +99,10 @@ it.each(['phonemizer', 'reference'])('isolates targeted %s while preserving nati
 });
 it('requires actual native synthesis and decode for targeted phonemizer acceptance', () => {
   const evidence = { ...initial('phonemizer'), steps: [
-    step('neu-jo', { sampleRate: 24000, sampleCount: 12000, profileRestored: true, chatUnchanged: true,
+    step('neu-synthetic-first', { ...neuFields, sampleRate: 24000, sampleCount: 12000, profileRestored: true, chatUnchanged: true,
       phonemizerElapsedMs: 20, phonemizerModuleInitMs: 15, phonemizerConversionMs: 5,
       operations: ['phonemizer_module_init', 'phonemizer_conversion', 'phonemizer', 'formatter', 'completion', 'decode'] }),
+    step('neu-synthetic-repeat', neuFields),
     step('chat_after', { profileRestored: true })] };
   expect(validateAudioStage7Evidence(sanitizeAudioStage7Evidence(evidence), 'phonemizer').steps[0])
     .toMatchObject({ phonemizerModuleInitMs: 15, phonemizerConversionMs: 5 });
@@ -140,7 +143,7 @@ it('retains one closed failure stage only for failed voices and never upgrades f
 });
 
 it('bounds failed-attempt retention and strips untrusted fields, nonfinite counters and nonexact reasons', () => {
-  const receipt = { ...initial('phonemizer'), status: 'failed', failedAttempt: { id: 'neu-jo', observations: [
+  const receipt = { ...initial('phonemizer'), status: 'failed', failedAttempt: { id: 'neu-synthetic-first', observations: [
     ...Array.from({ length: 100 }, (_, promptTokens) => ({ operation: 'completion', phase: 'started', promptTokens })),
     { operation: 'first_failure', phase: 'failed', failureStage: 'completion', failureReason: 'grammar_parse_failed /private',
       elapsedMs: Infinity, sampleCount: 1000001, nativePrefillMs: -1, grammarPresent: 'true', stoppedEos: true,
@@ -159,12 +162,42 @@ it('bounds failed-attempt retention and strips untrusted fields, nonfinite count
 it('independently bounds closed termination telemetry in passed and failed native QA receipts', () => {
   const termination = { schemaVersion: 1, sampledTokenCount: 50, audioTokenCount: 49, stopTokenKind: 'expected_speech_end', text: 'private', tokenId: 128261 };
   const expected = { schemaVersion: 1, sampledTokenCount: 50, audioTokenCount: 49, stopTokenKind: 'expected_speech_end' };
-  const source = { ...initial('phonemizer'), steps: [step('neu-jo', { profileId: 'neutts-nano-q4_k_m-neucodec-q8_0', termination })] };
+  const source = { ...initial('phonemizer'), steps: [step('neu-synthetic-first', { profileId: 'neutts-nano-q4_k_m-neucodec-q8_0', termination })] };
   expect(sanitizeAudioStage7Evidence(source).steps[0].termination).toEqual(expected);
-  const failed = { ...source, status: 'failed', failedAttempt: { id: 'neu-jo', observations: [{ operation: 'completion', phase: 'settled', termination }] } };
+  const failed = { ...source, status: 'failed', failedAttempt: { id: 'neu-synthetic-first', observations: [{ operation: 'completion', phase: 'settled', termination }] } };
   expect(sanitizeAudioStage7Evidence(failed).failedAttempt.observations[0].termination).toEqual(expected);
   for (const invalid of [{ schemaVersion: 2 }, { sampledTokenCount: Infinity }, { audioTokenCount: 51 }, { audioTokenCount: -1 }]) {
-    expect(sanitizeAudioStage7Evidence({ ...source, steps: [step('neu-jo', { profileId: 'neutts-nano-q4_k_m-neucodec-q8_0', termination: { ...termination, ...invalid } })] }).steps[0].termination).toBeUndefined();
+    expect(sanitizeAudioStage7Evidence({ ...source, steps: [step('neu-synthetic-first', { profileId: 'neutts-nano-q4_k_m-neucodec-q8_0', termination: { ...termination, ...invalid } })] }).steps[0].termination).toBeUndefined();
   }
   expect(JSON.stringify(sanitizeAudioStage7Evidence(failed))).not.toContain('private');
+});
+
+it('requires both new targets to execute production phonemization and reach expected EOS', () => {
+  const valid = () => ({ ...initial('phonemizer'), steps: [step('neu-synthetic-first', neuFields),
+    step('neu-synthetic-repeat', neuFields), step('chat_after', { profileRestored: true })] });
+  expect(() => validateAudioStage7Evidence(sanitizeAudioStage7Evidence(valid()), 'phonemizer')).not.toThrow();
+  for (const index of [0, 1]) {
+    for (const change of [{ operations: ['formatter', 'completion', 'decode'] },
+      { phonemizerConversionMs: undefined }, { termination: undefined },
+      { termination: { ...neuFields.termination, stopTokenKind: 'other_eog' } },
+      { termination: { ...neuFields.termination, audioTokenCount: 0 } }]) {
+      const evidence = valid(); evidence.steps[index] = { ...evidence.steps[index], ...change };
+      expect(() => validateAudioStage7Evidence(sanitizeAudioStage7Evidence(evidence), 'phonemizer')).toThrow();
+    }
+  }
+  for (const staleId of ['neu-jo', 'neu-canonical', 'canonical-target']) {
+    const evidence = valid(); evidence.steps.push(step(staleId, neuFields));
+    expect(() => validateAudioStage7Evidence(sanitizeAudioStage7Evidence(evidence), 'phonemizer')).toThrow();
+  }
+  for (const fields of [{ diagnosticOnly: true }, { productionG2POutputUsed: false }]) {
+    expect(() => validateAudioStage7Evidence(sanitizeAudioStage7Evidence({ ...valid(), ...fields }), 'phonemizer')).toThrow();
+  }
+});
+it('requires exact new clip exports rather than only a matching clip count', () => {
+  const clips = ['neu-synthetic-first', 'neu-synthetic-repeat'];
+  expect(() => validateStage7CopiedClips(new Set(clips), 'phonemizer')).not.toThrow();
+  expect(() => validateStage7CopiedClips(new Set([...clips, 'qwen-r1-eager', 'qwen-r2-lazy', 'qwen-no-reference']), 'voices')).not.toThrow();
+  for (const ids of [['neu-jo', 'neu-synthetic-repeat'], ['neu-canonical', 'neu-synthetic-first'], [clips[0]], [...clips, 'neu-jo']]) {
+    expect(() => validateStage7CopiedClips(new Set(ids), 'phonemizer')).toThrow();
+  }
 });

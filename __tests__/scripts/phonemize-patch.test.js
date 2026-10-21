@@ -196,10 +196,11 @@ it('uses the actual native-config run consumer to reject missing/drifted patches
   const source = fs.readFileSync(path.join(projectRoot, 'scripts/verify-native-config.js'), 'utf8');
   const ast = parse(source, { sourceType: 'script' });
   const node = ast.program.body.find(item => item.type === 'FunctionDeclaration' && item.id.name === 'run');
+  const readText = ast.program.body.find(item => item.type === 'FunctionDeclaration' && item.id.name === 'readText');
   // Other native prerequisites are independent of this fixture; execute the
   // real run body with only those unrelated checks stubbed, never the patch.
-  const run = vm.runInNewContext(`(${source.slice(node.start, node.end)})`, {
-    projectRoot: root, process: { argv: [] }, fs: { existsSync: () => false }, path,
+  const run = vm.runInNewContext(`${source.slice(readText.start, readText.end)}\n(${source.slice(node.start, node.end)})`, {
+    projectRoot: root, process: { argv: [] }, fs, path,
     assertSourceConfig: () => {}, assertLlamaNativeArtifacts: () => {}, patchLlamaBridge: () => {},
     assertExpoAudioNativePatch: () => {}, applyPhonemizePatch,
   });
@@ -214,11 +215,12 @@ it('uses the actual native-config run consumer to reject missing/drifted patches
   expect(contents()).toEqual(drifted);
 });
 
-it('registers the guarded patch after the accepted install hooks and retains lazy deadlines', () => {
+it('keeps the legacy install guards before the native frontend checks and retains bounded lazy initialization', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
-  expect(manifest.scripts.postinstall).toBe('node ./patches/llama-rn-0.13.0-rc.3.js && node ./patches/expo-audio-55.0.18.js && node ./patches/phonemize-2.0.1.js');
+  expect(manifest.scripts.postinstall).toBe('node ./patches/llama-rn-0.13.0-rc.3.js && node ./patches/expo-audio-55.0.18.js && node ./patches/phonemize-2.0.1.js && node ./patches/llama-rn-neu-assets.js && node ./modules/pocket-phonemizer/scripts/verify-data.mjs');
   const service = fs.readFileSync(path.join(projectRoot, 'src/services/TtsPhonemizer.ts'), 'utf8');
   expect(service).toContain('LOCAL_PHONEMIZER_MODULE_INIT_DEADLINE_MS = 2000');
   expect(service).toContain('LOCAL_PHONEMIZER_DEADLINE_MS = 1000');
-  expect(service.indexOf("require('phonemize')")).toBeGreaterThan(service.indexOf('const started = Date.now()'));
+  expect(service).not.toContain("require('phonemize')");
+  expect(service.indexOf("require('expo-modules-core')")).toBeGreaterThan(service.indexOf('const started = Date.now()'));
 });

@@ -16,6 +16,7 @@ import { isAndroidQaGenerationEvidenceEnabled } from '../../services/AndroidQaGe
 import { subscribeSettings } from '../../services/SettingsStore';
 import { registry } from '../../services/LocalStorageRegistry';
 import { prepareSpeechText, type PreparedSpeechText } from '../../utils/ttsText';
+import { NEU_SYNTHETIC_VOICE_ID } from '../../services/NeuSyntheticVoice';
 import { TTS_LIMITS, TtsError, sanitizeTtsLatency, sanitizeTtsNativeCompletion, type TtsErrorCode } from '../../types/tts';
 import { AudioRecordingSheet } from './AudioRecordingSheet';
 import { referenceVoiceStore, type TemporaryReferenceSource } from '../../services/ReferenceVoiceStore';
@@ -293,7 +294,8 @@ export function TtsPreviewSheet({ initialText, reviewReason, source, isPreviewCu
   };
 
   const languageLabel = (value: string) => value === 'en' ? t('tts.english') : value === 'zh-tw' ? t('tts.mandarin') : value;
-  const builtinLabel = (value: string) => value === 'default' ? t('tts.modes.speakerless') : value.charAt(0).toUpperCase() + value.slice(1);
+  const builtinLabel = (value: string) => value === NEU_SYNTHETIC_VOICE_ID ? t('tts.syntheticEnglish')
+    : value === 'default' ? t('tts.modes.speakerless') : value.charAt(0).toUpperCase() + value.slice(1);
   const voiceLabel = voiceMode === 'builtin' ? builtinLabel(builtinVoice) : voiceMode === 'reference'
     ? selectedSavedVoice?.name ?? t(temporary ? 'tts.sampleSelected' : 'tts.modes.reference') : t('tts.modes.speakerless');
   const speechActive = Boolean(state.phase && !['ready', 'stopped', 'error'].includes(state.phase));

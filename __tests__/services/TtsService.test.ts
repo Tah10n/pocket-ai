@@ -1,5 +1,4 @@
 import * as qaBootstrap from '../../src/services/AndroidQaDocumentModelBootstrap';
-import { ANDROID_QA_NEU_FRONTEND_SHA256 } from '../../src/services/AndroidQaNeuFrontend';
 import type { LlamaContext } from 'llama.rn';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as RNFS from 'react-native-fs';
@@ -1275,29 +1274,12 @@ it('rejects the closed canonical diagnostic before detaching A in an ordinary re
 });
 
 it.each(['neu-canonical-frontend-v1', 'neu-canonical-reference-v1', 'neu-canonical-target-v1'] as const)(
-  'binds %s identity to its admitted selector despite mutation, clears it and restores A before an ordinary request', async qaFrontend => {
-  jest.spyOn(qaBootstrap, 'isAndroidQaDocumentModelBootstrapEnabled').mockReturnValue(true);
-  const profile = TTS_EXECUTION_PROFILES.find(value => value.family === 'neutts')!;
-  registry.saveModels([chatModel(), ttsModel(profile)]); choose(profile);
-  jest.mocked(FileSystem.getInfoAsync).mockResolvedValue({ exists: true, isDirectory: false,
-    uri: 'file:///models/tokens-codec-original.gguf', size: profile.codec.bytes, modificationTime: 1 });
-  jest.mocked(RNFS.hash).mockResolvedValue(profile.codec.sha256);
-  const ordinary = { text: 'The quiet river flows beside the old bridge.', language: 'en',
-    voice: { kind: 'builtin' as const, voice: 'jo' }, playAfterSynthesis: false };
-  const mutableRequest: Parameters<TtsService['start']>[0] = { ...ordinary, qaFrontend };
-  jest.mocked(validateAuxiliaryFile).mockImplementationOnce(async model => {
-    mutableRequest.qaFrontend = undefined;
-    return `/models/${model.localPath}`;
+  'rejects retired %s before file validation or A detachment even in QA', async qaFrontend => {
+    jest.spyOn(qaBootstrap, 'isAndroidQaDocumentModelBootstrapEnabled').mockReturnValue(true);
+    const profile = TTS_EXECUTION_PROFILES.find(value => value.family === 'neutts')!;
+    registry.saveModels([chatModel(), ttsModel(profile)]); choose(profile);
+    await expect(service.start({ text: 'A different target.', language: 'en', qaFrontend,
+      voice: { kind: 'builtin', voice: 'pocket-synthetic-en-v1' } })).rejects.toMatchObject({ code: 'prerequisite_missing' });
+    expect(validateAuxiliaryFile).not.toHaveBeenCalled(); expect(engine.runWithAuxiliarySequence).not.toHaveBeenCalled();
+    expect(synthesize).not.toHaveBeenCalled();
   });
-  await service.start(mutableRequest);
-  expect(mutableRequest.qaFrontend).toBeUndefined();
-  expect(synthesize.mock.calls[0][2]).toMatchObject({ qaFrontend });
-  expect(service.getExecutionIdentity()).toContain(`diagnostic:${qaFrontend}:${ANDROID_QA_NEU_FRONTEND_SHA256}`);
-  expect(releaseContext).toHaveBeenCalledTimes(1); expect(restoreA).toHaveBeenCalledTimes(1);
-  await service.cancelAndClear(); expect(service.getExecutionIdentity()).toBeNull();
-  await service.start(ordinary);
-  expect(synthesize.mock.calls[1][2]).not.toHaveProperty('qaFrontend');
-  expect(service.getExecutionIdentity()).not.toContain(`diagnostic:${qaFrontend}:${ANDROID_QA_NEU_FRONTEND_SHA256}`);
-  expect(service.getExecutionIdentity()).toContain('phonemize/2.0.1');
-  expect(releaseContext).toHaveBeenCalledTimes(2); expect(restoreA).toHaveBeenCalledTimes(2);
-});

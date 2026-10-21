@@ -2,7 +2,7 @@
   "name": "pocket-ai",
   "main": "expo-router/entry",
   "version": "1.6.3",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "description": "Offline-first local AI assistant for discovering, downloading, and chatting with GGUF models on-device.",
   "repository": {
     "type": "git",
@@ -43,7 +43,7 @@
     "open-source"
   ],
   "scripts": {
-    "postinstall": "node ./patches/llama-rn-0.13.0-rc.3.js && node ./patches/expo-audio-55.0.18.js && node ./patches/phonemize-2.0.1.js",
+    "postinstall": "node ./patches/llama-rn-0.13.0-rc.3.js && node ./patches/expo-audio-55.0.18.js && node ./patches/phonemize-2.0.1.js && node ./patches/llama-rn-neu-assets.js && node ./modules/pocket-phonemizer/scripts/verify-data.mjs",
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "node ./scripts/run-android-dev.js",
@@ -111,7 +111,10 @@
     "build:android:eas:preview": "npx --yes eas-cli@18.5.0 build --platform android --profile preview",
     "build:android:eas:production": "npx --yes eas-cli@18.5.0 build --platform android --profile production",
     "build:ios:eas:production": "npx --yes eas-cli@18.5.0 build --platform ios --profile production",
-    "build:all:eas:production": "npx --yes eas-cli@18.5.0 build --platform all --profile production"
+    "build:all:eas:production": "npx --yes eas-cli@18.5.0 build --platform all --profile production",
+    "phonemizer:verify": "node ./modules/pocket-phonemizer/scripts/verify-data.mjs",
+    "phonemizer:generate-data": "node ./modules/pocket-phonemizer/scripts/build-data.mjs --write",
+    "phonemizer:test": "node ./modules/pocket-phonemizer/scripts/test-native.mjs"
   },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",

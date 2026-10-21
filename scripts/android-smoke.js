@@ -153,7 +153,6 @@ async function main() {
     );
   }
 
-  const tools = resolveAndroidTools();
   const appConfig = readExpoConfig();
   const appPackage = resolveAndroidQaApplicationId(
     appConfig.packageName,
@@ -165,12 +164,22 @@ async function main() {
   if (!appPackage) {
     throw new Error("Could not resolve expo.android.package from app.json.");
   }
+  if (cliOptions.buildOnly && buildTargetAbi === "universal") {
+    throw new Error("--build-only requires an explicit target ABI.");
+  }
   assertSmokeBuildOverrideContract(null, { applicationId: appPackage });
   const sdk = await require("./llama-hexagon-sdk").setupLlamaHexagonSdk(projectRoot, {
     abi: buildTargetAbi, env: androidBuildEnvironment,
   });
   Object.assign(androidBuildEnvironment, sdk.env);
 
+  if (cliOptions.buildOnly) {
+    buildQaApkWithoutDevice(appPackage);
+    log("Built and verified the targeted APK without accessing an Android device.");
+    return;
+  }
+
+  const tools = resolveAndroidTools();
   log("Starting adb server...");
   runChecked(tools.adb, ["start-server"], { stdio: "ignore" });
 
@@ -213,6 +222,10 @@ async function main() {
     appPackage
   );
   const buildReuse = resolveBuildReuseState(tools.adb, device.serial, buildInputState);
+  if (!buildReuse.canReuse && process.env.ANDROID_SMOKE_REQUIRE_EXISTING_BUILD === "1") {
+    writePreinstallAbiDiagnostic(buildReuse.reuseDecision || {}, "immutable-reuse");
+  }
+  assertImmutableBuildReuse(buildReuse, process.env.ANDROID_SMOKE_REQUIRE_EXISTING_BUILD === "1");
   if (buildReuse.canReuse) {
     const abiLabel = buildReuse.reuseDecision.matchedAbi
       ? ` for ABI ${buildReuse.reuseDecision.matchedAbi}`
@@ -239,6 +252,7 @@ async function main() {
     }
     const postBuildReuseDecision = resolveDebugApkReuseDecision(tools.adb, device.serial, apkPath);
     if (!postBuildReuseDecision.canReuse) {
+      writePreinstallAbiDiagnostic(postBuildReuseDecision, "post-build");
       throw new Error(
         `The freshly built ${apkVariant} APK does not satisfy the requested ABI contract `
           + `(${postBuildReuseDecision.reason || "unknown incompatibility"}). `
@@ -632,6 +646,7 @@ function writeBuildStamp(buildInputState, apkFingerprint, abiDecision) {
       sha256: apkFingerprint.sha256,
       packagedAbis: abiDecision.packagedAbis,
       matchedAbi: abiDecision.matchedAbi,
+      validationScope: abiDecision.validationScope || "device-and-artifact",
     },
   });
 }
@@ -670,30 +685,96 @@ function resolveDebugApkReuseDecision(adbPath, serial, apkFilePath, options = {}
   const resolveSupportedAbis = options.resolveDeviceSupportedAbis || resolveDeviceSupportedAbis;
   const readZipEntries = options.listZipEntries || listZipEntries;
   const writeLog = options.log || log;
+  let inspectionStage = "device-primary-abi";
+  let supportedAbis = [];
   try {
     const primaryAbi = resolvePrimaryAbi(adbPath, serial);
-    const supportedAbis = resolveSupportedAbis(adbPath, serial, primaryAbi);
-    return evaluateApkAbiCompatibility({
+    inspectionStage = "device-supported-abis";
+    supportedAbis = resolveSupportedAbis(adbPath, serial, primaryAbi);
+    inspectionStage = "apk-entries";
+    const zipEntries = readZipEntries(apkFilePath);
+    inspectionStage = "abi-contract";
+    return { ...evaluateApkAbiCompatibility({
       targetAbi: buildTargetAbi,
       deviceAbis: supportedAbis,
-      zipEntries: readZipEntries(apkFilePath),
+      zipEntries,
       requiredLibraries: ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI,
-    });
+    }), inspectionStage };
   } catch (error) {
     const diagnostic = describeAndroidQaError(error, "apk-inspection-failed");
-    writeLog(
-      `Failed to inspect the existing ${apkVariant} APK for ABI compatibility (${diagnostic}). `
-        + "Rebuilding instead."
-    );
+    writeLog(`Failed to inspect the existing ${apkVariant} APK for ABI compatibility (${diagnostic}).`);
     return {
-      canReuse: false,
-      matchedAbi: null,
-      packagedAbis: [],
-      supportedAbis: [],
-      missingEntries: [],
+      canReuse: false, matchedAbi: null, packagedAbis: [], supportedAbis,
+      missingEntries: [], inspectionStage,
       reason: `APK inspection failed: ${diagnostic}`,
     };
   }
+}
+
+function writePreinstallAbiDiagnostic(decision, phase, options = {}) {
+  const knownAbis = new Set(["arm64-v8a", "armeabi-v7a", "x86", "x86_64"]);
+  const safeAbis = (values) => [...new Set((Array.isArray(values) ? values : []).filter((abi) => knownAbis.has(abi)))];
+  const stages = ["device-primary-abi", "device-supported-abis", "apk-entries", "abi-contract"];
+  const phases = ["post-build", "immutable-reuse", "pre-install"];
+  try {
+    (options.mkdirSync || fs.mkdirSync)(artifactsRoot, { recursive: true });
+    (options.writeFileSync || fs.writeFileSync)(path.join(artifactsRoot, "preinstall-abi-diagnostic.json"), JSON.stringify({
+      schemaVersion: 1, observedAt: new Date().toISOString(),
+      phase: phases.includes(phase) ? phase : "unknown",
+      inspectionStage: stages.includes(decision.inspectionStage) ? decision.inspectionStage : "unknown",
+      canReuse: decision.canReuse === true,
+      packagedAbis: safeAbis(decision.packagedAbis), supportedAbis: safeAbis(decision.supportedAbis),
+      missingEntryCount: Array.isArray(decision.missingEntries) ? decision.missingEntries.length : 0,
+    }, null, 2), "utf8");
+  } catch {
+    (options.log || log)("Could not save the pre-install ABI diagnostic; preserving the original failure.");
+  }
+}
+
+function assertImmutableBuildReuse(reuse, required) {
+  if (required && !reuse.canReuse) {
+    throw new Error(`The immutable prebuilt APK cannot be reused (${reuse.reason || "unknown incompatibility"}); refusing to build after emulator startup.`);
+  }
+}
+
+function buildQaApkWithoutDevice(applicationId, options = {}) {
+  const targetAbi = options.targetAbi || buildTargetAbi;
+  if (parseTargetAbi(targetAbi) === "universal") {
+    throw new Error("--build-only requires an explicit target ABI.");
+  }
+  const prebuild = (options.ensureAndroidNativeProject || ensureAndroidNativeProject)();
+  const collect = options.collectNativeBuildInputState || collectNativeBuildInputState;
+  const before = collect(prebuild.digest, applicationId);
+  (options.buildAndroidApk || buildAndroidApk)(applicationId);
+  const after = collect(prebuild.digest, applicationId);
+  if (before.digest !== after.digest) {
+    throw new Error("Android build inputs changed while Gradle was running; refusing to stamp an ambiguous APK.");
+  }
+  const packaging = evaluateTargetedApkPackaging({ targetAbi,
+    zipEntries: (options.listZipEntries || listZipEntries)(apkPath),
+    requiredLibraries: options.requiredLibraries || ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI,
+  });
+  if (!packaging.canReuse) throw new Error(`The built APK failed artifact verification: ${packaging.reason}.`);
+  (options.writeBuildStamp || writeBuildStamp)(after,
+    (options.createFileFingerprint || createFileFingerprint)(apkPath), packaging);
+  return packaging;
+}
+
+function evaluateTargetedApkPackaging({ targetAbi, zipEntries, requiredLibraries = ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI }) {
+  const abi = parseTargetAbi(targetAbi);
+  if (abi === "universal") throw new Error("Artifact-only verification requires an explicit target ABI.");
+  const entries = new Set((zipEntries || []).map((entry) => `${entry}`.replace(/\\/gu, "/")));
+  const packagedAbis = resolvePackagedAndroidAbis(entries);
+  const result = { canReuse: false, matchedAbi: null, packagedAbis, missingEntries: [], validationScope: "artifact-only" };
+  if (!areStringArraysEqual(packagedAbis, [abi])) {
+    return { ...result, reason: `the targeted APK must package exactly ${abi}` };
+  }
+  const missingEntries = resolveRequiredNativeLibrariesForAbi(abi, requiredLibraries)
+    .map((library) => `lib/${abi}/${library}`).filter((entry) => !entries.has(entry));
+  if (missingEntries.length > 0) {
+    return { ...result, missingEntries, reason: `the targeted APK is missing required native libraries for ${abi}` };
+  }
+  return { ...result, canReuse: true, matchedAbi: abi, reason: `the APK packages exactly requested ABI ${abi}` };
 }
 
 function resolvePackagedAndroidAbis(zipEntries) {
@@ -740,31 +821,8 @@ function evaluateApkAbiCompatibility({
         reason: `the device does not support requested ABI ${normalizedTargetAbi}`,
       };
     }
-    if (!areStringArraysEqual(packagedAbis, [normalizedTargetAbi])) {
-      return {
-        ...result,
-        reason: `the targeted APK must package exactly ${normalizedTargetAbi}`,
-      };
-    }
-    const missingEntries = resolveRequiredNativeLibrariesForAbi(
-      normalizedTargetAbi,
-      requiredLibraries
-    )
-      .map((library) => `lib/${normalizedTargetAbi}/${library}`)
-      .filter((entryName) => !normalizedZipEntries.has(entryName));
-    if (missingEntries.length > 0) {
-      return {
-        ...result,
-        missingEntries,
-        reason: `the targeted APK is missing required native libraries for ${normalizedTargetAbi}`,
-      };
-    }
-    return {
-      ...result,
-      canReuse: true,
-      matchedAbi: normalizedTargetAbi,
-      reason: `the APK packages exactly requested ABI ${normalizedTargetAbi}`,
-    };
+    const packaging = evaluateTargetedApkPackaging({ targetAbi: normalizedTargetAbi, zipEntries, requiredLibraries });
+    return { ...packaging, supportedAbis, validationScope: "device-and-artifact" };
   }
 
   if (!areStringArraysEqual(packagedAbis, [...ANDROID_UNIVERSAL_ABIS].sort())) {
@@ -2180,6 +2238,7 @@ function installDebugApk(adbPath, serial, appPackage, options = {}) {
   const apkFingerprint = createFileFingerprint(apkPath);
   const abiDecision = resolveDebugApkReuseDecision(adbPath, serial, apkPath);
   if (!abiDecision.canReuse) {
+    writePreinstallAbiDiagnostic(abiDecision, "pre-install");
     throw new Error(
       `The ${apkVariant} APK no longer satisfies the requested ABI contract before install `
         + `(${abiDecision.reason || "unknown incompatibility"}).`
@@ -3219,6 +3278,7 @@ function runAdbInstall(adbPath, serial, targetApkPath, options = {}) {
 function parseCliOptions(argv) {
   const options = {
     emulator: false,
+    buildOnly: false,
     skipBuild: false,
     screenshot: null,
     avd: null,
@@ -3237,6 +3297,11 @@ function parseCliOptions(argv) {
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+
+    if (arg === "--build-only") {
+      options.buildOnly = true;
+      continue;
+    }
 
     if (arg === "--emulator") {
       options.emulator = true;
@@ -3327,6 +3392,11 @@ function parseCliOptions(argv) {
     throw new Error(`Unknown option: ${arg}`);
   }
 
+  if (options.buildOnly && (options.emulator || options.autoTarget || options.serial || options.avd
+      || options.skipBuild || options.screenshot || options.port || options.keepMetroForeground
+      || options.clearMetroCache || options.transferMetroOwnership || options.launchDelayMs)) {
+    throw new Error("--build-only cannot be combined with device, launch, Metro, or skip-build options.");
+  }
   if (options.qaInstance !== null && !options.isolatedQaInstall) {
     throw new Error("--qa-instance requires --isolated-qa-install.");
   }
@@ -3353,6 +3423,7 @@ function readCliValue(argv, index, flagName) {
 
 function printHelp() {
   console.log("Usage: node ./scripts/android-smoke.js [options]");
+  console.log("  --build-only               Build and verify a targeted APK without accessing devices.");
   console.log("");
   console.log("Options:");
   console.log("  --emulator                 Use an Android emulator instead of a connected phone");
@@ -3483,6 +3554,10 @@ function wakeAndUnlockDevice(adbPath, serial, options = {}) {
 }
 
 module.exports = {
+  buildQaApkWithoutDevice,
+  evaluateTargetedApkPackaging,
+  assertImmutableBuildReuse,
+  writePreinstallAbiDiagnostic,
   assertSmokeBuildOverrideContract,
   areStringArraysEqual,
   buildGradleAssembleArgs,

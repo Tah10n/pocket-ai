@@ -126,9 +126,9 @@ export const TTS_EXECUTION_PROFILES: readonly TtsExecutionProfile[] = Object.fre
       sha256: '9972d7cabd38582f0425ba898abffc6f92166154ce046a4f392654dbdad5fafa', bytes: 341719168 }),
     family: 'neutts' as const, promptKind: 'neutts' as const, flow: 'tokens' as const,
     languages: Object.freeze(['en']), voiceModes: Object.freeze(['builtin'] as const),
-    builtinLanguage: 'en-us', phonemizerLanguage: 'en-us', builtinVoices: Object.freeze(['default', 'dave', 'jo']),
-    // Jo has 653 immutable reference codes. This new profile's allowance includes builtin
-    // reference overhead; existing profiles retain the 512-token admission unchanged.
+    builtinLanguage: 'en-us', phonemizerLanguage: 'en-us', builtinVoices: Object.freeze(['pocket-synthetic-en-v1']),
+    // Own synthetic reference has166 codes. Keep the existing complete-prompt bound;
+    // other profiles retain their original admission policy.
     maxPromptTokens: 1536, sampleRate: 24000, samplesPerFrame: 480,
     codebooks: 1, codebookSize: 65536, generationSteps: 801, maxFrames: 800,
     // Pinned GGUF metadata: llama.embedding_length=576 and llama.block_count=24.

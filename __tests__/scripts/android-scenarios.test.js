@@ -36,6 +36,9 @@ const {
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
   captureCoreSurfaceScreenshots,
+  captureThemeFailureEvidence,
+  captureFailedScenarioEvidence,
+  runNativeGlassThemeMatrix,
   captureSettledScenarioScreenshot,
   getScenarioOutcomeScreenshotPath,
   cleanupAndroidLogcatCollector,
@@ -4499,6 +4502,8 @@ describe('android-scenarios pack selection', () => {
       <hierarchy>
         <node bounds="[0,0][1080,2412]" />
         <node resource-id="settings-header" bounds="[0,96][1080,243]" />
+        <node resource-id="bottom-tab-settings" selected="true" bounds="[810,2200][1080,2400]" />
+        <node resource-id="settings-screen-content" bounds="[0,96][1080,2200]" />
         <node resource-id="settings-theme-mode-control" bounds="${bounds}" />
       </hierarchy>
     `);
@@ -6487,5 +6492,157 @@ describe('android-scenarios report path serialization', () => {
         },
       ])[0].screenshotPath
     ).toBe('nested/capture.png');
+  });
+});
+
+
+describe('Glass Settings navigation and failure evidence regression', () => {
+  const settingsSnapshot = (targetBounds, markerY = 500) => parseUiSnapshot(`
+    <hierarchy>
+      <node bounds="[0,0][720,1600]" />
+      <node resource-id="bottom-tab-settings" selected="true" bounds="[540,1450][720,1560]" />
+      <node resource-id="settings-screen-content" bounds="[0,100][720,1450]" />
+      <node resource-id="settings-header" bounds="[0,40][720,180]" />
+      <node resource-id="progress-row" bounds="[30,${markerY}][690,${markerY + 80}]" />
+      ${targetBounds ? `<node resource-id="settings-visual-style-container" bounds="${targetBounds}" />` : ''}
+    </hierarchy>
+  `);
+
+  it('searches above a retained Settings position beyond three progressing downward swipes', async () => {
+    let position = 0;
+    const ctx = {
+      serial: 'test-only',
+      swipeDown: jest.fn(async () => { position += 1; }),
+      swipeUp: jest.fn(async () => {}),
+    };
+    const createSnapshot = jest.fn(() => settingsSnapshot(
+      position >= 4 ? '[30,400][690,700]' : null,
+      400 + position * 50,
+    ));
+    await expect(scrollToResourceId(ctx, 'settings-visual-style-container', {
+      adbPath: 'unused', createSnapshot,
+    })).resolves.toEqual(expect.objectContaining({ resourceId: 'settings-visual-style-container' }));
+    expect(ctx.swipeDown).toHaveBeenCalledTimes(4);
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+    expect(ctx.swipeDown.mock.calls[0][0].snapshot).toEqual(settingsSnapshot(null, 400));
+  });
+
+  it('moves a known target above the bottom overlay without first swiping the wrong direction', async () => {
+    const covered = settingsSnapshot('[30,1350][690,1550]');
+    const clear = settingsSnapshot('[30,500][690,800]');
+    const ctx = { serial: 'test-only', swipeDown: jest.fn(), swipeUp: jest.fn() };
+    await scrollToResourceId(ctx, 'settings-visual-style-container', {
+      adbPath: 'unused', createSnapshot: jest.fn().mockReturnValueOnce(covered).mockReturnValue(clear),
+    });
+    expect(ctx.swipeDown).not.toHaveBeenCalled();
+    expect(ctx.swipeUp).toHaveBeenCalledWith(expect.objectContaining({ snapshot: covered }));
+    const gesture = resolveScenarioVerticalSwipeGesture(covered, 'up');
+    expect(gesture.startX).toBe(360);
+    expect(gesture.startY).toBeLessThan(1376);
+    expect(gesture.endY).toBeGreaterThan(180);
+  });
+
+  it('stops a stationary Settings search and preserves its last snapshot without another adb dump', async () => {
+    const snapshot = settingsSnapshot(null);
+    const ctx = { serial: 'test-only', swipeDown: jest.fn(), swipeUp: jest.fn() };
+    const createSnapshot = jest.fn(() => snapshot);
+    let failure;
+    try {
+      await scrollToResourceId(ctx, 'settings-visual-style-container', { adbPath: 'unused', createSnapshot });
+    } catch (error) { failure = error; }
+    expect(failure.message).toContain('settings-visual-style-container');
+    expect(failure.uiSnapshot).toBe(snapshot);
+    expect(ctx.swipeDown.mock.calls.length + ctx.swipeUp.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(createSnapshot.mock.calls.length).toBeLessThanOrEqual(5);
+  });
+
+  it('keeps the thirteen-gesture cap even while every snapshot changes', async () => {
+    let reads = 0;
+    const ctx = { serial: 'test-only', swipeDown: jest.fn(), swipeUp: jest.fn() };
+    await expect(scrollToResourceId(ctx, 'settings-visual-style-container', {
+      adbPath: 'unused', createSnapshot: () => settingsSnapshot(null, 300 + reads++),
+    })).rejects.toThrow('Bounded swipes: down=10, up=3');
+    expect(ctx.swipeDown.mock.calls.length + ctx.swipeUp.mock.calls.length).toBe(13);
+  });
+
+  it('does not reset the elapsed search bound after a progressing gesture', async () => {
+    let time = 0;
+    const now = jest.spyOn(Date, 'now').mockImplementation(() => time);
+    const ctx = {
+      serial: 'test-only', swipeDown: jest.fn(async () => { time = 1001; }), swipeUp: jest.fn(),
+    };
+    try {
+      await expect(scrollToResourceId(ctx, 'settings-visual-style-container', {
+        timeoutMs: 1000, adbPath: 'unused', createSnapshot: () => settingsSnapshot(null, 400 + time),
+      })).rejects.toThrow('Bounded swipes: down=1, up=0');
+      expect(ctx.swipeDown).toHaveBeenCalledTimes(1);
+      expect(ctx.swipeUp).not.toHaveBeenCalled();
+    } finally { now.mockRestore(); }
+  });
+
+  it('refuses a Settings swipe when the selected tab or destination is missing', () => {
+    const wrongRoute = parseUiSnapshot('<hierarchy><node bounds="[0,0][720,1600]" /><node resource-id="settings-header" bounds="[0,40][720,180]" /></hierarchy>');
+    expect(() => resolveScenarioVerticalSwipeGesture(wrongRoute, 'down')).toThrow(/Settings/);
+  });
+
+  const themeOptions = (calls, primary, restoreFailure) => ({
+    readSelectedThemeMode: async () => 'system',
+    readSelectedThemeStyle: async () => 'default',
+    selectThemeStyle: async () => {},
+    selectThemeMode: async () => {},
+    captureCoreSurfaceScreenshots: async () => { calls.push('body'); if (primary) throw primary; return { screenshotPath: 'done.png' }; },
+    captureThemeFailureEvidence: () => { calls.push('failure-capture'); return { screenshotPath: 'before.png', uiDumpPath: 'before.xml' }; },
+    restoreThemePreferences: async () => { calls.push('restore'); if (restoreFailure) throw restoreFailure; },
+  });
+
+  it('captures failure before restoring theme and prevents the outer handler from replacing it with Home', async () => {
+    const calls = [];
+    const primary = new Error('original locator failure');
+    let caught;
+    try { await runNativeGlassThemeMatrix({}, themeOptions(calls, primary)); } catch (error) { caught = error; }
+    expect(calls).toEqual(['body', 'failure-capture', 'restore']);
+    expect(caught).toBe(primary);
+    const context = { captureScreenshot: jest.fn(() => 'home-after-restore.png') };
+    expect(captureFailedScenarioEvidence({ scenario: { id: 'native-glass-theme-matrix' }, context, error: caught }))
+      .toEqual(expect.objectContaining({ screenshotPath: 'before.png', uiDumpPath: 'before.xml' }));
+    expect(context.captureScreenshot).not.toHaveBeenCalled();
+  });
+
+  it('retains the primary failure when both evidence capture and restoration fail', async () => {
+    const calls = [];
+    const primary = new Error('original locator failure');
+    const cleanup = new Error('restore failed');
+    const options = themeOptions(calls, primary, cleanup);
+    options.captureThemeFailureEvidence = () => { calls.push('failure-capture'); throw new Error('capture failed'); };
+    let caught;
+    try { await runNativeGlassThemeMatrix({}, options); } catch (error) { caught = error; }
+    expect(calls).toEqual(['body', 'failure-capture', 'restore']);
+    expect(caught.message).toContain(primary.message);
+    expect(caught.cause).toBe(primary);
+    expect(caught.errors).toEqual([primary, cleanup]);
+    expect(caught.themeFailureEvidence.evidenceCaptureError).toContain('capture failed');
+  });
+
+  it('writes failure-time XML and bounds even if screenshot capture fails', () => {
+    const snapshot = settingsSnapshot('[30,0][690,150]');
+    const writeFileSync = jest.fn();
+    const evidence = captureThemeFailureEvidence({
+      serial: 'test-only', captureScreenshot: () => { throw new Error('screenshot unavailable'); },
+    }, 'select-glass', snapshot, {
+      mkdirSync: jest.fn(), writeFileSync, outputRoot: '/test-artifacts',
+      createSnapshot: () => { throw new Error('must reuse exact failure snapshot'); },
+    });
+    expect(writeFileSync).toHaveBeenCalledWith(expect.stringContaining('before-restore.xml'), snapshot.xml);
+    expect(evidence.failurePhase).toBe('select-glass');
+    expect(evidence.failureBounds.header.bottom).toBe(180);
+    expect(evidence.failureBounds.target.bottom).toBe(150);
+    expect(evidence.evidenceCaptureError).toContain('screenshot unavailable');
+  });
+
+  it('restores theme after a successful full light/dark matrix without failure artifacts', async () => {
+    const calls = [];
+    const options = themeOptions(calls);
+    await expect(runNativeGlassThemeMatrix({}, options)).resolves.toEqual({ screenshotPath: 'done.png' });
+    expect(calls).toEqual(['body', 'body', 'restore']);
   });
 });

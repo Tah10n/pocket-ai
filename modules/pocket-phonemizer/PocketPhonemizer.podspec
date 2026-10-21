@@ -20,10 +20,11 @@ Pod::Spec.new do |s|
   s.dependency 'ExpoModulesCore'
   core = %w[common mnemonics error ieee80 compiledata compiledict dictionary encoding intonation langopts numbers phoneme phonemelist readclause setlengths soundicon spect ssml synthdata synthesize tr_languages translate translateword voices wavegen speech espeak_api]
   unicode = %w[case categories ctype proplist scripts tostring]
-  s.source_files = ['ios/*.{swift,h,mm}', 'cpp/PhonemizerCore.{h,cpp}', 'cpp/data-identity.h', 'ios/include/config.h',
-    'generated/source/espeak-ng/src/**/*.h'] + core.map { |name| "generated/source/espeak-ng/src/libespeak-ng/#{name}.c" } + unicode.map { |name| "generated/source/espeak-ng/src/ucd-tools/src/#{name}.c" }
+  s.source_files = ['ios/*.{swift,h,mm}', 'cpp/PhonemizerCore.{h,cpp}', 'cpp/data-identity.h', 'ios/include/config.h'] + core.map { |name| "generated/source/espeak-ng/src/libespeak-ng/#{name}.c" } + unicode.map { |name| "generated/source/espeak-ng/src/ucd-tools/src/#{name}.c" }
   s.public_header_files = 'ios/PocketPhonemizerBridge.h'
-  s.private_header_files = ['ios/include/config.h', 'cpp/*.h', 'generated/source/espeak-ng/src/**/*.h']
+  s.private_header_files = ['ios/include/config.h', 'cpp/PhonemizerCore.h', 'cpp/data-identity.h']
+  # Keep upstream includes on disk without flattening their basenames into framework headers.
+  s.preserve_paths = 'generated/source/espeak-ng/src/**/*.h'
   # Directory entries are folder resources: preserve espeak-ng-data's nested language/voice paths.
   s.resource_bundles = { 'PocketPhonemizerData' => ['assets/data-manifest.json', 'assets/espeak-ng-data'] }
   s.frameworks = 'Foundation', 'CryptoKit'

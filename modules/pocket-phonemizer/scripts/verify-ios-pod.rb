@@ -23,6 +23,26 @@ raise 'Expected exactly one PocketPhonemizer target' unless targets.length == 1
 compiled = canonical.call(targets.first.source_build_phase.files_references.map(&:real_path))
 missing = expected_paths - compiled
 raise "PocketPhonemizer compile phase missing #{missing.length} required files" unless missing.empty?
+# Headers are copied by visibility into flat framework directories. Do not let
+# upstream duplicate basenames enter that phase; keep them as on-disk includes.
+public_headers = canonical.call([root.join('ios/PocketPhonemizerBridge.h')])
+private_headers = canonical.call(%w[ios/include/config.h cpp/PhonemizerCore.h cpp/data-identity.h].map { |p| root.join(p) })
+raise 'Unexpected public phonemizer headers' unless canonical.call(accessor.public_headers).sort == public_headers.sort
+raise 'Unexpected private phonemizer headers' unless canonical.call(accessor.private_headers).sort == private_headers.sort
+projected = {}
+copied = []
+upstream_root = root.join('generated/source/espeak-ng/src').realpath.to_s + File::SEPARATOR
+targets.first.headers_build_phase.files.each do |build_file|
+  header = build_file.file_ref.real_path.realpath.to_s
+  raise 'Upstream phonemizer header entered copy phase' if header.start_with?(upstream_root)
+  attributes = Array((build_file.settings || {})['ATTRIBUTES'])
+  visibility = attributes.include?('Public') ? 'Public' : (attributes.include?('Private') ? 'Private' : 'Project')
+  key = [visibility, File.basename(header).downcase]
+  raise "Duplicate projected phonemizer #{visibility} header basename" if projected.key?(key)
+  projected[key] = header
+  copied << header
+end
+raise 'Required phonemizer headers absent from copy phase' unless ((public_headers + private_headers) - copied).empty?
 resources = canonical.call(%w[assets/data-manifest.json assets/espeak-ng-data].map { |p| root.join(p) })
 resolved_resources = canonical.call(accessor.resource_bundles.fetch('PocketPhonemizerData'))
 raise 'PocketPhonemizer resolved data resources missing' unless (resources - resolved_resources).empty?

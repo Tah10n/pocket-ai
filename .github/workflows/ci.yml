@@ -256,6 +256,9 @@ jobs:
       - name: Install CocoaPods
         run: cd ios && pod install
 
+      - name: Verify resolved phonemizer CocoaPods inputs
+        run: ruby modules/pocket-phonemizer/scripts/verify-ios-pod.rb
+
       - name: Compile unsigned release simulator app
         run: >-
           xcodebuild -workspace ios/pocketai.xcworkspace -scheme PocketAI

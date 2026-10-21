@@ -71,6 +71,26 @@ describe('local speech export ownership', () => {
     }
     expect(fs.existsSync(temporary)).toBe(false);
   });
+  it.each(['neu-synthetic-first', 'neu-synthetic-repeat', 'tokens-1', 'tokens-2', 'tokens-retry',
+    'continuous_embd-1', 'continuous_embd-2', 'continuous_embd-retry', 'qwen-r1-eager',
+    'qwen-r2-lazy', 'qwen-no-reference', 'qwen-saved-cold'])(
+    'exports the current fixed identity %s with exact validated WAV bytes', id => {
+      const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
+      const result = exportLocalTtsClip(directory, id, wav(), step);
+      expect(result).toMatchObject({ id, filename: `${id}.wav`, sampleRate: 24000, sampleCount: 2,
+        contentVerification: 'not_run' });
+      expect(fs.readFileSync(path.join(directory, result.filename))).toEqual(wav());
+      expect(() => exportLocalTtsClip(directory, id, wav(), step)).toThrow();
+      expect(fs.readFileSync(path.join(directory, result.filename))).toEqual(wav());
+    },
+  );
+  it.each(['neu-jo', 'neu-synthetic', 'neu-synthetic-third', 'neu-synthetic-first/../other'])(
+    'rejects retired or unknown Neu clip identity %s before writing', id => {
+      const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
+      expect(() => exportLocalTtsClip(directory, id, wav(), step)).toThrow(/Invalid TTS clip identity/u);
+      expect(fs.readdirSync(directory)).toEqual([]);
+    },
+  );
   it.each([320000, 480000])('exports a canonical recorded clip of %s samples and preserves it on repeated export', sampleCount => {
     const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
     const receipt = recording(sampleCount);
@@ -83,7 +103,7 @@ describe('local speech export ownership', () => {
     expect(() => exportLocalTtsClip(directory, 'recorded', bytes, receipt)).toThrow();
     expect(fs.readFileSync(path.join(directory, result.filename))).toEqual(saved);
   });
-  it.each(['tokens-1', 'continuous_embd-1', 'neu-jo', 'qwen-r1-eager', 'qwen-r2-lazy',
+  it.each(['tokens-1', 'continuous_embd-1', 'neu-synthetic-first', 'neu-synthetic-repeat', 'qwen-r1-eager', 'qwen-r2-lazy',
     'qwen-no-reference', 'qwen-saved-cold'])('keeps the same twenty-second clip outside the TTS limit for %s', id => {
     const directory = resolveExternalTtsDirectory(path.join(temporary, 'audio'), publicRoot);
     const receipt = recording(320000);

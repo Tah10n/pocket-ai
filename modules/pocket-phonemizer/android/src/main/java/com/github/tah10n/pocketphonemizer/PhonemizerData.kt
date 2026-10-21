@@ -11,14 +11,24 @@ internal class DataFailure : Exception()
 internal object PhonemizerData {
   private data class Entry(val path: String, val bytes: Long, val sha: String)
   private fun check(value: Boolean) { if (!value) throw DataFailure() }
-  private fun sha(value: ByteArray) = MessageDigest.getInstance("SHA-256").digest(value).joinToString("") { "%02x".format(it) }
+  private val HEX = "0123456789abcdef".toCharArray()
+  private fun hex(value: ByteArray): String {
+    val result = CharArray(value.size * 2)
+    for (index in value.indices) {
+      val byte = value[index].toInt() and 0xff
+      result[index * 2] = HEX[byte ushr 4]
+      result[index * 2 + 1] = HEX[byte and 0x0f]
+    }
+    return String(result)
+  }
+  private fun sha(value: ByteArray) = hex(MessageDigest.getInstance("SHA-256").digest(value))
   private fun safe(file: File) { check(file.canonicalPath == file.absolutePath) }
   private fun digest(input: InputStream, expected: Long, output: java.io.OutputStream? = null): String {
     val hash = MessageDigest.getInstance("SHA-256"); val buffer = ByteArray(65536); var size = 0L
     input.use { stream -> while (true) { val count = stream.read(buffer); if (count < 0) break
       size += count; check(size <= expected); hash.update(buffer, 0, count); output?.write(buffer, 0, count)
     } }
-    check(size == expected); return hash.digest().joinToString("") { "%02x".format(it) }
+    check(size == expected); return hex(hash.digest())
   }
   private fun verifyTree(root: File, entries: List<Entry>) {
     safe(root); check(root.isDirectory)

@@ -71,6 +71,8 @@ const {
   findPreparedSentMessageContext,
   findResourceIdInSnapshot,
   findResourceIdClearOfOverlays,
+  findReadyThemeModeOption,
+  readSelectedThemeMode,
   findSettledDocumentCancellationSendAction,
   hasConversationHistoryStartAnchor,
   hideChatQaEvidenceForVisualCapture,
@@ -147,6 +149,90 @@ const {
   waitForModelWarmupToSettleIfPresent,
   waitForSettledAttachImageAction,
 } = require('../../scripts/android-scenarios');
+
+describe('theme mode semantic visibility', () => {
+  // Exact relevant geometry/attributes from the API 32 before-restore XML.
+  // The selected option is absent, although five pixels of its parent remain.
+  const clippedXml = `<hierarchy>
+    <node bounds="[0,0][1080,2400]" />
+    <node resource-id="settings-header" bounds="[0,63][1080,192]" />
+    <node resource-id="settings-screen-content" bounds="[0,194][1080,2080]" />
+    <node resource-id="settings-theme-mode-control" content-desc="Light, System, Dark"
+      clickable="false" enabled="true" selected="false" bounds="[67,194][1013,199]" />
+    <node resource-id="settings-visual-style-container" bounds="[37,247][1043,608]" />
+    <node resource-id="bottom-tab-settings" content-desc="Settings" selected="true"
+      bounds="[810,2115][1080,2233]" />
+  </hierarchy>`;
+  const clipped = () => parseUiSnapshot(clippedXml);
+  // Synthetic next snapshot models a successful bounded downward scroll.
+  const exposed = (selected = true, optionBounds = '[80,460][380,560]') => parseUiSnapshot(
+    clippedXml.replace('[67,194][1013,199]', '[67,450][1013,582]')
+      .replace('</hierarchy>', `<node resource-id="settings-theme-mode-light"
+        selected="${selected}" bounds="${optionBounds}" /></hierarchy>`),
+  );
+  const context = () => ({ serial: 'device-1', swipeDown: jest.fn(), swipeUp: jest.fn() });
+  const hasSelectedOption = (snapshot) => Boolean(findResourceIdInSnapshot(
+    snapshot, 'settings-theme-mode-light', { visibleOnly: true },
+  )?.selected);
+
+  it('semantic-ready scroll reveals the selected child instead of accepting the actual API 32 sliver', async () => {
+    const ctx = context();
+    const createSnapshot = jest.fn().mockReturnValueOnce(clipped()).mockReturnValue(exposed());
+    const node = await scrollToResourceId(ctx, 'settings-theme-mode-control', {
+      adbPath: 'adb', createSnapshot, isReady: hasSelectedOption,
+    });
+    expect(node.bounds.top).toBe(450);
+    expect(ctx.swipeDown).toHaveBeenCalledTimes(1);
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+    expect(createSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('semantic-ready scroll reveals an incomplete lower-edge control upward', async () => {
+    const bottom = parseUiSnapshot(clippedXml.replace('[67,194][1013,199]', '[67,2050][1013,2055]'));
+    const ctx = context();
+    await scrollToResourceId(ctx, 'settings-theme-mode-control', {
+      adbPath: 'adb', createSnapshot: jest.fn().mockReturnValueOnce(bottom).mockReturnValue(exposed()),
+      isReady: hasSelectedOption,
+    });
+    expect(ctx.swipeUp).toHaveBeenCalledTimes(1);
+    expect(ctx.swipeDown).not.toHaveBeenCalled();
+  });
+
+  it('semantic-ready scroll fails closed within the existing stall and gesture limits', async () => {
+    const ctx = context();
+    const createSnapshot = jest.fn().mockReturnValue(clipped());
+    await expect(scrollToResourceId(ctx, 'settings-theme-mode-control', {
+      adbPath: 'adb', createSnapshot, isReady: hasSelectedOption, maxSwipes: 4,
+    })).rejects.toThrow('Bounded swipes: down=2, up=2');
+    expect(ctx.swipeDown).toHaveBeenCalledTimes(2);
+    expect(ctx.swipeUp).toHaveBeenCalledTimes(2);
+    expect(createSnapshot).toHaveBeenCalledTimes(5);
+  });
+
+  it('reads the selected mode from the exact ready snapshot after revealing the clipped control', async () => {
+    const ctx = context();
+    const goToSettings = jest.fn();
+    const createSnapshot = jest.fn().mockReturnValueOnce(clipped()).mockReturnValueOnce(exposed());
+    await expect(readSelectedThemeMode(ctx, { adbPath: 'adb', createSnapshot, goToSettings }))
+      .resolves.toBe('light');
+    expect(goToSettings).toHaveBeenCalledWith(ctx);
+    expect(ctx.swipeDown).toHaveBeenCalledTimes(1);
+    expect(createSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('requires the selected option when reading and the requested option when selecting', () => {
+    expect(findReadyThemeModeOption(clipped())).toBeNull();
+    expect(findReadyThemeModeOption(exposed(false))).toBeNull();
+    expect(findReadyThemeModeOption(exposed(false), 'light')?.key).toBe('light');
+    expect(findReadyThemeModeOption(exposed(), 'dark')).toBeNull();
+  });
+
+  it.each(['[80,185][380,250]', '[80,2020][380,2090]', '[-1,460][380,560]'])(
+    'rejects a selected option whose full geometry intersects chrome or the viewport: %s', (bounds) => {
+      expect(findReadyThemeModeOption(exposed(true, bounds))).toBeNull();
+    },
+  );
+});
 
 describe('catalog sort selection smoke', () => {
   function sortSnapshot(label, { panelBounds, toggleBounds = '[500,100][1000,200]' } = {}) {

@@ -2742,16 +2742,37 @@ function findSelectedResourceKey(snapshot, resourcesByKey, label) {
   throw new Error(`Could not resolve the selected ${label}.`);
 }
 
-async function readSelectedThemeMode(ctx) {
-  await goToSettings(ctx);
+function findReadyThemeModeOption(snapshot, mode) {
+  const header = findResourceIdInSnapshot(snapshot, "settings-header", { visibleOnly: true });
+  const content = findResourceIdInSnapshot(snapshot, "settings-screen-content", { visibleOnly: true });
+  const top = Math.max(snapshot.viewportBounds.top, header?.bounds?.bottom ?? 0,
+    content?.bounds?.top ?? 0);
+  const bottom = Math.min(snapshot.viewportBounds.bottom - resolveTapSafeBottomInsetPx(snapshot.viewportBounds),
+    content?.bounds?.bottom ?? snapshot.viewportBounds.bottom);
+  for (const [key, resourceId] of Object.entries(THEME_MODE_RESOURCE_IDS)) {
+    if (mode && key !== mode) continue;
+    const node = findResourceIdClearOfOverlays(snapshot, resourceId);
+    if (node && (mode || node.selected) && node.bounds.top >= top && node.bounds.bottom <= bottom
+      && node.bounds.left >= snapshot.viewportBounds.left && node.bounds.right <= snapshot.viewportBounds.right) {
+      return { key, node };
+    }
+  }
+  return null;
+}
+
+async function readSelectedThemeMode(ctx, options = {}) {
+  await (options.goToSettings ?? goToSettings)(ctx);
+  let selected;
   await scrollToResourceId(ctx, THEME_MODE_CONTROL_RESOURCE_ID, {
+    ...options,
     timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+    isReady: (snapshot) => {
+      selected = findReadyThemeModeOption(snapshot);
+      return Boolean(selected);
+    },
   });
-  return findSelectedResourceKey(
-    createUiSnapshot(resolveAdbPath(), ctx.serial),
-    THEME_MODE_RESOURCE_IDS,
-    "theme mode"
-  );
+  // Read the selection from the same settled snapshot that satisfied readiness.
+  return selected.key;
 }
 
 async function selectThemeMode(ctx, mode) {
@@ -2762,6 +2783,7 @@ async function selectThemeMode(ctx, mode) {
   await goToSettings(ctx);
   await scrollToResourceId(ctx, THEME_MODE_CONTROL_RESOURCE_ID, {
     timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+    isReady: (snapshot) => Boolean(findReadyThemeModeOption(snapshot, mode)),
   });
   await tapVisibleResource(ctx, resourceId, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
   const { match, snapshot } = await waitForSnapshotMatch(
@@ -2836,7 +2858,8 @@ async function scrollToResourceId(ctx, resourceId, options = {}) {
 
   for (let attempt = 0; attempt <= maxSwipes; attempt += 1) {
     const node = findResourceIdClearOfOverlays(snapshot, resourceId);
-    if (node) return node;
+    const ready = node && (!options.isReady || options.isReady(snapshot));
+    if (ready) return node;
     if (attempt === maxSwipes || Date.now() - startedAt >= timeoutMs) break;
     if (!resolveSelectedBottomTabDestination(snapshot, "bottom-tab-settings", "settings-screen-content")) {
       const error = new Error(withUiSnapshotSummary(snapshot, "Settings navigation was lost before scrolling."));
@@ -2846,8 +2869,13 @@ async function scrollToResourceId(ctx, resourceId, options = {}) {
     const target = findResourceIdInSnapshot(snapshot, resourceId);
     const header = findResourceIdInSnapshot(snapshot, "settings-header", { visibleOnly: true });
     if (target?.bounds) {
-      direction = target.bounds.centerY <= (header?.bounds?.bottom ?? snapshot.viewportBounds.top)
-        ? "down" : "up";
+      // A clipped parent may be exposed without its selectable children. Reveal
+      // it from the nearest edge instead of accepting the parent's tiny sliver.
+      const boundary = node && options.isReady
+        ? ((header?.bounds?.bottom ?? snapshot.viewportBounds.top)
+          + snapshot.viewportBounds.bottom - resolveTapSafeBottomInsetPx(snapshot.viewportBounds)) / 2
+        : (header?.bounds?.bottom ?? snapshot.viewportBounds.top);
+      direction = target.bounds.centerY <= boundary ? "down" : "up";
     }
     if (counts[direction] >= limits[direction]) exhausted.add(direction);
     if (exhausted.has(direction)) direction = direction === "down" ? "up" : "down";
@@ -11815,6 +11843,8 @@ function sleepSync(ms) {
 }
 
 module.exports = {
+  findReadyThemeModeOption,
+  readSelectedThemeMode,
   grantStage7MicrophoneAfterExplicitRecord,
   sanitizeInferenceSmokeEvidence,
   validateInferenceSmokeEvidence,

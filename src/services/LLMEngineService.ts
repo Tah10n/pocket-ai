@@ -3,6 +3,7 @@ import type {
   CompletionParams,
   LlamaContext,
   NativeBackendDeviceInfo,
+  ParallelStatus,
 } from 'llama.rn';
 import DeviceInfo from 'react-native-device-info';
 import { assertAudioDecoderAdmission } from './AudioDecoderAdmission';
@@ -13,8 +14,12 @@ import { getLlamaRuntimeDiagnostics } from './llamaRnModule';
 import { hardwareListenerService } from './HardwareListenerService';
 import { exactPromptTokenCache } from './ExactPromptTokenCache';
 import { getCompanionBindingIdentity } from '../utils/modelArtifacts';
-import type { LoraProfileAdapter } from '../utils/advancedLoadProfile';
 import { PreparedLlamaRequestCache } from './PreparedLlamaRequest';
+import { admitComparisonMemory, buildComparisonNativeProfile, type ComparisonMemoryProfile } from './LLMEngineService.parallel';
+import { startParallelCompletion, enableParallelContext, disableParallelContext,
+  cancelParallelCompletions, hasPendingParallelRequests, getParallelContextStatus,
+  subscribeParallelStatus, type ParallelRequestState } from './LlamaParallelRequests';
+import { isPrivateStorageWritable } from './storage';
 import { getCompletionPromptTokenCount } from './LlamaPromptTokenCount';
 import { freezeGenerationParameters, resolveAdvancedSampling, type AdvancedGenerationParameters } from '../utils/generationControls';
 import { prepareStructuredOutput, validateStructuredOutputResult } from '../utils/structuredOutput';
@@ -89,7 +94,7 @@ import { resolveLoraProfileForLoad, type ResolvedLoraProfile } from './LoraProfi
 import {
   assertAdvancedLoadParameterCombinations, buildAdvancedNativeLoadParams, getAdvancedLoadDiagnostics,
   getAdvancedLoadProfileIdentity, getOptionalAdvancedLoadProfileIdentity, getEffectiveAdvancedLoadProfileIdentity,
-  isPublicKvCacheType, sanitizeAdvancedLoadParameters,
+  isPublicKvCacheType, sanitizeAdvancedLoadParameters, getLoraAdapterMemoryBytes, type LoraProfileAdapter,
 } from '../utils/advancedLoadProfile';
 import { inferenceBackendService } from './InferenceBackendService';
 import { resolveInferenceProfileCandidates, type ResolvedInferenceProfile } from './resolveInferenceProfile';
@@ -228,6 +233,24 @@ export type BackendAvailability = {
 };
 
 type StateListener = (state: EngineState) => void;
+export type ComparisonCompletionOutcome = { status: 'success'; result: LlamaCompletionResult }
+  | { status: 'cancelled' } | { status: 'error'; error: unknown };
+export type ComparisonSamplingParams = Pick<CompletionParams,
+  'temperature' | 'top_p' | 'top_k' | 'min_p' | 'penalty_repeat' | 'seed' | 'n_predict'
+  | 'enable_thinking' | 'reasoning_format' | 'thinking_budget_tokens'>;
+type ComparisonVariant = { params?: ComparisonSamplingParams; generation?: LlmChatCompletionOptions['generation'] };
+const COMPARISON_SAMPLING_KEYS = new Set(['temperature', 'top_p', 'top_k', 'min_p', 'penalty_repeat',
+  'seed', 'n_predict', 'enable_thinking', 'reasoning_format', 'thinking_budget_tokens']);
+export interface CompareChatCompletionsOptions {
+  messages: LlmChatMessage[];
+  expectedModelId: string;
+  variants: readonly [ComparisonVariant, ComparisonVariant];
+  isCurrent: () => boolean;
+  signal?: AbortSignal;
+  onToken?: (index: 0 | 1, token: Parameters<NonNullable<LlmChatCompletionOptions['onToken']>>[0]) => void;
+  onState?: (index: 0 | 1, state: ParallelRequestState) => void;
+  onNativeStatus?: (status: ParallelStatus) => void;
+}
 type ChatCompletionReasoningFormat = NonNullable<NonNullable<LlmChatCompletionOptions['params']>['reasoning_format']>;
 const APP_VERSION = typeof appPackageJson?.version === 'string' ? appPackageJson.version : 'unknown';
 const DEFAULT_CONTEXT_SIZE = 4096;
@@ -1406,6 +1429,17 @@ function normalizeMessagesForStrictRoleAlternation(
 
 class LLMEngineService {
   private context: LlamaContext | null = null;
+  private activeNativeInitParams: LlamaContextInitParams | null = null;
+  private nextParallelRequestId = 0;
+  private comparisonDiagnostics: ComparisonMemoryProfile | undefined;
+  private comparisonDiagnosticsOwner: { modelId: string; fileIdentity: string; profileIdentity: string } | undefined;
+  private comparisonOperation: {
+    controller: AbortController;
+    phase: AuxiliaryContextRequest;
+    cancelled: Set<0 | 1>;
+    handles: Map<0 | 1, ReturnType<typeof startParallelCompletion>>;
+    drains: Promise<unknown>[];
+  } | null = null;
   private contextGeneration = 0;
   private activeContextSize = DEFAULT_CONTEXT_SIZE;
   private activeGpuLayers: number | null = null;
@@ -4003,7 +4037,8 @@ class LLMEngineService {
               observeTiming('backbone_init', 'started');
               try {
                 auxiliaryContext = await this.awaitModelInitWithProgressWatchdog(
-                  progress => initLlamaContext({ ...phase.initParams, n_parallel: 1,
+                  progress => initLlamaContext({ ...phase.initParams,
+                    n_parallel: this.comparisonOperation?.phase === phase ? 2 : 1,
                     state_cache_budget_mb: DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
                     state_cache_max_checkpoints: PROMPT_STATE_CACHE_MAX_CHECKPOINTS }, progress), () => undefined,
                 );
@@ -4160,6 +4195,232 @@ class LLMEngineService {
       this.contextRecoveryModelId = null;
       this.updateState(this.state);
     }
+  }
+
+  /** An explicit transient same-model allocation; the existing auxiliary owner restores A exactly. */
+  public async compareChatCompletions(options: CompareChatCompletionsOptions): Promise<readonly [ComparisonCompletionOutcome, ComparisonCompletionOutcome]> {
+    if (!this.comparisonOperation) {
+      this.comparisonDiagnostics = undefined;
+      this.comparisonDiagnosticsOwner = undefined;
+      this.updateState(this.state);
+    }
+    this.assertExpectedCompletionModel(options.expectedModelId);
+    this.assertContextRecoveryNotRequired();
+    const { context: originalContext } = this.getReadyContextOrThrow();
+    const nativeProfile = this.activeNativeInitParams;
+    const profile = this.getEffectiveLoadParameters();
+    const artifact = this.loadedArtifactIdentity;
+    const metadata: Record<string, unknown> = Object.fromEntries(Object.entries(originalContext.model?.metadata ?? {}));
+    const architecture = metadata?.['general.architecture'];
+    if (this.comparisonOperation || !nativeProfile || !profile || !artifact?.sizeBytes
+      || !metadata || !['llama', 'qwen2', 'qwen3'].includes(String(architecture))
+      || this.activeMultimodalContext || this.activeSpeculativeDecoding
+      || hasToolProtocol(options.messages)
+      || options.messages.some(message => (message.attachments?.length ?? 0) > 0
+        || (message.mediaPaths?.length ?? 0) > 0 || message.contentParts?.some(part => part.type !== 'text'))) {
+      throw new AppError('action_failed', 'Comparison requires a supported CPU text model without media, tools, or speculative decoding.');
+    }
+    const loraBytes = getLoraAdapterMemoryBytes(profile.loraAdapters);
+    if (loraBytes === null) throw new AppError('model_memory_insufficient', 'The selected adapters do not have verified memory sizes.');
+    const originalModel = registry.getModel(options.expectedModelId);
+    if (!originalModel) throw new AppError('chat_model_not_loaded', 'The comparison model is no longer available.');
+    const capturedBinding = getCompanionBindingIdentity(originalModel);
+    const capturedSavedProfile = JSON.stringify(getModelLoadParametersForModel(options.expectedModelId));
+    const selectionCurrent = () => {
+      const model = registry.getModel(options.expectedModelId);
+      return isPrivateStorageWritable() && options.isCurrent() && Boolean(model)
+        && getCompanionBindingIdentity(model!) === capturedBinding
+        && JSON.stringify(getModelLoadParametersForModel(options.expectedModelId)) === capturedSavedProfile;
+    };
+    const messages = options.messages.map(message => ({ role: message.role, content: message.content,
+      ...(message.contentParts ? { contentParts: message.contentParts.map(part => ({ ...part })) } : {}) }));
+    const now = Math.floor(Date.now() / 1000);
+    const variants = options.variants.map(variant => ({ params: { ...variant.params },
+      generation: freezeGenerationParameters(variant.generation, now) }));
+    for (const variant of variants) {
+      // Formatting, parser, grammar and media fields belong only to PreparedLlamaRequest.
+      if (Object.entries(variant.params).some(([key, value]) => !COMPARISON_SAMPLING_KEYS.has(key)
+        || (typeof value === 'number' && !Number.isFinite(value)))) {
+        throw new AppError('action_failed', 'Comparison accepts only finite request-local sampling parameters.');
+      }
+      const numericBounds: readonly [keyof ComparisonSamplingParams, number, number, boolean][] = [
+        ['temperature', 0, 2, false], ['top_p', 0, 1, false], ['min_p', 0, 1, false],
+        ['top_k', 0, 10_000, true], ['penalty_repeat', 0, 2, false],
+        ['seed', -1, 0xffffffff, true], ['thinking_budget_tokens', -1, 512, true],
+      ];
+      if (numericBounds.some(([key, min, max, integer]) => {
+        const value = variant.params[key];
+        return value !== undefined && (typeof value !== 'number' || value < min || value > max
+          || (integer && !Number.isSafeInteger(value)));
+      }) || (variant.params.enable_thinking !== undefined && typeof variant.params.enable_thinking !== 'boolean')
+        || (variant.params.reasoning_format !== undefined && !['none', 'auto', 'deepseek'].includes(variant.params.reasoning_format))) {
+        throw new AppError('action_failed', 'The comparison sampling parameters are outside their supported bounds.');
+      }
+      const limit = variant.params.n_predict ?? 384;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 512) {
+        throw new AppError('action_failed', 'Comparison answers must have a token limit from 1 to 512.');
+      }
+    }
+    const initParams = buildComparisonNativeProfile({ ...nativeProfile,
+      lora_list: this.activeLoraAdapters.map(adapter => ({ ...adapter })) }, this.activeContextSize);
+    const controller = new AbortController();
+    const phase: AuxiliaryContextRequest = { modelId: options.expectedModelId, initParams,
+      signal: controller.signal, isCurrent: selectionCurrent, nativeDrainTimeoutMs: 120_000,
+      beforeInit: async () => {
+        this.comparisonDiagnostics = admitComparisonMemory({ params: initParams, metadata,
+          modelBytes: artifact.sizeBytes!, loraBytes, snapshot: await getFreshMemorySnapshot(0) });
+        this.comparisonDiagnosticsOwner = { modelId: options.expectedModelId, fileIdentity: capturedBinding,
+          profileIdentity: auxiliaryLoadProfileIdentity(profile) };
+        this.updateState(this.state);
+      } };
+    const owner = { controller, phase, cancelled: new Set<0 | 1>(),
+      handles: new Map<0 | 1, ReturnType<typeof startParallelCompletion>>(), drains: [] as Promise<unknown>[] };
+    this.comparisonOperation = owner;
+    const abort = () => {
+      controller.abort();
+      for (const index of [0, 1] as const) {
+        owner.cancelled.add(index);
+        void owner.handles.get(index)?.cancel().catch(() => undefined);
+      }
+    };
+    options.signal?.addEventListener('abort', abort);
+    if (options.signal?.aborted) abort();
+    try {
+      return await this.runWithAuxiliarySequence({ isCurrent: selectionCurrent,
+        isSelectionCurrent: selectionCurrent, signal: controller.signal }, sequence => sequence.withContext(phase, async context => {
+        const epoch = this.contextGeneration;
+        const assertCurrent = () => {
+          if (controller.signal.aborted || !selectionCurrent()) throw new AppError('engine_busy', 'Comparison was cancelled.');
+        };
+        if (initParams.lora_list?.length) {
+          const loaded = await context.getLoadedLoraAdapters();
+          if (loaded.length !== initParams.lora_list.length || loaded.some((adapter, index) => {
+            const expected = initParams.lora_list![index];
+            return fileUriToNativePath(adapter.path) !== fileUriToNativePath(expected.path)
+              || Math.fround(adapter.scaled ?? 1) !== Math.fround(expected.scaled ?? 1);
+          })) throw new AppError('model_load_failed', 'Comparison could not confirm the selected adapters.');
+        }
+        const preparedVariants: { params: CompletionParams; output: ReturnType<typeof prepareStructuredOutput> }[] = [];
+        // Both formatter/parser/tokenizer paths finish before native decode starts.
+        for (const variant of variants) {
+          assertCurrent();
+          const output = prepareStructuredOutput(variant.generation.output);
+          const enableThinking = output.mode === 'text' && (variant.params.enable_thinking ?? false);
+          const reasoningFormat = output.mode === 'text'
+            ? variant.generation.reasoningFormat ?? variant.params.reasoning_format ?? 'none' : 'none';
+          const prepared = await this.preparedRequestCache.prepare({ context, epoch, messages,
+            generation: variant.generation, enableThinking, reasoningFormat });
+          assertCurrent();
+          const tokenized = await tokenizeFormattedPrompt({ context, prompt: prepared.completion.prompt ?? '' });
+          assertCurrent();
+          const count = getCompletionPromptTokenCount(context, tokenized);
+          const limit = variant.params.n_predict ?? 384;
+          if (count + limit + 16 > (initParams.n_ctx ?? 0) / 2) {
+            throw new AppError('message_too_long', 'The comparison prompt and answer exceed the per-request context budget.');
+          }
+          const sampling = resolveAdvancedSampling(variant.generation);
+          if (sampling.ignore_eos && (prepared.completion.grammar || prepared.completion.json_schema)) {
+            throw new AppError('action_failed', 'Ignoring EOS cannot be combined with an output grammar.');
+          }
+          const stops = this.resolveCompletionStopWords({
+            stopWords: this.normalizeAdditionalStopWords(prepared.formatted.additional_stops),
+            strictRoleSystemNormalization: resolveStrictRoleSystemNormalization(prepared.formatted),
+            templateType: readFormattedChatType(prepared.formatted),
+          });
+          preparedVariants.push({ output, params: { ...prepared.completion, ...sampling,
+            ...variant.params, n_predict: limit, enable_thinking: enableThinking, reasoning_format: reasoningFormat,
+            temperature: variant.params.temperature ?? 0.7, top_p: variant.params.top_p ?? 0.9,
+            top_k: variant.params.top_k ?? 40, min_p: variant.params.min_p ?? 0.05,
+            penalty_repeat: variant.params.penalty_repeat ?? 1, seed: variant.params.seed ?? -1,
+            thinking_budget_tokens: enableThinking
+              ? variant.generation.thinkingBudgetTokens ?? variant.params.thinking_budget_tokens ?? -1 : -1,
+            stop: [...new Set([...stops.stopWords, ...(variant.generation.stop ?? [])])] } });
+        }
+        assertCurrent();
+        await enableParallelContext(context, { n_parallel: 2, n_batch: initParams.n_batch ?? 512 });
+        let subscriptionCurrent = true;
+        const subscription = subscribeParallelStatus(context, status => options.onNativeStatus?.(status),
+          () => subscriptionCurrent && !controller.signal.aborted && selectionCurrent());
+        void subscription.catch(() => undefined);
+        const requestOwner = `comparison-${epoch}-${++this.nextParallelRequestId}`;
+        const profileIdentity = JSON.stringify({ policy: 'text-comparison-v1', profile, initParams,
+          slots: 2, perRequestContextTokens: (initParams.n_ctx ?? 0) / 2 });
+        const outcomes: [ComparisonCompletionOutcome, ComparisonCompletionOutcome] = [{ status: 'cancelled' }, { status: 'cancelled' }];
+        const jobs: Promise<void>[] = [];
+        try {
+          if ((await getParallelContextStatus(context)).n_parallel !== 2) {
+            throw new AppError('action_failed', 'The runtime did not confirm two comparison slots.');
+          }
+          await subscription;
+          assertCurrent();
+          // Subscription admission does not emit an initial snapshot in rc.3.
+          // Give native QA a pre-admission timing anchor without prompt content.
+          const initialStatus = await getParallelContextStatus(context);
+          try { options.onNativeStatus?.(initialStatus); } catch { /* Diagnostics cannot change ownership. */ }
+          assertCurrent();
+          for (const index of [0, 1] as const) {
+            if (owner.cancelled.has(index)) { options.onState?.(index, 'cancelled'); continue; }
+            const prepared = preparedVariants[index];
+            const handle = startParallelCompletion({ context,
+              identity: { id: `${requestOwner}-${index}`, ownerId: requestOwner, modelId: options.expectedModelId,
+                fileIdentity: capturedBinding, contextEpoch: epoch, profileIdentity, outputMode: prepared.output.mode },
+              params: prepared.params,
+              onState: state => { if (selectionCurrent()) options.onState?.(index, state); },
+              onToken: data => {
+                if (owner.cancelled.has(index) || controller.signal.aborted || !selectionCurrent()) return;
+                options.onToken?.(index, { token: data.token ?? '', content: data.content,
+                  ...(data.content !== undefined ? { contentMode: 'cumulative' as const } : {}),
+                  ...(data.reasoning_content !== undefined ? { reasoningContent: data.reasoning_content,
+                    reasoningContentMode: 'cumulative' as const } : {}), accumulatedText: data.accumulated_text });
+              } });
+            owner.handles.set(index, handle);
+            owner.drains.push(handle.promise);
+            if (owner.cancelled.has(index) || controller.signal.aborted) void handle.cancel().catch(() => undefined);
+            jobs.push(handle.promise.then(result => {
+              if (owner.cancelled.has(index) || handle.state === 'cancelled' || !selectionCurrent()) return;
+              const validation = prepared.output.mode === 'text' ? undefined : validateStructuredOutputResult(prepared.output, {
+                content: result.content ?? (result.reasoning_content ? '' : result.text ?? ''),
+                interrupted: result.interrupted, stoppedLimit: result.stopped_limit,
+                truncated: result.truncated, contextFull: result.context_full });
+              if (validation && (validation.status === 'invalid' || validation.status === 'incomplete'
+                || result.interrupted || result.stopped_limit || result.truncated || result.context_full)) {
+                outcomes[index] = { status: 'error', error: new AppError('action_failed', 'The comparison answer did not complete its output constraints.') };
+                return;
+              }
+              outcomes[index] = { status: 'success', result: { ...result,
+                ...(validation ? { structuredOutput: validation } : {}) } };
+            }, error => { outcomes[index] = owner.cancelled.has(index) ? { status: 'cancelled' } : { status: 'error', error }; }));
+          }
+          const nativeDrain = Promise.all(jobs).then(() => undefined);
+          const completion = nativeDrain.then((): LlamaCompletionResult => ({}));
+          this.completionRunner.start(completion, () => undefined);
+          this.completionRunner.attachDriver(completion, nativeDrain);
+          try { await nativeDrain; }
+          finally { this.completionRunner.clearIfActive(completion); }
+          return outcomes;
+        } finally {
+          // Admission failures in a neighbouring request do not release an accepted native owner.
+          await Promise.allSettled(jobs);
+          subscriptionCurrent = false;
+          await subscription.then(remove => remove(), () => undefined);
+          await disableParallelContext(context);
+        }
+      }));
+    } finally {
+      options.signal?.removeEventListener('abort', abort);
+      // A phase watchdog can return before a native job. Keep its individual Stop
+      // handles available throughout quarantine, until the actual jobs settle.
+      const clear = () => { if (this.comparisonOperation === owner) this.comparisonOperation = null; };
+      if (owner.drains.length) void Promise.allSettled(owner.drains).then(clear);
+      else clear();
+    }
+  }
+
+  public async stopComparisonVariant(index: 0 | 1): Promise<void> {
+    const owner = this.comparisonOperation;
+    if (!owner) return;
+    owner.cancelled.add(index);
+    await owner.handles.get(index)?.cancel();
   }
 
   public async chatCompletion({
@@ -4426,7 +4687,42 @@ class LLMEngineService {
             hasPrefillText: Boolean(requestGeneration.template?.prefillText),
           };
           this.updateState(this.state);
-          return await runCompletionOnContext({
+          const executeCompletion = async (request: Parameters<typeof runCompletionOnContext>[0]) => {
+            // rc.3 queued slots sample before checking a zero remaining budget;
+            // preserve the exclusive prefill implementation, which evaluates only.
+            if (request.params.n_predict === 0 || runOwner || toolRequest || hasToolProtocol(requestMessages)
+              || requestMediaInputOccurrenceCount > 0 || activeSpeculativeConfig) {
+              return runCompletionOnContext(request);
+            }
+            await enableParallelContext(context, { n_parallel: 1, n_batch: this.initNBatch ?? 512 });
+            // Bound silence, not total answer length: long CPU answers can keep
+            // making progress well beyond the initial prompt-processing budget.
+            let watchdog = setTimeout(() => this.quarantineQueuedCompletion(context), 120_000);
+            try {
+              this.assertContextStillCurrent(context, contextGeneration);
+              this.assertCompletionNotInterrupted(interruptGeneration);
+              const id = `chat-${contextGeneration}-${++this.nextParallelRequestId}`;
+              return await startParallelCompletion({ ...request, context, onToken: data => {
+                if (this.context !== context || this.contextGeneration !== contextGeneration) return;
+                clearTimeout(watchdog);
+                watchdog = setTimeout(() => this.quarantineQueuedCompletion(context), 120_000);
+                request.onToken?.(data);
+              }, identity: {
+                id, ownerId: id, modelId: expectedModelId ?? this.state.activeModelId ?? '',
+                fileIdentity: JSON.stringify(this.loadedArtifactIdentity), contextEpoch: contextGeneration,
+                profileIdentity: auxiliaryLoadProfileIdentity(this.getEffectiveLoadParameters()), outputMode: output.mode,
+              } }).promise;
+            } finally {
+              clearTimeout(watchdog);
+              try { await disableParallelContext(context); }
+              catch (cause) {
+                throw this.recordOrphanedContextReleaseTerminalError({ reason: 'release_failed', cause,
+                  message: 'The native queue could not confirm an idle shutdown. Reload requires recovery.',
+                  activeModelId: expectedModelId ?? this.state.activeModelId ?? null });
+              }
+            }
+          };
+          return await executeCompletion({
             context,
             params: completionParams,
             onToken: (data) => {
@@ -5503,11 +5799,35 @@ class LLMEngineService {
     await this.stopCompletionInternal({ drainPromptPreparation: true });
   }
 
+  private quarantineQueuedCompletion(context: LlamaContext): AppError | null {
+    if (this.context !== context || !hasPendingParallelRequests(context)) return null;
+    const rawDriver = this.activeCompletionDriverPromise;
+    if (!rawDriver) return null;
+    const modelId = this.state.activeModelId ?? null;
+    const error = new AppError('engine_recovery_required', DETACHED_CONTEXT_RELEASE_STILL_OWNED_MESSAGE);
+    // Mark request-local callbacks cancelled synchronously; acknowledgement is
+    // still retained by the raw driver and cannot authorize an early release.
+    void cancelParallelCompletions(context).catch(() => undefined);
+    // The caller may settle now, but release stays behind the entire raw driver,
+    // including its terminal/status/Stop acknowledgement and queue shutdown.
+    this.detachCurrentContextAfterTimedOutOperation(modelId, error, {
+      drainPromise: rawDriver.then(() => undefined, () => undefined),
+    });
+    this.recordOrphanedContextReleaseTerminalError({ message: error.message,
+      activeModelId: modelId, reason: 'drain_timeout' });
+    return error;
+  }
+
   private async stopCompletionInternal({
     drainPromptPreparation,
   }: {
     drainPromptPreparation: boolean;
   }): Promise<void> {
+    if (this.comparisonOperation) {
+      this.comparisonOperation.controller.abort();
+      await Promise.all(([0, 1] as const).map(index => this.stopComparisonVariant(index)));
+      return;
+    }
     this.completionRunner.interruptIfActive();
 
     if (drainPromptPreparation && this.hasActiveChatBlockingContextOperation()) {
@@ -5518,7 +5838,16 @@ class LLMEngineService {
     }
 
     if (this.context) {
-      await this.context.stopCompletion();
+      if (hasPendingParallelRequests(this.context)) {
+        const context = this.context;
+        const stop = cancelParallelCompletions(context);
+        if (!drainPromptPreparation) await stop; // Unload owns its existing stop/drain watchdog.
+        else if (await this.waitForUnloadPromise(stop, CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS) === 'timed_out') {
+          const error = this.quarantineQueuedCompletion(context);
+          if (error) throw error;
+        }
+      }
+      else await this.context.stopCompletion();
     }
   }
 
@@ -5545,6 +5874,7 @@ class LLMEngineService {
     try {
       const stopResult = await this.waitForUnloadPromise(activeCompletion, CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS);
       if (stopResult === 'timed_out') {
+        if (this.context && this.quarantineQueuedCompletion(this.context)) return;
         this.completionRunner.rejectActive(
           new AppError('engine_busy', ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE),
         );
@@ -5746,6 +6076,13 @@ class LLMEngineService {
     return Array.isArray(this.initDevices) ? [...this.initDevices] : [];
   }
 
+  /** Private native configuration for controlled QA phases; never include it in diagnostics or evidence. */
+  public getEffectiveNativeInitParameters(): LlamaContextInitParams | null {
+    return this.activeNativeInitParams ? JSON.parse(JSON.stringify({
+      ...this.activeNativeInitParams, lora_list: this.activeLoraAdapters.map(adapter => ({ ...adapter })),
+    })) as LlamaContextInitParams : null;
+  }
+
   /** Private configuration snapshot for transactional restore and response provenance. */
   public getEffectiveLoadParameters(): ModelLoadParameters | null {
     return this.effectiveLoadParameters ? {
@@ -5850,7 +6187,14 @@ class LLMEngineService {
       speculativeDecodingDiagnostics: this.buildSpeculativeDecodingDiagnostics(),
       activePromptStateCachePolicy: this.activePromptStateCachePolicy,
     });
+    const comparisonModel = this.comparisonDiagnosticsOwner
+      ? registry.getModel(this.comparisonDiagnosticsOwner.modelId) : undefined;
+    const comparisonCurrent = this.comparisonDiagnosticsOwner && comparisonModel
+      && (this.comparisonOperation || (this.state.activeModelId === this.comparisonDiagnosticsOwner.modelId
+        && auxiliaryLoadProfileIdentity(this.getEffectiveLoadParameters()) === this.comparisonDiagnosticsOwner.profileIdentity))
+      && getCompanionBindingIdentity(comparisonModel) === this.comparisonDiagnosticsOwner.fileIdentity;
     return { ...diagnostics, runtime: getLlamaRuntimeDiagnostics(this.context),
+      comparison: this.comparisonDiagnostics && comparisonCurrent ? { ...this.comparisonDiagnostics } : undefined,
       generation: this.lastGenerationDiagnostics ? {
         ...this.lastGenerationDiagnostics,
         probabilities: this.lastGenerationDiagnostics.probabilities ? { ...this.lastGenerationDiagnostics.probabilities } : undefined,
@@ -6832,6 +7176,11 @@ class LLMEngineService {
   }
 
   private updateState(newState: EngineState): void {
+    if (this.comparisonDiagnosticsOwner && !this.comparisonOperation && !this.auxiliaryOperation
+      && newState.activeModelId !== this.comparisonDiagnosticsOwner.modelId) {
+      this.comparisonDiagnostics = undefined;
+      this.comparisonDiagnosticsOwner = undefined;
+    }
     let canPublishReady = true;
     if (this.auxiliaryOperation?.isCurrent) {
       try { canPublishReady = this.auxiliaryOperation.isCurrent(); }
@@ -6868,6 +7217,7 @@ class LLMEngineService {
   }
 
   private resetRuntimeTelemetry(): void {
+    this.activeNativeInitParams = null;
     this.resetBackendTelemetry();
     this.recentMultimodalDiagnostics = null;
     this.requestedGpuLayers = null;
@@ -7674,7 +8024,7 @@ class LLMEngineService {
 
       this.requestedGpuLayers = requestedGpuLayers;
       // shouldUseLowMemoryContextParams is decided by the safe-load policy.
-      // Keep llama.cpp parallel slots disabled until the app implements the official parallel decoding flow.
+      // Ordinary loads keep one queued slot. Only the explicit comparison auxiliary phase allocates two.
       const resolvedParallelSlots = 1;
       const lowMemoryBatchParams = this.resolveLowMemoryBatchParams(
         finalContextSize,
@@ -8487,17 +8837,12 @@ class LLMEngineService {
           try {
             this.assertNoOrphanedContextReleasePending();
             this.activeLoraAdapters = resolvedLora.adapters.map(adapter => ({ ...adapter }));
+            const nativeInitParams = buildOptions(normalizedAttemptLayers, speculativeConfig, promptStateCachePolicy);
             const context = await this.awaitModelInitWithProgressWatchdog(
-              (progressListener) => initLlamaContext(
-                buildOptions(
-                  normalizedAttemptLayers,
-                  speculativeConfig,
-                  promptStateCachePolicy,
-                ),
-                progressListener,
-              ),
+              (progressListener) => initLlamaContext(nativeInitParams, progressListener),
               onProgress,
             );
+            this.activeNativeInitParams = nativeInitParams;
             if (resolvedLora.adapters.length > 0) {
               const loaded = await context.getLoadedLoraAdapters();
               if (loaded.length !== resolvedLora.adapters.length || loaded.some((item, index) => (

@@ -1,4 +1,7 @@
 import * as llamaRn from 'llama.rn';
+import { installQueuedCompletionContextFixture } from '../fixtures/queuedCompletionContext';
+
+beforeEach(installQueuedCompletionContextFixture);
 import * as FileSystem from 'expo-file-system/legacy';
 import * as RNFS from 'react-native-fs';
 import DeviceInfo from 'react-native-device-info';
@@ -647,11 +650,14 @@ describe('LLMEngineService', () => {
 
   it('evaluates prefill with n_predict=0 without inventing an assistant response', async () => {
     await llmEngineService.load('test/model');
+    const prefillContext = (llmEngineService as unknown as { context: import('llama.rn').LlamaContext }).context;
     const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
     completion.mockResolvedValueOnce({ text: '', tokens_predicted: 0, tokens_evaluated: 3 });
     await expect(llmEngineService.prefillPrompt({ messages: [{ role: 'user', content: 'A' }] }))
       .resolves.toMatchObject({ text: '', tokens_predicted: 0 });
     expect(completion.mock.calls[0][0].n_predict).toBe(0);
+    expect(prefillContext.parallel.enable).not.toHaveBeenCalled();
+    expect(prefillContext.parallel.completion).not.toHaveBeenCalled();
     expect(llmEngineService.hasActiveCompletion()).toBe(false);
     expect(llmEngineService.getState().diagnostics?.generation).toMatchObject({ prefill: true, nProbs: 0 });
   });

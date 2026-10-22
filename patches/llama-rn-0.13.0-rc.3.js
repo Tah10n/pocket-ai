@@ -935,6 +935,258 @@ for (const extension of NEU_DIAGNOSTIC_PATCHES) {
   } else SOURCE_PATCHES.push(extension);
 }
 
+// Queued auxiliary terminal failures are additive; public handles retain their
+// documented shape. All inputs and outputs are exact version/hash guarded.
+const PARALLEL_TERMINAL_PATCHES = [
+  {
+    "source": "cpp/rn-slot-manager.h",
+    "beforeSha256": "882150b9bb69c8b4cb4da71b1433b42adf161caa256e6c7c4dc058731ead2c3e",
+    "afterSha256": "f9388c71e5958e66bfaf906993253d247e0ce999792740ebe22c3cc691403968",
+    "replacements": [
+      [
+        "        std::function<void(int32_t, const std::vector<float>&)> on_result,\n        int32_t request_id = -1",
+        "        std::function<void(int32_t, const std::vector<float>&)> on_result,\n        int32_t request_id = -1,\n        std::function<void(llama_rn_slot*)> on_error = nullptr"
+      ],
+      [
+        "        std::function<void(int32_t, const std::vector<float>&)> on_results,\n        int32_t request_id = -1",
+        "        std::function<void(int32_t, const std::vector<float>&)> on_results,\n        int32_t request_id = -1,\n        std::function<void(llama_rn_slot*)> on_error = nullptr"
+      ]
+    ]
+  },
+  {
+    "source": "cpp/rn-slot-manager.cpp",
+    "beforeSha256": "0e6a6b8dc2af72028dd0589361d8a88b2a3a7c4b3c879f53d338d9703375cb78",
+    "afterSha256": "da0592af0d9533c58b1dfd301e7a0d9c587fe52f86afaf35a9033809ffb0fc86",
+    "replacements": [
+      [
+        "    std::function<void(int32_t, const std::vector<float>&)> on_result,\n    int32_t request_id\n",
+        "    std::function<void(int32_t, const std::vector<float>&)> on_result,\n    int32_t request_id,\n    std::function<void(llama_rn_slot*)> on_error\n"
+      ],
+      [
+        "    std::function<void(int32_t, const std::vector<float>&)> on_results,\n    int32_t request_id\n",
+        "    std::function<void(int32_t, const std::vector<float>&)> on_results,\n    int32_t request_id,\n    std::function<void(llama_rn_slot*)> on_error\n"
+      ],
+      [
+        "    request.on_embedding = on_result;",
+        "    request.on_embedding = on_result;\n    request.on_complete = on_error;"
+      ],
+      [
+        "    request.on_rerank = on_results;",
+        "    request.on_rerank = on_results;\n    request.on_complete = on_error;"
+      ],
+      [
+        "        slot->on_complete_callback = nullptr;",
+        "        // Every accepted kind has a terminal failure callback.\n        slot->on_complete_callback = request.on_complete;"
+      ],
+      [
+        "        switch (request.task_type) {\n            case SLOT_TASK_TYPE_COMPLETION:",
+        "        try {\n        switch (request.task_type) {\n            case SLOT_TASK_TYPE_COMPLETION:"
+      ],
+      [
+        "                slot->ctx_sampling = common_sampler_init(parent_ctx->model, slot->params->sampling);",
+        "                slot->ctx_sampling = common_sampler_init(parent_ctx->model, slot->params->sampling);\n                if (slot->ctx_sampling == nullptr) {\n                    throw std::runtime_error(\"parallel_sampler_initialization_failed\");\n                }"
+      ],
+      [
+        "        // Track active request\n",
+        "        } catch (...) {\n            // Reject only the failed admission-to-slot transition. Other slots\n            // retain their samplers, sequences and callbacks. Never expose inputs.\n            slot->incomplete = true;\n            slot->error_message = \"parallel_slot_initialization_failed\";\n            complete_slot(*slot);\n            release_slot(slot);\n            queue_requests.pop_front();\n            continue;\n        }\n\n        // Track active request\n"
+      ],
+      [
+        "                if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_GENERATING) {\n                    slot.incomplete = true;\n                    complete_slot(slot);",
+        "                if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_GENERATING) {\n                    slot.incomplete = true;\n                    slot.error_message = \"parallel_batch_decode_failed\";\n                    complete_slot(slot);"
+      ],
+      [
+        "    LOG_INFO(\"Queuing request %d with %zu prompt tokens (load_state=%s, save_state=%s, save_prompt_state=%s, load_size=%d, save_size=%d)\",\n             request_id, prompt.size(),\n             load_state_path.empty() ? \"no\" : load_state_path.c_str(),\n             save_state_path.empty() ? \"no\" : save_state_path.c_str(),\n             save_prompt_state_path.empty() ? \"no\" : save_prompt_state_path.c_str(),\n             load_state_size,\n             save_state_size);",
+        "    LOG_INFO(\"Parallel request event category 1\");"
+      ],
+      [
+        "        LOG_ERROR(\"Failed to tokenize rerank inputs: %s\", e.what());",
+        "        LOG_INFO(\"Parallel request event category 2\");"
+      ],
+      [
+        "                    LOG_ERROR(\"Failed to process media for slot %d: %s\", slot.id, e.what());",
+        "                    LOG_INFO(\"Parallel request event category 3\");"
+      ],
+      [
+        "                                    LOG_INFO(\"Slot %d: Stopped on word '%s'\", slot.id, word.c_str());",
+        "                                    LOG_INFO(\"Parallel request event category 4\");"
+      ],
+      [
+        "                        LOG_ERROR(\"Slot %d: MTP speculative decoding failed: %s\", slot.id, e.what());",
+        "                        LOG_INFO(\"Parallel request event category 5\");"
+      ],
+      [
+        "                            LOG_INFO(\"Slot %d: Stopped on word '%s'\", slot.id, word.c_str());",
+        "                            LOG_INFO(\"Parallel request event category 6\");"
+      ],
+      [
+        "                LOG_VERBOSE(\"Slot %d: Generated token %d ('%s'), n_past=%d, n_decoded=%d\",\n                           slot.id, new_token_id, token_text.c_str(), slot.n_past, slot.n_decoded);",
+        "                LOG_INFO(\"Parallel request event category 7\");"
+      ],
+      [
+        "                    LOG_INFO(\"Embedding data: 0: %f 1: %f 2: %f 3: %f\",\n                             embedding[0], embedding[1], embedding[2], embedding[3]);",
+        "                    LOG_INFO(\"Parallel request event category 8\");"
+      ],
+      [
+        "                    LOG_INFO(\"Normalized embedding data: 0: %f 1: %f 2: %f 3: %f\",\n                             normalized[0], normalized[1], normalized[2], normalized[3]);",
+        "                    LOG_INFO(\"Parallel request event category 9\");"
+      ],
+      [
+        "                LOG_INFO(\"Rerank data: 0: %f\", score);",
+        "                LOG_INFO(\"Parallel request event category 10\");"
+      ],
+      [
+        "slot->error_message = \"Failed to load state from: \" + slot->load_state_path;",
+        "slot->error_message = \"parallel_state_load_failed\";"
+      ],
+      [
+        "slot.error_message = e.what();",
+        "slot.error_message = \"parallel_speculative_failed\";"
+      ],
+      [
+        "        if (slot.state != SLOT_STATE_IDLE && slot.state != SLOT_STATE_DONE) {\n            status.active_slots++;",
+        "        // DONE still owns native state until release_slot resets it.\n        if (slot.state != SLOT_STATE_IDLE) {\n            status.active_slots++;"
+      ],
+      [
+        "        if (slot.state != SLOT_STATE_IDLE && slot.state != SLOT_STATE_DONE) {\n            return true;",
+        "        // Terminal callback delivery is not the slot-release receipt.\n        if (slot.state != SLOT_STATE_IDLE) {\n            return true;"
+      ]
+    ]
+  },
+  {
+    "source": "cpp/jsi/RNLlamaJSI.cpp",
+    "beforeSha256": "37086c38c42f9f91e2947bd486d845da421d7b848318d9287f52950373065017",
+    "afterSha256": "b80e5b8658c2457b06fa15d0b7c021599b942c1075f14349ce758be3b9c49c3d",
+    "replacements": [
+      [
+        "                    const int normalize = has_embd_normalize ? embd_normalize : ctx->params.embd_normalize;\n                    int requestId = ctx->slot_manager->reserve_request_id();",
+        "                    auto errorCallback = [contextId, callInvoker, runtimePtr](rnllama::llama_rn_slot* slot) {\n                        const int requestId = slot->request_id;\n                        auto callbacks = RequestManager::getInstance().takeRequest(contextId, requestId);\n                        if (!callbacks.onResult) return;\n                        const std::string error = slot->is_interrupted ? \"parallel_request_cancelled\"\n                            : (slot->error_message.empty() ? \"parallel_auxiliary_failed\" : slot->error_message);\n                        invokeAsyncTracked(callInvoker, contextId, [callbacks, error, runtimePtr](bool shouldProceed) {\n                            if (!shouldProceed || !runtimePtr) return;\n                            auto& rt = *runtimePtr;\n                            jsi::Object result(rt);\n                            result.setProperty(rt, \"error\", jsi::String::createFromUtf8(rt, error));\n                            callbacks.onResult->call(rt, result);\n                        });\n                    };\n\n                    const int normalize = has_embd_normalize ? embd_normalize : ctx->params.embd_normalize;\n                    int requestId = ctx->slot_manager->reserve_request_id();"
+      ],
+      [
+        "                    int requestId = ctx->slot_manager->reserve_request_id();\n                    RequestManager::getInstance().addRequest(contextId, requestId, {nullptr, nullptr, onResult});\n                    try {\n                        int queuedRequestId = ctx->slot_manager->queue_rerank_request(",
+        "                    auto errorCallback = [contextId, callInvoker, runtimePtr](rnllama::llama_rn_slot* slot) {\n                        const int requestId = slot->request_id;\n                        auto callbacks = RequestManager::getInstance().takeRequest(contextId, requestId);\n                        if (!callbacks.onResult) return;\n                        const std::string error = slot->is_interrupted ? \"parallel_request_cancelled\"\n                            : (slot->error_message.empty() ? \"parallel_auxiliary_failed\" : slot->error_message);\n                        invokeAsyncTracked(callInvoker, contextId, [callbacks, error, runtimePtr](bool shouldProceed) {\n                            if (!shouldProceed || !runtimePtr) return;\n                            auto& rt = *runtimePtr;\n                            jsi::Object result(rt);\n                            result.setProperty(rt, \"error\", jsi::String::createFromUtf8(rt, error));\n                            callbacks.onResult->call(rt, result);\n                        });\n                    };\n\n                    int requestId = ctx->slot_manager->reserve_request_id();\n                    RequestManager::getInstance().addRequest(contextId, requestId, {nullptr, nullptr, onResult});\n                    try {\n                        int queuedRequestId = ctx->slot_manager->queue_rerank_request("
+      ],
+      [
+        "                            tokens, normalize, resultCallback, requestId",
+        "                            tokens, normalize, resultCallback, requestId, errorCallback"
+      ],
+      [
+        "                            query, documents, normalize, resultCallback, requestId",
+        "                            query, documents, normalize, resultCallback, requestId, errorCallback"
+      ],
+      [
+        "                            callbacks.onComplete->call(runtime, response);\n                        }",
+        "                            callbacks.onComplete->call(runtime, response);\n                        } else if (callbacks.onResult) {\n                            jsi::Object response(runtime);\n                            response.setProperty(runtime, \"error\", jsi::String::createFromUtf8(runtime, \"parallel_request_cancelled\"));\n                            callbacks.onResult->call(runtime, response);\n                        }"
+      ]
+    ]
+  },
+  {
+    "source": "src/index.ts",
+    "beforeSha256": "e36a3169a7a71da980b8664c6e8974241819fc16ff8f3fcba63a64cc2d0c726b",
+    "afterSha256": "d6f928fe68a8abd93831c3064a40289593dc217e9efcdcd132a824b66a86bfa1",
+    "replacements": [
+      [
+        "          let resolveResult: (value: NativeEmbeddingResult) => void\n          const resultPromise = new Promise<NativeEmbeddingResult>((res) => {\n            resolveResult = res\n          })",
+        "          let resolveResult: (value: NativeEmbeddingResult) => void\n          let rejectResult: (reason: Error) => void\n          const resultPromise = new Promise<NativeEmbeddingResult>((res, rej) => {\n            resolveResult = res\n            rejectResult = rej\n          })\n          // Native completion can precede admission delivery. Observe early rejection.\n          void resultPromise.catch(() => {})"
+      ],
+      [
+        "          let resolveResult: (value: RerankResult[]) => void\n          const resultPromise = new Promise<RerankResult[]>((res) => {\n            resolveResult = res\n          })",
+        "          let resolveResult: (value: RerankResult[]) => void\n          let rejectResult: (reason: Error) => void\n          const resultPromise = new Promise<RerankResult[]>((res, rej) => {\n            resolveResult = res\n            rejectResult = rej\n          })\n          // Native completion can precede admission delivery. Observe early rejection.\n          void resultPromise.catch(() => {})"
+      ],
+      [
+        "            (embedding) => {",
+        "            (embedding) => {\n              if (!Array.isArray(embedding)) {\n                rejectResult(new Error(embedding.error))\n                return\n              }"
+      ],
+      [
+        "            (results) => {",
+        "            (results) => {\n              if (!Array.isArray(results)) {\n                rejectResult(new Error(results.error))\n                return\n              }"
+      ],
+      [
+        "          const { requestId } = await llamaQueueCompletion(",
+        "          // Native completion can precede admission delivery. Observe early rejection.\n          void resultPromise.catch(() => {})\n          const { requestId } = await llamaQueueCompletion("
+      ]
+    ]
+  },
+  {
+    "source": "lib/commonjs/index.js",
+    "beforeSha256": "a9b39800b23ef45edd21fc64fcbb7d1fa210aa907aed56d7284bbd94aab78d60",
+    "afterSha256": "ac39370c0229c0a835e4067531590f4e68d401b61d238c42299fd75d54340131",
+    "replacements": [
+      [
+        "        let resolveResult;\n        const resultPromise = new Promise(res => {\n          resolveResult = res;\n        });\n        const {\n          requestId\n        } = await llamaQueueEmbedding(this.id, text, params || {}, embedding => {",
+        "        let resolveResult;\n        let rejectResult;\n        const resultPromise = new Promise((res, rej) => {\n          resolveResult = res;\n          rejectResult = rej;\n        });\n        void resultPromise.catch(() => {});\n        const {\n          requestId\n        } = await llamaQueueEmbedding(this.id, text, params || {}, embedding => {\n          if (!Array.isArray(embedding)) {\n            rejectResult(new Error(embedding.error));\n            return;\n          }"
+      ],
+      [
+        "        let resolveResult;\n        const resultPromise = new Promise(res => {\n          resolveResult = res;\n        });\n        const {\n          requestId\n        } = await llamaQueueRerank(this.id, query, documents, params || {}, results => {",
+        "        let resolveResult;\n        let rejectResult;\n        const resultPromise = new Promise((res, rej) => {\n          resolveResult = res;\n          rejectResult = rej;\n        });\n        void resultPromise.catch(() => {});\n        const {\n          requestId\n        } = await llamaQueueRerank(this.id, query, documents, params || {}, results => {\n          if (!Array.isArray(results)) {\n            rejectResult(new Error(results.error));\n            return;\n          }"
+      ],
+      [
+        "            rejectResult = rej;\n          });",
+        "            rejectResult = rej;\n          });\n          void resultPromise.catch(() => {});"
+      ]
+    ]
+  },
+  {
+    "source": "lib/module/index.js",
+    "beforeSha256": "959981a582bdd45b4edfbba2341665bd9d12be32a6f591d92bd84c620acfa08d",
+    "afterSha256": "e733e3cb0aa5a7fe85763f6a5efe18e1cbe025f7e65d239b19d3c09ba447d3b1",
+    "replacements": [
+      [
+        "        let resolveResult;\n        const resultPromise = new Promise(res => {\n          resolveResult = res;\n        });\n        const {\n          requestId\n        } = await llamaQueueEmbedding(this.id, text, params || {}, embedding => {",
+        "        let resolveResult;\n        let rejectResult;\n        const resultPromise = new Promise((res, rej) => {\n          resolveResult = res;\n          rejectResult = rej;\n        });\n        void resultPromise.catch(() => {});\n        const {\n          requestId\n        } = await llamaQueueEmbedding(this.id, text, params || {}, embedding => {\n          if (!Array.isArray(embedding)) {\n            rejectResult(new Error(embedding.error));\n            return;\n          }"
+      ],
+      [
+        "        let resolveResult;\n        const resultPromise = new Promise(res => {\n          resolveResult = res;\n        });\n        const {\n          requestId\n        } = await llamaQueueRerank(this.id, query, documents, params || {}, results => {",
+        "        let resolveResult;\n        let rejectResult;\n        const resultPromise = new Promise((res, rej) => {\n          resolveResult = res;\n          rejectResult = rej;\n        });\n        void resultPromise.catch(() => {});\n        const {\n          requestId\n        } = await llamaQueueRerank(this.id, query, documents, params || {}, results => {\n          if (!Array.isArray(results)) {\n            rejectResult(new Error(results.error));\n            return;\n          }"
+      ],
+      [
+        "            rejectResult = rej;\n          });",
+        "            rejectResult = rej;\n          });\n          void resultPromise.catch(() => {});"
+      ]
+    ]
+  },
+  {
+    "source": "src/jsi.ts",
+    "beforeSha256": "ed3ceed231bc41f36b10ccbc4ab4d647c430109918ffa923f518beabd0c6bf23",
+    "afterSha256": "885d35073c92c598a44db11f8c9c430aab2e83569085fcad5dc79c5808c55e7e",
+    "replacements": [
+      [
+        "onResult: (result: number[]) => void",
+        "onResult: (result: number[] | { error: string }) => void"
+      ],
+      [
+        "onResult: (result: NativeRerankResult[]) => void",
+        "onResult: (result: NativeRerankResult[] | { error: string }) => void"
+      ]
+    ]
+  },
+  {
+    "source": "lib/typescript/jsi.d.ts",
+    "beforeSha256": "49760f2b6c3923d779d3baf790c8e3cd64512832daa3b1ddc2cbdc9ef797e4b0",
+    "afterSha256": "952e9249ac34ff65e8c260f1591bfff812a52a1a1ca9f56a682b44d4a5db40f9",
+    "replacements": [
+      [
+        "onResult: (result: number[]) => void",
+        "onResult: (result: number[] | { error: string }) => void"
+      ],
+      [
+        "onResult: (result: NativeRerankResult[]) => void",
+        "onResult: (result: NativeRerankResult[] | { error: string }) => void"
+      ]
+    ]
+  }
+];
+for (const extension of PARALLEL_TERMINAL_PATCHES) {
+  const previous = SOURCE_PATCHES.find(entry => entry.source === extension.source);
+  if (previous) {
+    if (previous.afterSha256 !== extension.beforeSha256) throw new Error('Parallel terminal source identity mismatch.');
+    previous.intermediates = [...(previous.intermediates || []).map(entry => ({
+      ...entry, replacements: [...entry.replacements, ...extension.replacements],
+    })), { sha256: extension.beforeSha256, replacements: extension.replacements }];
+    previous.replacements = [...previous.replacements, ...extension.replacements];
+    previous.afterSha256 = extension.afterSha256;
+  } else SOURCE_PATCHES.push(extension);
+}
+
 function hashSource(text) {
   return crypto.createHash('sha256').update(text.replace(/\r\n/gu, '\n')).digest('hex');
 }
@@ -1000,3 +1252,5 @@ if (require.main === module) {
 }
 
 module.exports = { AFTER, AFTER_SHA256, BEFORE, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION, SOURCE_PATCHES, PARAMS_SOURCE, PARAMS_BEFORE_SHA256, PARAMS_AFTER_SHA256, CLOCK_SOURCE, CLOCK_BEFORE_SHA256, CLOCK_AFTER_SHA256, CLOCK_BEFORE, CLOCK_AFTER, CLOCK_PREVIOUS_SHA256, CLOCK_PRIVACY_REPLACEMENTS, COMPLETION_SOURCE, COMPLETION_BEFORE_SHA256, COMPLETION_AFTER_SHA256, SAMPLING_SOURCE, SAMPLING_BEFORE_SHA256, SAMPLING_AFTER_SHA256, GRAMMAR_SOURCE, GRAMMAR_BEFORE_SHA256, GRAMMAR_AFTER_SHA256, hashSource, applyReplacements, patchLlamaBridge };
+// Export the final bridge identity after all guarded extensions.
+module.exports.AFTER_SHA256 = SOURCE_PATCHES.find(entry => entry.source === SOURCE).afterSha256;

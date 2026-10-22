@@ -44,6 +44,14 @@ invalidation, or diagnostics privacy.
 
 ## Pipeline ownership
 
+Eligible text uses the official one-slot queue. Explicit [two-answer
+comparison](parallel-requests.md) keeps one outer generation owner and two
+individually cancellable request records. Both prompts are prepared before native
+decode; terminal result plus native slot release retains the aggregate owner.
+Comparison remains ephemeral until one result enters the existing history
+transaction. Reload/deletion/private reset cannot treat a free slot as a free
+context.
+
 | Concern | Primary owner | Enforced boundary |
 |---|---|---|
 | Prompt-window display | [`useTruncationTracking.ts`](../src/hooks/useTruncationTracking.ts) | Reuse the last idle result while a thread is generating |

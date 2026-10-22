@@ -4,6 +4,11 @@ This document describes how Pocket AI stores and applies generation parameters a
 
 ## Categories
 
+The explicit [two-answer comparison](parallel-requests.md) uses a transient
+two-slot profile while preserving the ordinary per-request context budget. It
+does not change saved generation defaults or enable two slots after an update.
+Its separate memory admission and diagnostics do not reuse one-slot calibration.
+
 Pocket AI treats model settings as two categories:
 
 1. **Generation parameters** (apply to the next completion immediately)

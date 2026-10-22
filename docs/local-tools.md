@@ -111,8 +111,10 @@ values are exactly `auto`, `none` and `required`; named-function strings and pro
 object forms are unsupported. Its public formatter incorrectly serializes
 `parallel_tool_calls` to a string while JSI reads a strict boolean. The app omits
 that option, preserving the effective native default **false**. Multiple returned
-calls are handled sequentially. This is independent of `context.parallel`, which
-remains disabled.
+calls are handled sequentially. This is independent of `context.parallel`:
+[queued requests](parallel-requests.md) use it for eligible text and auxiliary
+retrieval. Tool completions retain exclusive execution; two-answer comparison is
+unavailable for tool history.
 
 A compatible loaded Jinja template must support tools and tool calls and produce
 usable native parser metadata. Specialized handlers and compatible differential

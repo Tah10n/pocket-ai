@@ -70,6 +70,9 @@ import { ScreenAndroidContentBlurTarget, ScreenCard, ScreenIconTile, ScreenRoot,
 import { useTranslation } from 'react-i18next';
 import { PresetSelectorSheet } from '@/components/ui/PresetSelectorSheet';
 import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSession';
+import { comparisonUnavailableReason, useChatComparison } from '../../hooks/useChatComparison';
+import { ChatComparisonPanel } from '../../components/ui/ChatComparisonPanel';
+import { AndroidQaParallelRequestsPanel } from '../../components/ui/AndroidQaParallelRequestsPanel';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
@@ -885,6 +888,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
             {!isTtsPreviewOpen ? <View accessible collapsable={false} testID="chat-qa-tts-playback-state"
                 accessibilityLabel={getTtsQaPlaybackMarker(ttsPlaybackState)} style={styles.androidQaEvidenceMarker} /> : null}
             {isAndroidQaUiControlsVisible() ? <View style={styles.androidQaEvidenceActions}>
+                <AndroidQaParallelRequestsPanel />
                 {isAndroidQaDocumentModelBootstrapEnabled() ? (
                     <>
                         <Button
@@ -1143,7 +1147,11 @@ const ChatScreenContent = () => {
     const retrievalPreparationOwnerRef = useRef<string | null>(null);
     const isPreparingRetrieval = retrievalPreparationOwner !== null
         || retrievalStatus.preparation?.phase === 'preparing' || retrievalStatus.preparation?.phase === 'cancelling';
-    const isGenerationBusy = isGenerating || isStoppingGeneration || isPreparingDocuments || isPreparingRetrieval;
+    const comparisonController = useChatComparison();
+    const closeComparison = comparisonController.close;
+    const comparisonReason = useMemo(() => comparisonUnavailableReason(activeThread), [activeThread]);
+    const isGenerationBusy = isGenerating || isStoppingGeneration || isPreparingDocuments || isPreparingRetrieval
+        || comparisonController.isBusy;
     usePreventRemove(isPreparingDocuments || isPreparingRetrieval, () => undefined);
     useEffect(() => () => {
         if (activeThread?.id) cancelDocumentRetrievalPreparation(activeThread.id);
@@ -1157,6 +1165,7 @@ const ChatScreenContent = () => {
     const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
     const tabBarHeight = useBottomTabBarHeight();
     const isScreenFocused = useIsFocused();
+    useFocusEffect(useCallback(() => closeComparison, [closeComparison]));
     const isTtsQaBusy = useSyncExternalStore(subscribeAndroidQaSpeechOwnership,
         isAndroidQaTtsBlockingPublicSpeech, isAndroidQaTtsBlockingPublicSpeech);
     const [speechPreview, setSpeechPreview] = useState<{
@@ -3570,6 +3579,24 @@ const ChatScreenContent = () => {
 
             <Box testID="chat-document-controls-region" style={{ paddingTop: headerInset }}>
                 <Box className="px-4 py-2 gap-2">
+                    {comparisonController.comparison ? (
+                        <ChatComparisonPanel comparison={comparisonController.comparison}
+                            onStop={(index) => { void comparisonController.stop(index); }}
+                            onChoose={comparisonController.choose} onClose={comparisonController.close} />
+                    ) : (
+                        <>
+                            <Button size="sm" action="secondary" testID="chat-compare-two-answers"
+                                disabled={Boolean(comparisonReason) || isInputDisabled || isTtsQaBusy || speechCleanupPending || Boolean(speechPreview)}
+                                onPress={() => { void comparisonController.start().catch((error) => {
+                                    showAlertForError('common.actionFailed', 'ChatScreen.compare', error);
+                                }); }}>
+                                <ButtonText>{t('comparison.title')}</ButtonText>
+                            </Button>
+                            <Text colorRole="secondary" className="text-xs">
+                                {t(comparisonReason ? `comparison.${comparisonReason}` : 'comparison.compatibility')}
+                            </Text>
+                        </>
+                    )}
                     <Button size="sm" action="secondary" testID="chat-speech-preview"
                         disabled={isGenerationBusy || isTtsQaBusy || speechCleanupPending || Boolean(speechUiError === 'storage_failed')}
                         onPress={() => openSpeechPreview()}>

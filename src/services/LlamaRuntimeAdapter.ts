@@ -18,6 +18,13 @@ import { requireLlamaModule, type LlamaModule } from './llamaRnModule';
 import { applyPromptStateCacheSafetyGate } from './PromptStateCachePolicy';
 import type { StructuredOutputValidation } from '../utils/structuredOutput';
 
+export {
+  startParallelCompletion, enableParallelContext, disableParallelContext,
+  getParallelContextStatus, subscribeParallelStatus, cancelParallelCompletions,
+  hasPendingParallelRequests, queuedEmbedding, queuedRerank,
+  type ParallelRequestState, type ParallelRequestIdentity, type ParallelCompletionHandle,
+} from './LlamaParallelRequests';
+
 export type LlamaChatFormatOptions = NonNullable<Parameters<LlamaContext['getFormattedChat']>[2]>;
 export type LlamaContextInitParams = ContextParams;
 export type NativeLogListenerHandle = { remove: () => void };
@@ -736,8 +743,10 @@ export async function initLlamaContext(
 ): Promise<LlamaContext> {
   const llama = getLlamaModule();
   assertFeature(llama.initLlama, 'initLlama');
+  const slots = params.n_parallel ?? 1;
+  if (slots !== 1 && slots !== 2) throw new Error('Only one or two native slots are supported.');
   return llama.initLlama(
-    { ...applyPromptStateCacheSafetyGate(params), n_parallel: 1 },
+    { ...applyPromptStateCacheSafetyGate(params), n_parallel: slots },
     onProgress,
   );
 }

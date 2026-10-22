@@ -7,6 +7,9 @@ import DeviceInfo from 'react-native-device-info';
 import { initLlama, releaseAllLlama } from 'llama.rn';
 import { updateSettings } from '../../src/services/SettingsStore';
 import { EngineStatus } from '../../src/types/models';
+import { installQueuedCompletionContextFixture } from '../fixtures/queuedCompletionContext';
+
+beforeEach(installQueuedCompletionContextFixture);
 
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
     registry: {
@@ -643,7 +646,7 @@ describe('LLMEngineService Stability', () => {
 
         await llmEngineService.unload();
 
-        await expect(completionPromise).resolves.toEqual({ text: 'Stopped during unload' });
+        await expect(completionPromise).resolves.toEqual({ text: 'Stopped during unload', interrupted: true });
         expect(stopCompletion).toHaveBeenCalled();
         expect(llmEngineService.getState().status).toBe('idle');
     });
@@ -692,6 +695,62 @@ describe('LLMEngineService Stability', () => {
         expect(llmEngineService.getState().status).toBe('idle');
     });
 
+    it.each(['terminal', 'stop_ack', 'silence'] as const)('quarantines queued chat missing %s without releasing its raw owner', async missing => {
+        jest.useFakeTimers();
+        let finish!: () => void;
+        let acknowledge!: () => void;
+        const completion = jest.fn((_params, _callback) => new Promise(resolve => { finish = () => resolve({ text: 'late' }); }));
+        const stopCompletion = jest.fn(() => missing === 'stop_ack'
+            ? new Promise<void>(resolve => { acknowledge = resolve; }) : Promise.resolve());
+        (initLlama as jest.Mock).mockImplementation(async () => ({ ...createMockContext(), completion, stopCompletion }));
+        try {
+            await llmEngineService.load(mockModel.id);
+            const onToken = jest.fn();
+            (releaseAllLlama as jest.Mock).mockClear();
+            const result = llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'hello' }], params: { n_predict: 32 }, onToken });
+            const observed = result.catch(error => error);
+            await waitForMockCall(completion);
+            let stop: Promise<unknown> | undefined;
+            if (missing !== 'silence') {
+                stop = llmEngineService.interruptActiveCompletion();
+                await waitForMockCall(stopCompletion);
+            }
+            await jest.advanceTimersByTimeAsync(missing === 'silence' ? 120_001 : 10_001);
+            await stop;
+            await expect(observed).resolves.toMatchObject({ code: 'engine_recovery_required' });
+            expect(llmEngineService.getState().diagnostics?.contextRecoveryStatus).toBe('failed');
+            expect(releaseAllLlama).not.toHaveBeenCalled();
+            completion.mock.calls[0][1]({ token: 'late token' });
+            expect(onToken).not.toHaveBeenCalled();
+            expect(() => llmEngineService.assertModelResourcesIdle(['model.gguf'])).toThrow();
+            acknowledge?.(); finish();
+            await waitForMockCall(releaseAllLlama as jest.Mock, 150);
+        } finally {
+            acknowledge?.(); finish?.();
+            for (let i = 0; i < 150; i++) await Promise.resolve();
+            jest.useRealTimers();
+        }
+    });
+
+    it('keeps a queued CPU answer alive while tokens make progress beyond two minutes', async () => {
+        jest.useFakeTimers();
+        let finish!: () => void;
+        const completion = jest.fn((_params, _callback) => new Promise(resolve => { finish = () => resolve({ text: 'done' }); }));
+        (initLlama as jest.Mock).mockImplementation(async () => ({ ...createMockContext(), completion }));
+        try {
+            await llmEngineService.load(mockModel.id);
+            const result = llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'hello' }] });
+            (releaseAllLlama as jest.Mock).mockClear();
+            await waitForMockCall(completion);
+            await jest.advanceTimersByTimeAsync(100_000);
+            completion.mock.calls[0][1]({ token: 'progress' });
+            await jest.advanceTimersByTimeAsync(100_000);
+            expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
+            expect(releaseAllLlama).not.toHaveBeenCalled();
+            finish(); await expect(result).resolves.toMatchObject({ text: 'done' });
+        } finally { finish?.(); jest.useRealTimers(); }
+    });
+
     it('bounds unload when stopping active native completion does not settle', async () => {
         jest.useFakeTimers();
         let resolveCompletion: (() => void) | undefined;
@@ -724,7 +783,7 @@ describe('LLMEngineService Stability', () => {
             for (let i = 0; i < 5 && jest.getTimerCount() === 0; i += 1) {
                 await Promise.resolve();
             }
-            expect(stopCompletion).toHaveBeenCalled();
+            await waitForMockCall(stopCompletion);
 
             await jest.advanceTimersByTimeAsync(5000);
             for (let i = 0; i < 5 && jest.getTimerCount() === 0; i += 1) {

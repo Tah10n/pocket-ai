@@ -13,7 +13,7 @@ import { getAndroidQaEffectiveProfileIdentity, prepareAndroidQaStage3Adapter } f
 import { prepareAndroidQaDocumentRetrievalModels } from './AndroidQaDocumentRetrieval';
 import { getAppCacheRootDir } from './FileSystemSetup';
 import { registry } from './LocalStorageRegistry';
-import { llmEngineService, type ComparisonCompletionOutcome } from './LLMEngineService';
+import { llmEngineService, type ComparisonCompletionOutcome, type ComparisonSamplingParams } from './LLMEngineService';
 import { PreparedLlamaRequestCache } from './PreparedLlamaRequest';
 import { tokenizeFormattedPrompt, type LlamaCompletionResult } from './LlamaRuntimeAdapter';
 import { enableParallelContext, disableParallelContext, startParallelCompletion, subscribeParallelStatus,
@@ -63,7 +63,7 @@ const markers = ['QA_ALPHA_81 ', 'QA_BETA_81 '] as const;
 const messages: LlmChatMessage[] = [{ role: 'user', content: 'Continue the answer with a short explanation of why leaves are green.' }];
 const variant = (index: 0 | 1, nPredict = 64) => ({
   params: { n_predict: nPredict, temperature: 0, top_p: 1, top_k: 40, min_p: 0, seed: 81 + index,
-    penalty_repeat: 1, ignore_eos: true, enable_thinking: false },
+    penalty_repeat: 1, enable_thinking: false } satisfies ComparisonSamplingParams,
   generation: { ignoreEos: true, template: { prefillText: markers[index] } },
 });
 function restored(profile: string): void {
@@ -131,7 +131,8 @@ async function withSingleContext<T>(operation: (context: LlamaContext, prepared:
         enableThinking: false, reasoningFormat: 'none' });
       const tokens = await tokenizeFormattedPrompt({ context, prompt: request.completion.prompt ?? '' });
       check(tokens.tokens.length + 128 + 16 <= contextTokens, 'prompt_budget_exceeded');
-      prepared.push({ ...request.completion, ...config.params, stop: [...(request.formatted.additional_stops ?? [])] });
+      prepared.push({ ...request.completion, ...config.params, ignore_eos: config.generation.ignoreEos,
+        stop: [...(request.formatted.additional_stops ?? [])] });
     }
     await enableParallelContext(context, { n_parallel: 1, n_batch: nativeProfile.n_batch ?? 512 });
     try { return await operation(context, prepared, owner.profileIdentity); }

@@ -24,7 +24,7 @@ thiserror = "2.0.17"
 unicode-normalization = "0.1.25"
 unicode-segmentation = "1.12.0"
 uuid = { version = "1.18.1", features = ["v4"] }
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

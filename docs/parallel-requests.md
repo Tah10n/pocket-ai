@@ -142,3 +142,5 @@ A+LoRA restoration separately. Two unsettled JS Promises do not prove parallel
 decode. Sequential/two-slot time, TTFT and memory measurements establish observations,
 not a promised speedup. Source commit, APK identity, hosted CI and actual inference
 receipts remain separate evidence categories.
+
+See [Stage 8.1 Android CPU acceptance](validation/llama-rn-stage8/acceptance.md) for the tested source, APK identities, results, and retry history.

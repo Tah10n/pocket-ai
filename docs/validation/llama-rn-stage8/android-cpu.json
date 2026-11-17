@@ -1,0 +1,325 @@
+{
+  "schemaVersion": 1,
+  "testedOn": "2026-11-17",
+  "runtime": "llama.rn 0.13.0-rc.3",
+  "nativePatchSha256": "68eddc2ed264a984768332eb6694385f7792dd4957c1096899368370423b7fb8",
+  "apk": {
+    "sourceCommit": "b8f09d8335574803d6297b67f1c55b12873125dd",
+    "sourceTree": "23cac4f5d6e02e3e802a1010971d79097833f3e3",
+    "cleanSource": true,
+    "sha256": "fc2f87a7ed311133e213dd139ed217cdf9e02e4d746d9bc3331048c1d911c737",
+    "bytes": 100399274,
+    "installedSha256": "fc2f87a7ed311133e213dd139ed217cdf9e02e4d746d9bc3331048c1d911c737",
+    "embeddedBundle": true,
+    "provenanceDigest": "612ad810abcabdce7188e39a7b0de58b2a56453138334a0e39adc842700f4d78",
+    "applicationId": "com.github.tah10n.pocketai.stage81.qa"
+  },
+  "runnerFixCommit": "9188cf3816b12a2a0af4dc80cef1240e7ea3c3e6",
+  "auxiliaryApk": {
+    "sourceCommit": "d2bea9f21ab1f204e4c4a6b4f4a6b518db00df2d",
+    "sourceTree": "5c4d05e76b83fa01230dda495b8f2e2c6e9420a9",
+    "cleanSource": true,
+    "sha256": "9a4ecee2d0f2ecbe87ff43c765b014f5d75439fd49cd5e76d0c4a0c0918b8b3b",
+    "bytes": 100402974,
+    "installedSha256": "9a4ecee2d0f2ecbe87ff43c765b014f5d75439fd49cd5e76d0c4a0c0918b8b3b",
+    "embeddedBundle": true,
+    "provenanceDigest": "3d89297211aa63bb80071f21aeae5ee19e4b08bb9b64fc5a9b5f491c1a85f7fd",
+    "applicationId": "com.github.tah10n.pocketai.stage81.qa",
+    "dataPartitionGiB": 16,
+    "lifecycle": "passed"
+  },
+  "auxiliaryNativeLogCounts": {
+    "embeddingPrompts": 4,
+    "normalizedEmbeddings": 4,
+    "rerankPrompts": 2
+  },
+  "localVerification": {
+    "focusedJestSuites": 4,
+    "focusedJestTests": 391,
+    "lint": "passed",
+    "typecheck": "passed"
+  },
+  "device": {
+    "platform": "Android",
+    "api": 36,
+    "abi": "x86_64",
+    "backend": "CPU",
+    "ramGiB": 16,
+    "emulator": true
+  },
+  "lifecycle": {
+    "status": "passed",
+    "steps": [
+      {
+        "id": "backend_discovery",
+        "status": "passed",
+        "discoveredDeviceCount": 1
+      },
+      {
+        "id": "cpu_load",
+        "status": "passed",
+        "loadedGpuLayers": 0,
+        "backendMode": "cpu",
+        "actualGpuAccelerated": false
+      },
+      {
+        "id": "generate",
+        "status": "passed",
+        "callbacks": 21,
+        "outputCharacters": 102,
+        "tokensPredicted": 21,
+        "tokensEvaluated": 36,
+        "inputMessages": 2
+      },
+      {
+        "id": "stop_after_token",
+        "status": "passed",
+        "callbacks": 1,
+        "outputCharacters": 1,
+        "inputMessages": 4
+      },
+      {
+        "id": "generate_after_stop",
+        "status": "passed",
+        "callbacks": 21,
+        "outputCharacters": 102,
+        "tokensPredicted": 21,
+        "tokensEvaluated": 97,
+        "inputMessages": 5
+      },
+      {
+        "id": "new_chat_isolation",
+        "status": "passed",
+        "callbacks": 21,
+        "outputCharacters": 102,
+        "tokensPredicted": 21,
+        "tokensEvaluated": 36,
+        "inputMessages": 2
+      },
+      {
+        "id": "unload",
+        "status": "passed"
+      },
+      {
+        "id": "cpu_reload",
+        "status": "passed",
+        "loadedGpuLayers": 0,
+        "backendMode": "cpu",
+        "actualGpuAccelerated": false
+      },
+      {
+        "id": "generate_after_reload",
+        "status": "passed",
+        "callbacks": 21,
+        "outputCharacters": 102,
+        "tokensPredicted": 21,
+        "tokensEvaluated": 77,
+        "inputMessages": 4
+      }
+    ]
+  },
+  "oneSlot": {
+    "status": "passed",
+    "phase": "complete",
+    "requiresForceStop": false,
+    "steps": [
+      {
+        "id": "queued_running_stop_then_success",
+        "slots": 1,
+        "status": "passed",
+        "queuedStop": true,
+        "runningStop": true,
+        "nextSucceeded": true,
+        "drainConfirmed": true,
+        "callbacks": [
+          1,
+          0,
+          32
+        ]
+      }
+    ]
+  },
+  "twoSlots": {
+    "status": "passed",
+    "phase": "complete",
+    "requiresForceStop": false,
+    "steps": [
+      {
+        "id": "sequential_pair",
+        "slots": 1,
+        "status": "passed",
+        "totalMs": 2501,
+        "nativeWindowMs": 1981,
+        "peakSampledPssBytes": 167959552,
+        "peakSampledResidentBytes": 521277440,
+        "drainConfirmed": true,
+        "callbacks": [
+          64,
+          64
+        ],
+        "ttftMs": [
+          176,
+          160
+        ]
+      },
+      {
+        "id": "two_slot_pair",
+        "slots": 2,
+        "status": "passed",
+        "totalMs": 2037,
+        "nativeWindowMs": 1558,
+        "peakSampledPssBytes": 167959552,
+        "peakSampledResidentBytes": 535019520,
+        "maxGenerating": 2,
+        "overlapObserved": true,
+        "nativeIdsDistinct": true,
+        "markersMatched": true,
+        "drainConfirmed": true,
+        "callbacks": [
+          64,
+          64
+        ],
+        "ttftMs": [
+          161,
+          337
+        ]
+      }
+    ]
+  },
+  "stopOne": {
+    "status": "passed",
+    "phase": "complete",
+    "requiresForceStop": false,
+    "steps": [
+      {
+        "id": "two_slot_stop_one",
+        "slots": 2,
+        "status": "passed",
+        "totalMs": 4309,
+        "nativeWindowMs": 3226,
+        "peakSampledPssBytes": 167959552,
+        "peakSampledResidentBytes": 540508160,
+        "maxGenerating": 2,
+        "overlapObserved": true,
+        "nativeIdsDistinct": true,
+        "markersMatched": true,
+        "runningStop": true,
+        "nextSucceeded": true,
+        "drainConfirmed": true,
+        "callbacks": [
+          1,
+          128
+        ],
+        "ttftMs": [
+          332,
+          332
+        ]
+      }
+    ]
+  },
+  "ui": {
+    "status": "passed",
+    "restart": "passed",
+    "steps": [
+      {
+        "id": "ordinary_answer",
+        "status": "passed"
+      },
+      {
+        "id": "close_preserves_original",
+        "status": "passed"
+      },
+      {
+        "id": "choose_one_replaces_old_answer",
+        "status": "passed",
+        "assistantCountForLatestUser": 1
+      }
+    ]
+  },
+  "fixturePreparation": {
+    "status": "passed",
+    "phase": "complete",
+    "requiresForceStop": false,
+    "steps": []
+  },
+  "auxiliary": {
+    "status": "passed",
+    "phase": "complete",
+    "requiresForceStop": false,
+    "steps": [
+      {
+        "id": "auxiliary_stop_drain",
+        "slots": 1,
+        "status": "passed",
+        "embeddingStarted": 1,
+        "rerankStarted": 0,
+        "nativeSettled": 1,
+        "restored": 1,
+        "loraCount": 1,
+        "candidateCount": 0,
+        "runningStop": true,
+        "drainConfirmed": true,
+        "profileRestored": true,
+        "indicesValidated": false
+      },
+      {
+        "id": "auxiliary_next_search",
+        "slots": 1,
+        "status": "passed",
+        "embeddingStarted": 3,
+        "rerankStarted": 1,
+        "nativeSettled": 4,
+        "restored": 1,
+        "loraCount": 1,
+        "candidateCount": 2,
+        "nextSucceeded": true,
+        "drainConfirmed": true,
+        "profileRestored": true,
+        "indicesValidated": true
+      }
+    ]
+  },
+  "earlierAttempts": [
+    {
+      "outcome": "precondition_failed",
+      "issue": "named_qa_application_id_rejected_during_provenance_recomputation"
+    },
+    {
+      "ramGiB": 8,
+      "outcome": "failed",
+      "issue": "two_slot_memory_admission",
+      "observedFreeKiB": 244664
+    },
+    {
+      "ramGiB": 16,
+      "outcome": "failed_then_passed",
+      "issue": "single_cancel_receipt_failed",
+      "unchangedApk": true
+    },
+    {
+      "ramGiB": 16,
+      "outcome": "driver_retry",
+      "issue": "android_accessibility_text_and_markdown_typography"
+    },
+    {
+      "ramGiB": 16,
+      "outcome": "fixture_precondition_failed",
+      "issue": "download_disk_space_low",
+      "freeBytes": 719335424,
+      "requiredBytes": 1132439008
+    },
+    {
+      "ramGiB": 16,
+      "outcome": "failed",
+      "issue": "missing_retained_document_source",
+      "phase": "auxiliary_stop_drain",
+      "apk": "original"
+    },
+    {
+      "outcome": "precondition_failed_then_passed",
+      "issue": "launcher_status",
+      "apk": "rebuilt",
+      "unchangedApk": true
+    }
+  ]
+}

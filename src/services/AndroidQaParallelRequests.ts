@@ -21,7 +21,7 @@ import { enableParallelContext, disableParallelContext, startParallelCompletion,
 import { getFreshMemorySnapshot } from './SystemMetricsService';
 import { LLAMA_SOURCE_PATCH_SHA256 } from './LlamaSourcePatchIdentity';
 import { chatAttachmentStorageService, materializeDocumentDraftsForProcessing } from './ChatAttachmentStorageService';
-import { chatAttachmentProcessorRegistry } from './ChatAttachmentProcessorRegistry';
+import { chatAttachmentProcessorRegistry, type ChatDocumentSessionContextSource } from './ChatAttachmentProcessorRegistry';
 import { retrieveDocumentCandidates } from './DocumentRetrievalService';
 import { resolveRetrievalRuntimeBinding } from './DocumentRetrievalRuntime';
 
@@ -257,17 +257,23 @@ async function auxiliary(): Promise<void> {
   }
   const temporary = `${getAppCacheRootDir()}parallel-qa-${createChatId()}.txt`;
   let draft: ChatDocumentAttachmentDraft | undefined;
+  let documentSource: ChatDocumentSessionContextSource | undefined;
   try {
     const doc = retrievalFixture.corpus.documents[0];
     await FileSystem.writeAsStringAsync(temporary, doc.paragraphs.slice(0, 2).map(item => item.text).join('\n\n'));
     draft = await chatAttachmentStorageService.copyDocumentAssetToDraft({ uri: temporary, name: 'parallel-qa.txt', mimeType: 'text/plain' });
     const attachment = materializeDocumentDraftsForProcessing({ threadId: createChatId(), messageId: createChatId(), drafts: [draft] })[0];
-    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(attachment, { query: '', maxChars: 16000, maxChunks: 4 });
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(attachment, {
+      query: '', maxChars: 16000, maxChunks: 4, retainSessionContextSource: true,
+    });
+    documentSource = result.sessionContextSource;
+    check(documentSource?.enumerateChunks, 'document_source_not_retained');
     check(result.chunks.length > 0 && result.chunks.length <= 2, 'bounded_document_required');
     const entry = { attachment, result };
     for (const cancel of [true, false]) {
       publish({ phase: cancel ? 'auxiliary_stop_drain' : 'auxiliary_next_search' });
       const controller = new AbortController();
+      const previousContextIdentity = llmEngineService.getPromptContextIdentity();
       let embeddingStarted = 0; let rerankStarted = 0; let nativeSettled = 0; let restoredCount = 0; let indicesValidated = false;
       let cancelled = false; let candidateCount = 0;
       try {
@@ -278,7 +284,10 @@ async function auxiliary(): Promise<void> {
           onNativeOperation: event => {
             if (event.phase === 'started') {
               if (event.operation === 'embedding') embeddingStarted += 1; else rerankStarted += 1;
-              if (cancel) controller.abort();
+              if (cancel && event.operation === 'embedding' && embeddingStarted === 1) {
+                // The observer runs immediately before the native enqueue.
+                queueMicrotask(() => controller.abort());
+              }
             } else {
               nativeSettled += 1;
               if (event.operation === 'rerank' && event.indices) indicesValidated = event.indices.length > 0
@@ -287,25 +296,31 @@ async function auxiliary(): Promise<void> {
             }
           },
         });
-        check(!cancel && found.actualMode === 'hybrid+rerank' && !found.fallbackReason && found.candidates.length > 0, 'production_search_failed');
+        if (found.fallbackReason) throw new QaFailure(`retrieval_${found.fallbackReason}`);
+        check(!cancel && found.actualMode === 'hybrid+rerank' && found.candidates.length > 0, 'production_search_failed');
         candidateCount = found.candidates.length;
       } catch (error) {
         if (cancel && error instanceof DocumentRetrievalError && error.code === 'cancelled') cancelled = true;
         else throw error;
       }
       restored(owner.profileIdentity);
-      check(nativeSettled === embeddingStarted + rerankStarted && restoredCount === 1, 'auxiliary_drain_failed');
+      // An aborted request suppresses its callback, but A must still be restored.
+      check(nativeSettled === embeddingStarted + rerankStarted && restoredCount === (cancel ? 0 : 1)
+        && llmEngineService.getPromptContextIdentity() !== previousContextIdentity, 'auxiliary_drain_failed');
       check(cancel ? cancelled && embeddingStarted === 1 && rerankStarted === 0
         : embeddingStarted >= 2 && rerankStarted === 1 && indicesValidated, 'auxiliary_receipt_failed');
       pass({ id: cancel ? 'auxiliary_stop_drain' : 'auxiliary_next_search', slots: 1,
-        embeddingStarted, rerankStarted, nativeSettled, restored: restoredCount, candidateCount,
+        embeddingStarted, rerankStarted, nativeSettled, restored: 1, candidateCount,
         indicesValidated, profileRestored: true, loraCount: owner.profile.loraAdapters!.length, drainConfirmed: true,
         ...(cancel ? { runningStop: true } : { nextSucceeded: true }) });
     }
   } finally {
     // Production retrieval does not return until accepted native work and restoration drain.
-    if (draft) await chatAttachmentStorageService.discardDocumentDraft(draft);
-    await FileSystem.deleteAsync(temporary, { idempotent: true });
+    try { await documentSource?.release(); }
+    finally {
+      try { if (draft) await chatAttachmentStorageService.discardDocumentDraft(draft); }
+      finally { await FileSystem.deleteAsync(temporary, { idempotent: true }); }
+    }
   }
 }
 

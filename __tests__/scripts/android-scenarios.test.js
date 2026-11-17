@@ -5576,12 +5576,22 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
     })).toBe(false);
   });
 
-  it('recomputes current QA provenance through the same isolated Gradle home as the build', () => {
+  it.each([null, 'stage81'])('recomputes QA provenance with the isolated Gradle home and instance %s', (qaInstance) => {
     const appRoot = path.resolve(__dirname, '..', '..');
     const setupGradleHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-setup-gradle-'));
     const setupGradleInitDirectory = path.join(setupGradleHome, 'init.d');
     const hmacKeyPath = path.join(setupGradleHome, 'reuse-hmac.key');
-    const previousGradleUserHome = process.env.GRADLE_USER_HOME;
+    const applicationId = qaInstance ? 'com.github.tah10n.pocketai.stage81.qa' : undefined;
+    const scenarioEnvironment = { ...process.env, GRADLE_USER_HOME: setupGradleHome };
+    const buildEnvironment = { ...process.env };
+    delete scenarioEnvironment.POCKET_AI_ANDROID_QA_INSTANCE;
+    delete buildEnvironment.POCKET_AI_ANDROID_QA_INSTANCE;
+    if (qaInstance) {
+      buildEnvironment.POCKET_AI_ANDROID_QA_INSTANCE = qaInstance;
+      buildEnvironment.EXPO_PUBLIC_ANDROID_QA = '1';
+      scenarioEnvironment.EXPO_PUBLIC_ANDROID_QA = '1';
+    }
+    configureScenarioBuildEnvironment({ isolatedQaInstall: Boolean(qaInstance), qaInstance }, false, scenarioEnvironment);
     fs.mkdirSync(setupGradleInitDirectory, { recursive: true });
     fs.writeFileSync(
       path.join(setupGradleInitDirectory, 'gradle-actions.build-result-capture.init.gradle'),
@@ -5600,13 +5610,14 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
     const nodeEnv = 'production';
     const isolatedEnvironment = createIsolatedAndroidBuildEnvironment(
       appRoot,
-      process.env,
+      buildEnvironment,
       { NODE_ENV: nodeEnv },
     );
     const gradleArgs = [
       ...withAndroidProvenanceGradleExecutionArgs([
         'app:assembleRelease',
         '-PreactNativeArchitectures=x86_64',
+        ...(applicationId ? [`-PpocketAiApplicationId=${applicationId}`] : []),
       ]),
       '--stacktrace',
     ];
@@ -5648,19 +5659,13 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
     });
 
     try {
-      process.env.GRADLE_USER_HOME = setupGradleHome;
       const currentManifest = collectCurrentQaBuildProvenance({
         abi,
         build: { provenance: storedManifest },
         variant,
-      }, currentGit, { hmacKeyPath, toolchains });
+      }, currentGit, { applicationId, env: scenarioEnvironment, hmacKeyPath, toolchains });
       expect(currentManifest.digest).toBe(storedManifest.digest);
     } finally {
-      if (previousGradleUserHome == null) {
-        delete process.env.GRADLE_USER_HOME;
-      } else {
-        process.env.GRADLE_USER_HOME = previousGradleUserHome;
-      }
       fs.rmSync(setupGradleHome, { force: true, recursive: true });
     }
   });

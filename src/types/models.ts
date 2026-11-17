@@ -375,6 +375,7 @@ export interface LlamaRuntimeDiagnostics {
 }
 
 export interface EngineDiagnostics {
+  comparison?: import('../services/LLMEngineService.parallel').ComparisonMemoryProfile;
   generation?: {
     outputMode: 'text' | 'json_object' | 'json_schema' | 'gbnf';
     templateSource: 'custom' | 'model';

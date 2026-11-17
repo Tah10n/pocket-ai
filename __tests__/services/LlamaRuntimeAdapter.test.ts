@@ -49,7 +49,7 @@ describe('LlamaRuntimeAdapter', () => {
     )).resolves.toBeUndefined();
     await expect(initLlamaContext({
       model: 'recurrent-model.gguf',
-      n_parallel: 8,
+      n_parallel: 2,
       state_cache_budget_mb: 64,
       state_cache_max_checkpoints: 4,
     })).resolves.toBeUndefined();
@@ -64,8 +64,24 @@ describe('LlamaRuntimeAdapter', () => {
       model: 'recurrent-model.gguf',
       state_cache_budget_mb: 0,
       state_cache_max_checkpoints: 8,
-      n_parallel: 1,
+      n_parallel: 2,
     }, undefined);
+  });
+
+  it('preserves an explicit single slot while enforcing the disabled cache profile', async () => {
+    const initLlamaMock = initLlama as jest.Mock;
+    initLlamaMock.mockClear();
+    await initLlamaContext({ model: 'model.gguf', n_parallel: 1,
+      state_cache_budget_mb: 128, state_cache_max_checkpoints: 1 });
+    expect(initLlamaMock).toHaveBeenCalledWith({ model: 'model.gguf', n_parallel: 1,
+      state_cache_budget_mb: 0, state_cache_max_checkpoints: 8 }, undefined);
+  });
+
+  it.each([0, -1, 3, 8, 1.5, NaN, Infinity])('rejects unsupported slot count %s before native initialization', async n_parallel => {
+    const initLlamaMock = initLlama as jest.Mock;
+    initLlamaMock.mockClear();
+    await expect(initLlamaContext({ model: 'model.gguf', n_parallel })).rejects.toThrow();
+    expect(initLlamaMock).not.toHaveBeenCalled();
   });
 
   it('normalizes formatted chat payloads from llama.rn', async () => {

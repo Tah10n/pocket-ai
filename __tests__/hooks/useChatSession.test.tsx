@@ -4,6 +4,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as RNFS from 'react-native-fs';
 import { useChatSession } from '../../src/hooks/useChatSession';
 import { llmEngineService } from '../../src/services/LLMEngineService';
+import { enableParallelContext, disableParallelContext } from '../../src/services/LlamaParallelRequests';
 import { getGenerationParametersForModel, getSettings } from '../../src/services/SettingsStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState } from '../../src/types/models';
 import { estimateLlmMessagesTokens, flushPendingChatPersistenceWrites, useChatStore } from '../../src/store/chatStore';
@@ -1051,6 +1052,35 @@ describe('useChatSession', () => {
     let rerank: jest.Mock;
     const identity = () => `context-generation:${contextEpoch}\u0001author/model-q4`;
 
+    function makeQueuedContext(role: 'embedding' | 'reranker') {
+      const verified = VERIFIED_RETRIEVAL_PROFILES.find(item => item.role === role)!;
+      let nextRequestId = 0;
+      return {
+        model: { nEmbd: verified.dimensions ?? 1024, metadata: { 'tokenizer.ggml.model': verified.ggufTokenizer } },
+        tokenize: jest.fn(async (text: string) => ({ tokens: Array.from(text, (_, index) => index + 10) })),
+        detokenize: jest.fn(async () => 'native formatted pair'),
+        parallel: {
+          enable: jest.fn(async () => undefined), configure: jest.fn(async () => undefined), disable: jest.fn(async () => undefined),
+          getStatus: jest.fn(async () => ({ n_parallel: 1, active_slots: 0, queued_requests: 0, requests: [] })),
+          // Admission returns a handle independently from the native result promise.
+          embedding: jest.fn(async (input: string, params: { embd_normalize: number }) => ({
+            requestId: ++nextRequestId, promise: Promise.resolve().then(() => embedding(input, params)),
+          })),
+          rerank: jest.fn(async (query: string, documents: string[], params: object) => ({
+            requestId: ++nextRequestId,
+            promise: Promise.resolve().then(() => rerank(query, documents, params))
+              .then((results: { index: number; score: number }[]) => results.map(item => ({ ...item, document: documents[item.index] }))),
+          })),
+        },
+      };
+    }
+
+    async function withQueuedContext<T>(context: ReturnType<typeof makeQueuedContext>, callback: (context: never) => Promise<T>): Promise<T> {
+      await enableParallelContext(context as never, { n_parallel: 1, n_batch: 512 });
+      try { return await callback(context as never); }
+      finally { await disableParallelContext(context as never); }
+    }
+
     function fixtureIndex(): PrivateDocumentIndex {
       const indexIdentity: DocumentIndexIdentity = {
         documentSha256: 'a'.repeat(64), extractionIdentity: 'fixture-owned-v1',
@@ -1114,12 +1144,7 @@ describe('useChatSession', () => {
       (llmEngineService.getPromptContextIdentity as jest.Mock).mockImplementation(identity);
       embedding = jest.fn(async () => ({ embedding: Array.from({ length: profile.dimensions! }, (_, index) => index === 0 ? 1 : 0) }));
       rerank = jest.fn(async (_query: string, documents: string[]) => documents.map((_document, index) => ({ index, score: index })));
-      const contexts = Object.fromEntries(['embedding', 'reranker'].map(role => {
-        const verified = VERIFIED_RETRIEVAL_PROFILES.find(item => item.role === role)!;
-        return [role, { model: { nEmbd: verified.dimensions ?? 1024, metadata: { 'tokenizer.ggml.model': verified.ggufTokenizer } },
-          tokenize: jest.fn(async (text: string) => ({ tokens: Array.from(text, (_, index) => index + 10) })),
-          detokenize: jest.fn(async () => 'native formatted pair'), embedding, rerank }];
-      }));
+      const contexts = { embedding: makeQueuedContext('embedding'), reranker: makeQueuedContext('reranker') };
       bindingSpy = jest.spyOn(documentRetrievalRuntime, 'resolveRetrievalRuntimeBinding').mockImplementation(role => ({
         modelId: role, fileIdentity: `fixture-${role}`, profile: VERIFIED_RETRIEVAL_PROFILES.find(item => item.role === role)!,
         request: { modelId: role }, isSelectionCurrent: () => true,
@@ -1130,7 +1155,7 @@ describe('useChatSession', () => {
         options.assertCurrent();
         const previousContextIdentity = identity();
         (llmEngineService.getState as jest.Mock).mockReturnValue({ status: EngineStatus.IDLE, activeModelId: null });
-        const result = await operation({ withContext: async (request, callback) => callback(contexts[request.modelId] as never) }, options.assertCurrent);
+        const result = await operation({ withContext: async (request, callback) => withQueuedContext(contexts[request.modelId as keyof typeof contexts], callback) }, options.assertCurrent);
         contextEpoch++;
         (llmEngineService.getState as jest.Mock).mockReturnValue({ status: EngineStatus.READY, activeModelId: 'author/model-q4' });
         options.onRestored?.({ previousContextIdentity, restoredContextIdentity: identity(), modelId: 'author/model-q4' });
@@ -1496,10 +1521,8 @@ describe('useChatSession', () => {
     it('requires confirmed restoration of A before a cache failure can continue generation', async () => {
       await seedOwnedIndexes();
       runtimeSpy.mockImplementationOnce(async (_bindings, options, operation) => {
-        const context = { model: { nEmbd: profile.dimensions, metadata: { 'tokenizer.ggml.model': profile.ggufTokenizer } },
-          tokenize: async (text: string) => ({ tokens: Array.from(text, (_, index) => index + 10) }), embedding, rerank,
-          detokenize: async () => 'native formatted pair' };
-        const result = await operation({ withContext: async (_request: unknown, callback: (context: never) => Promise<unknown>) => callback(context as never) }, options.assertCurrent);
+        const context = makeQueuedContext('embedding');
+        const result = await operation({ withContext: async (_request: unknown, callback: (context: never) => Promise<unknown>) => withQueuedContext(context, callback) }, options.assertCurrent);
         contextEpoch++;
         return result;
       });

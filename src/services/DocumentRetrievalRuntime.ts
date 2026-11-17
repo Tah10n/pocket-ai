@@ -14,6 +14,7 @@ import { isPrivateStorageWritable } from './storage';
 import { runWithIdleModelDownloads } from './ModelDownloadManager';
 import { llmEngineService, type AuxiliaryContextSequence, type AuxiliaryContextRequest } from './LLMEngineService';
 import { getLlamaBuildInfo } from './LlamaRuntimeAdapter';
+import { enableParallelContext, disableParallelContext, queuedEmbedding, queuedRerank } from './LlamaParallelRequests';
 import { DOCUMENT_RETRIEVAL_LIMITS as LIMITS, DocumentRetrievalError } from '../types/documentRetrieval';
 import { validateDocumentVector } from './DocumentIndexStore';
 import { isAndroidQaDocumentIndexObservationActive, recordAndroidQaDocumentIndexNativeOperation } from './AndroidQaDocumentIndexObservation';
@@ -148,9 +149,17 @@ export async function runDocumentRetrievalRuntime<T>(
             return await sequence.withContext(request, context => {
               // The engine's watchdog may reject its phase while this exact callback
               // still owns tokenizer/native work and opaque document resources.
-              const drain = Promise.resolve().then(() => {
+              const drain = Promise.resolve().then(async () => {
                 assertRuntimeCurrent();
-                return callback(context);
+                await enableParallelContext(context, { n_parallel: 1, n_batch: request.initParams.n_batch ?? 512 });
+                try {
+                  assertRuntimeCurrent();
+                  return await callback(context);
+                } finally {
+                  // Accepted jobs are awaited by the callback. A timeout outside
+                  // this raw owner cannot configure/disable or release it early.
+                  await disableParallelContext(context);
+                }
               });
               callbackDrains.add(drain);
               void drain.then(() => callbackDrains.delete(drain), () => callbackDrains.delete(drain));
@@ -194,8 +203,10 @@ export async function embedDocumentRetrievalText(
   check();
   try { getRetrievalInputTokenCount(profile, tokens.tokens.length); } catch { throw new DocumentRetrievalError('input_too_large'); }
   claimNativePooledEmbeddingDimension(context.model.nEmbd);
+  await enableParallelContext(context, { n_parallel: 1, n_batch: profile.contextTokens });
+  check();
   observe?.({ operation: 'embedding', phase: 'started', kind, inputCount: 1 });
-  const native = context.embedding(input, { embd_normalize: 2 });
+  const native = queuedEmbedding(context, input, { embd_normalize: 2 });
   recordAndroidQaDocumentIndexNativeOperation({ operation: 'embedding', phase: 'started', kind });
   const result = await native.finally(() => {
     observe?.({ operation: 'embedding', phase: 'settled', kind, inputCount: 1 });
@@ -203,6 +214,31 @@ export async function embedDocumentRetrievalText(
   });
   check();
   return validateDocumentVector(result.embedding, profile.dimensions);
+}
+
+export async function rerankDocumentRetrievalText(
+  context: LlamaContext, query: string, documents: string[], check: () => void,
+  observe?: RetrievalRuntimeOptions['onNativeOperation'],
+) {
+  check();
+  const snapshot = [...documents];
+  observe?.({ operation: 'rerank', phase: 'started', inputCount: snapshot.length });
+  recordAndroidQaDocumentIndexNativeOperation({ operation: 'rerank', phase: 'started' });
+  let indices: number[] | undefined;
+  try {
+    // rc.3 stores normalize but scores with raw rank-pooling data[0]. Keep that
+    // existing numerical profile explicitly; never add sigmoid/L2 in JS.
+    const result = await queuedRerank(context, query, snapshot, { normalize: -1 });
+    check();
+    if (result.length !== snapshot.length || result.some(item => item.document !== snapshot[item.index])) {
+      throw new DocumentRetrievalError('invalid_ranking');
+    }
+    indices = result.map(item => item.index);
+    return result;
+  } finally {
+    observe?.({ operation: 'rerank', phase: 'settled', inputCount: snapshot.length, ...(indices ? { indices } : {}) });
+    recordAndroidQaDocumentIndexNativeOperation({ operation: 'rerank', phase: 'settled' });
+  }
 }
 
 export async function validateDocumentRerankPair(

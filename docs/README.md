@@ -11,6 +11,7 @@ This folder contains the public maintainer-facing documentation for Pocket AI.
 - [`new-architecture.md`](./new-architecture.md): notes about React Native New Architecture, native-module expectations, and troubleshooting direction
 - [`ui-architecture.md`](./ui-architecture.md): conventions for UI structure, imports, layout, styling, and localization
 - [`local-tools.md`](./local-tools.md): per-chat local functions, permissions, bounded execution, history, output formats and current verification limits
+- [`parallel-requests.md`](./parallel-requests.md): official queued text/retrieval APIs, explicit two-answer comparison, per-request cancellation, native drain and memory profiles
 - [`local-tts.md`](./local-tts.md): experimental local speech preview/player, exact English/Mandarin profiles, native lifecycle, memory bounds and local-only content verification
 - [`model-parameters.md`](./model-parameters.md): how generation/load parameters are stored, snapshotted, and mapped to runtime engine settings
 - [`llama-rn-capabilities.md`](./llama-rn-capabilities.md): pinned runtime API inventory, application integration boundaries, compatibility exceptions, and staged verification criteria

@@ -49,11 +49,21 @@ function model(role: 'embedding' | 'reranker'): ModelMetadata {
 }
 function vector(index = 0): number[] { return Array.from({ length: 384 }, (_, position) => position === index ? 1 : 0); }
 function makeContext(role: 'embedding' | 'reranker') {
+  const embedding = jest.fn(async (_input: string, _params: { embd_normalize: number }) => ({ embedding: vector() }));
+  const rerank = jest.fn(async (_query: string, documents: string[], _params: object) => documents.map((_document, index) => ({ index, score: index })));
   return { model: { nEmbd: role === 'embedding' ? 384 : 1024, metadata: { 'tokenizer.ggml.model': 't5' } },
     tokenize: jest.fn(async (text: string) => ({ tokens: Array.from(text, (_, index) => index + 10) })),
-    embedding: jest.fn(async (_input: string, _params: { embd_normalize: number }) => ({ embedding: vector() })),
+    embedding,
     detokenize: jest.fn(async (_tokens: number[]) => 'native formatted pair'),
-    rerank: jest.fn(async (_query: string, documents: string[], _params: object) => documents.map((_document, index) => ({ index, score: index }))),
+    rerank,
+    parallel: {
+      enable: jest.fn(async () => undefined), disable: jest.fn(async () => undefined),
+      getStatus: jest.fn(async () => ({ n_parallel: 1, active_slots: 0, queued_requests: 0, requests: [] })),
+      embedding: jest.fn(async (input: string, params: { embd_normalize: number }) => ({ requestId: 1, promise: embedding(input, params) })),
+      rerank: jest.fn(async (query: string, documents: string[], params: object) => ({ requestId: 2,
+        promise: rerank(query, documents, params).then(results => results.map(item => ({ ...item, document: documents[item.index] }))),
+      })),
+    },
   };
 }
 function makeStorage() {
@@ -156,7 +166,10 @@ describe('DocumentRetrievalService production routing', () => {
       ['passage: Automobiles need regular maintenance.', { embd_normalize: 2 }],
       ['query: car servicing', { embd_normalize: 2 }],
     ]);
-    expect(contexts.reranker.rerank).toHaveBeenCalledWith('car servicing', expect.arrayContaining(source.result.chunks.map(chunk => chunk.text)), {});
+    expect(contexts.reranker.rerank).toHaveBeenCalledWith('car servicing', expect.arrayContaining(source.result.chunks.map(chunk => chunk.text)), { normalize: -1 });
+    expect(contexts.embedding.parallel.enable).toHaveBeenCalledWith({ n_parallel: 1, n_batch: 512 });
+    expect(contexts.embedding.parallel.embedding).toHaveBeenCalledTimes(3);
+    expect(contexts.reranker.parallel.rerank).toHaveBeenCalledTimes(1);
     expect(contexts.reranker.embedding).not.toHaveBeenCalled();
     expect(onRestored).toHaveBeenCalledTimes(1);
     expect(onRestored.mock.invocationCallOrder[0]).toBeLessThan(storage.facade.set.mock.invocationCallOrder[0]);
@@ -239,7 +252,7 @@ describe('DocumentRetrievalService production routing', () => {
     expect(result.actualMode).toBe('lexical+rerank');
     expect(sequenceEvents).toEqual(['detach:A', 'init:reranker', 'release:reranker', 'restore:A']);
     expect(contexts.embedding.embedding).not.toHaveBeenCalled(); expect(RNFS.hash).toHaveBeenCalledTimes(1);
-    expect(contexts.reranker.rerank).toHaveBeenCalledWith('water', expect.any(Array), {});
+    expect(contexts.reranker.rerank).toHaveBeenCalledWith('water', expect.any(Array), { normalize: -1 });
     expect(storage.data.size).toBe(0);
   });
 

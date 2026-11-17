@@ -27,7 +27,7 @@ import {
 } from '../utils/chatAttachments';
 import type { AppStorageFacade } from './storage';
 import { ADVANCED_GENERATION_KEYS, sanitizeAdvancedGenerationParameters } from '../utils/generationControls';
-import { sanitizeModelLoadParameters } from '../services/SettingsStore';
+import { sanitizeModelLoadParameters, type ModelLoadParameters } from '../services/SettingsStore';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import {
   createChatBranchBaseSemanticIdentity,
@@ -102,6 +102,15 @@ export interface ChatThreadRecord {
 type ChatProgressConfiguration = Pick<ChatMessage,
   'generationSnapshot' | 'loadProfileSnapshot' | 'structuredOutput' | 'toolRun'>;
 
+/** Historical provenance is never applied as settings or automatically replayed. */
+function sanitizeCapturedLoadProfile(value: unknown): ModelLoadParameters {
+  const input = value !== null && typeof value === 'object' ? value as Partial<ModelLoadParameters> : undefined;
+  const profile = sanitizeModelLoadParameters(input);
+  // Settings deliberately stay at one slot; history must retain the actual
+  // transient two-slot allocation used by an explicitly selected answer.
+  return input?.parallelSlots === 2 ? { ...profile, parallelSlots: 2 } : profile;
+}
+
 function hasOwnedProgressToolRun(value: Record<string, unknown>): boolean {
   if (value.toolRun == null) return true;
   const toolRun = sanitizeLocalToolRun(value.toolRun);
@@ -113,7 +122,7 @@ function hasOwnedProgressToolRun(value: Record<string, unknown>): boolean {
 function parseProgressConfiguration(value: Record<string, unknown>): ChatProgressConfiguration {
   const generationSnapshot = parseBranchParamsSnapshot(value.generationSnapshot) ?? undefined;
   const loadProfileSnapshot = value.loadProfileSnapshot == null ? undefined
-    : sanitizeModelLoadParameters(value.loadProfileSnapshot);
+    : sanitizeCapturedLoadProfile(value.loadProfileSnapshot);
   const output = value.structuredOutput;
   const mode = output && typeof output === 'object' && 'mode' in output ? output.mode : undefined;
   return {
@@ -961,7 +970,7 @@ export function sanitizeChatMessageForPersistence(message: ChatMessage, threadId
   const generationSnapshot = message.generationSnapshot === undefined ? undefined
     : parseBranchParamsSnapshot(message.generationSnapshot) ?? undefined;
   const loadProfileSnapshot = message.loadProfileSnapshot === undefined ? undefined
-    : sanitizeModelLoadParameters(message.loadProfileSnapshot);
+    : sanitizeCapturedLoadProfile(message.loadProfileSnapshot);
   const toolRun = message.role === 'assistant' && message.toolRun?.threadId === threadId
     ? sanitizeLocalToolRun(message.toolRun) : undefined;
   const rawOutput = message.structuredOutput;

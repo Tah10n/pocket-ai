@@ -1,4 +1,7 @@
 import type { ContextOperationRunner } from '../../src/services/LLMEngineService.runners';
+import { installQueuedCompletionContextFixture } from '../fixtures/queuedCompletionContext';
+
+beforeEach(installQueuedCompletionContextFixture);
 import type { LlamaContext } from 'llama.rn';
 import { runLocalToolCompletion } from '../../src/services/LocalToolRun';
 import { llmEngineService } from '../../src/services/LLMEngineService';

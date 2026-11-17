@@ -1,4 +1,7 @@
 import type { LlamaContext } from 'llama.rn';
+import { installQueuedCompletionContextFixture } from '../fixtures/queuedCompletionContext';
+
+beforeEach(installQueuedCompletionContextFixture);
 import { initLlama, releaseAllLlama } from 'llama.rn';
 import { AuxiliaryContextCleanupError, llmEngineService, type AuxiliaryContextRequest, type AuxiliaryFailureStage } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';

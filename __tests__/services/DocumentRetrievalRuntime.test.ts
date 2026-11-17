@@ -42,9 +42,15 @@ function model(role: 'embedding' | 'reranker'): ModelMetadata {
 }
 function vector(index = 0): number[] { return Array.from({ length: 384 }, (_, position) => position === index ? 1 : 0); }
 function context() {
+  const embedding = jest.fn(async (_input: string, _params: object = {}) => ({ embedding: vector() }));
   return { model: { nEmbd: 384, metadata: { 'tokenizer.ggml.model': 't5' } },
     tokenize: jest.fn(async (text: string) => ({ tokens: Array.from(text, (_, index) => index + 10) })),
-    embedding: jest.fn(async () => ({ embedding: vector() })),
+    embedding,
+    parallel: {
+      enable: jest.fn(async () => undefined), disable: jest.fn(async () => undefined),
+      getStatus: jest.fn(async () => ({ n_parallel: 1, active_slots: 0, queued_requests: 0, requests: [] })),
+      embedding: jest.fn(async (input: string, params: object) => ({ requestId: 1, promise: embedding(input, params) })),
+    },
     detokenize: jest.fn(async () => 'retokenized pair'),
   };
 }
@@ -192,7 +198,7 @@ describe('DocumentRetrievalRuntime production adapter', () => {
                 check();
                 if (stage === 'tokenizer') await ctx.tokenize('chunk');
                 else if (stage === 'detokenizer') await ctx.detokenize();
-                else if (stage === 'embedding') await ctx.embedding();
+                else if (stage === 'embedding') await ctx.embedding('chunk');
                 else await enumerateChunks();
                 check();
               }
@@ -262,7 +268,7 @@ describe('DocumentRetrievalRuntime production adapter', () => {
         if (cancelled) throw new DocumentRetrievalError('cancelled');
       });
       const rejection = expect(work).rejects.toMatchObject({ code: 'cancelled' });
-      await Promise.resolve(); await Promise.resolve();
+      for (let i = 0; i < 15; i++) await Promise.resolve();
       expect(cancelled).toBe(true); expect(observation.counters.nativeStarted).toBe(1);
       expect(observation.counters.nativeSettled).toBe(0);
       settle({ embedding: vector() }); await rejection;

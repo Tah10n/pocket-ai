@@ -1,4 +1,16 @@
 {
+  "comparison": {
+    "title": "Compare two answers", "description": "Two variants of the latest question, using the same model and history. Up to 256 answer tokens and 128 reasoning tokens each. Your history changes only when you choose an answer.",
+    "compatibility": "Requires a supported CPU Llama, Qwen2 or Qwen3 text model, enough memory, and speculative decoding off. Tools, retrieval, images/audio and speech use normal chat.",
+    "noTurn": "Send a text question first, then compare two answers to it.",
+    "textOnly": "Comparison needs a text-only conversation with tools and hybrid retrieval off. Normal chat still supports these features.",
+    "variant": "Answer {{number}}", "parameters": "Temperature {{temperature}} · seed {{seed}}",
+    "waiting": "Waiting for answer…", "stop": "Stop", "choose": "Use this answer",
+    "stopVariant": "Stop answer {{number}}", "chooseVariant": "Use answer {{number}}",
+    "drainHint": "You can choose after both requests settle and the model is restored. Closing keeps your previous history.",
+    "validation": { "pending": "Output validation pending", "unavailable": "No complete validated output", "valid": "Output constraints validated", "invalid": "Output does not satisfy its constraints", "incomplete": "Constrained output is incomplete", "not_applicable": "Grammar enforced by native generation; no separate grammar validator" },
+    "states": { "admitting": "Preparing", "queued": "Queued", "running": "Generating", "cancelling": "Stopping; waiting for native completion", "completed": "Complete", "cancelled": "Stopped", "error": "Failed" }
+  },
   "advancedLoad": {
     "title": "Advanced load profile", "sections": { "cache": "Key / value cache", "memory": "RoPE and memory", "draft": "Speculative draft" },
     "default": "Default", "on": "On", "off": "Off", "reload": "Reload required.",

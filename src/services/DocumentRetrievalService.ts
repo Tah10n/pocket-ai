@@ -12,7 +12,7 @@ import type { ChatDocumentTextProcessorResult, ChatDocumentChunkPage } from './C
 import { documentIndexStore, type PrivateDocumentIndex, type DocumentIndexRow } from './DocumentIndexStore';
 import {
   embedDocumentRetrievalText, getDocumentRetrievalRuntimeIdentity, resolveRetrievalRuntimeBinding,
-  runDocumentRetrievalRuntime, validateDocumentRerankPair, type RetrievalRuntimeOptions,
+  runDocumentRetrievalRuntime, validateDocumentRerankPair, rerankDocumentRetrievalText, type RetrievalRuntimeOptions,
 } from './DocumentRetrievalRuntime';
 import {
   distributeDocumentCandidates, fuseDocumentCandidates, mapDocumentRerankResults,
@@ -23,7 +23,6 @@ import { normalizeSha256Digest } from '../utils/sha256';
 import { isPrivateStorageWritable, PrivateStorageUnavailableError } from './storage';
 import { assertOwnedRetrievalDocument, getOwnedRetrievalDocuments } from './DocumentRetrievalOwnership';
 import { getDocumentRetrievalStatus, updateDocumentRetrievalStatus } from './DocumentRetrievalStatus';
-import { recordAndroidQaDocumentIndexNativeOperation } from './AndroidQaDocumentIndexObservation';
 
 export type DocumentRetrievalEntry = {
   attachment: Extract<ChatAttachment, { kind: 'document' }>;
@@ -294,20 +293,8 @@ export async function retrieveDocumentCandidates(
           const shortlist = distributeDocumentCandidates(candidates, LIMITS.rerankCandidates);
           for (const candidate of shortlist) await validateDocumentRerankPair(context, reranker.profile, query, candidate.chunk.text, checkNative);
           checkNative();
-          // No native parallel API and no Promise.all: one bounded serial cross-encoder call.
-          const operation = context.rerank(query, shortlist.map(candidate => candidate.chunk.text), {});
-          options.onNativeOperation?.({ operation: 'rerank', phase: 'started', inputCount: shortlist.length });
-          recordAndroidQaDocumentIndexNativeOperation({ operation: 'rerank', phase: 'started' });
-          let settled = false;
-          const result = await operation.then(value => {
-            settled = true;
-            options.onNativeOperation?.({ operation: 'rerank', phase: 'settled', inputCount: shortlist.length, indices: value.map(item => item.index) });
-            recordAndroidQaDocumentIndexNativeOperation({ operation: 'rerank', phase: 'settled' });
-            return value;
-          }).finally(() => { if (!settled) {
-            options.onNativeOperation?.({ operation: 'rerank', phase: 'settled', inputCount: shortlist.length });
-            recordAndroidQaDocumentIndexNativeOperation({ operation: 'rerank', phase: 'settled' });
-          } });
+          const result = await rerankDocumentRetrievalText(context, query,
+            shortlist.map(candidate => candidate.chunk.text), checkNative, options.onNativeOperation);
           checkNative();
           const ranked = mapDocumentRerankResults(shortlist, result);
           const retained = new Set(ranked.map(candidate => `${candidate.attachmentId}:${candidate.chunk.index}`));
